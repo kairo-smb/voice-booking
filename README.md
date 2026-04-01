@@ -1,33 +1,35 @@
 # Virtual Assistant — Voice Booking System
 
-AI-powered real-time voice assistant for appointment booking, built on Databricks and OpenAI Realtime API.
+AI-powered real-time voice assistant for appointment booking, built with FastAPI, Neon PostgreSQL, and OpenAI Realtime API.
 
 ## Architecture
 
 ```
 Customer (browser/WebRTC) ←→ OpenAI Realtime API (voice + LLM)
                                     ↕ function calls
-                              Voice Gateway (proxy)
-                                    ↕ HTTP
-                              Booking Engine (REST)
+                              Voice Gateway (Fly.io)
+                                    ↕ HTTPS
+                              Booking Engine (AWS Lambda)
                                     ↕ SQL
-                              Delta Tables (mircom_test.virtual_assistant)
+                              Neon PostgreSQL (serverless)
 ```
 
-**Booking Engine** — Stateless REST API for shops, staff, services, customers, availability, and appointments. Backed by Delta tables on Databricks SQL warehouse.
+**Booking Engine** — Stateless REST API for shops, staff, services, customers, availability, and appointments. Backed by Neon PostgreSQL via asyncpg. Deployed as an AWS Lambda container with Mangum ASGI adapter and Function URL (~300ms cold start, $0 idle).
 
-**Voice Gateway** — Generates ephemeral OpenAI Realtime API tokens with session config (tools, voice, VAD) and proxies function calls from the browser to the Booking Engine.
+**Voice Gateway** — Generates ephemeral OpenAI Realtime API tokens with session config (tools, voice, VAD) and proxies function calls from the browser to the Booking Engine. Deployed on Fly.io with auto-stop machines ($0 idle).
 
 **OpenAI Realtime API** — Handles STT, LLM reasoning, TTS, and voice activity detection natively via WebRTC. The browser connects directly to OpenAI for audio streaming.
 
 ## Project Structure
 
 ```
-booking_engine/          # REST API (FastAPI + Delta tables)
+booking_engine/          # REST API (FastAPI + Neon PostgreSQL)
 ├── api/routes/          # Shops, customers, services, availability, appointments
-├── db/                  # Databricks SQL connector + queries
-├── config.py            # Settings from env vars
-└── app.yaml             # Databricks App config
+├── db/                  # asyncpg connection pool + queries
+│   └── sql/             # Schema DDL + seed data
+├── config.py            # Settings (DATABASE_URL, pool sizes)
+├── requirements.txt     # Service dependencies
+└── Dockerfile           # AWS Lambda container image
 
 voice_gateway/           # Realtime API gateway (FastAPI)
 ├── api/routes/
@@ -36,10 +38,16 @@ voice_gateway/           # Realtime API gateway (FastAPI)
 │   └── booking_client.py # Booking Engine HTTP client
 ├── static/
 │   └── index.html       # WebRTC phone-call UI
-├── config.py            # Settings from env vars
-└── app.yaml             # Databricks App config
+├── config.py            # Settings (BOOKING_ENGINE_URL, OPENAI_KEY)
+├── requirements.txt     # Service dependencies
+└── Dockerfile           # Fly.io container image
 
-docs/superpowers/        # Design spec + implementation plan
+lambda_handler.py        # Mangum entry point for AWS Lambda
+fly.toml                 # Fly.io app configuration
+scripts/
+├── setup_neon.sh        # Initialize Neon database (schema + seed)
+├── deploy-booking.sh    # Deploy Booking Engine to AWS Lambda
+└── deploy-voice.sh      # Deploy Voice Gateway to Fly.io
 ```
 
 ## Quickstart
@@ -50,47 +58,67 @@ docs/superpowers/        # Design spec + implementation plan
 pip install -r requirements.txt
 ```
 
-### 2. Configure environment
+### 2. Set up the database
 
 ```bash
-export BOOKING_ENGINE_URL=https://your-booking-engine.databricksapps.com
-export OPENAI_KEY=sk-proj-...
+export DATABASE_URL="postgresql://user:pass@host/db?sslmode=require"
+./scripts/setup_neon.sh
 ```
-
-Or create a `.env` file with these values.
 
 ### 3. Run locally
 
 ```bash
-# Booking Engine (requires Databricks SQL warehouse access)
+# Booking Engine
 uvicorn booking_engine.api.app:create_app --factory --port 8000
 
-# Voice Gateway
-uvicorn voice_gateway.api.app:create_app --factory --port 8001
+# Voice Gateway (in a separate terminal)
+BOOKING_ENGINE_URL=http://localhost:8000 OPENAI_KEY=sk-... \
+  uvicorn voice_gateway.api.app:create_app --factory --port 8001
 ```
 
 Open http://localhost:8001 to access the phone-call UI.
 
-### 4. Test function calls
+### 4. Run tests
 
 ```bash
-# Check availability
-curl -s -X POST http://localhost:8001/api/v1/realtime/action \
-  -H "Content-Type: application/json" \
-  -d '{"shop_id": "a0000000-0000-0000-0000-000000000001", "function_name": "check_availability", "arguments": {"services": ["Taglio donna"], "date": "2026-03-28"}}' | jq .
+# Unit + integration tests (no database needed)
+pytest tests/ --ignore=tests/live_db -v
+
+# Live database tests (requires DATABASE_URL)
+DATABASE_URL=postgresql://... pytest tests/live_db/ -v
 ```
 
 ## Deployment
 
-Both services deploy as Databricks Apps on `e2-demo-field-eng`. See `booking_engine/app.yaml` and `voice_gateway/app.yaml`.
+### Booking Engine → AWS Lambda
 
-- **Booking Engine**: `https://virtual-assistant-booking-1444828305810485.aws.databricksapps.com`
-- **Voice Gateway**: `https://virtual-assistant-gateway-1444828305810485.aws.databricksapps.com`
-- **Database**: `mircom_test.virtual_assistant` (9 Delta tables) via SQL warehouse `03560442e95cb440`
+```bash
+AWS_REGION=eu-central-1 DATABASE_URL=postgresql://... ./scripts/deploy-booking.sh
+```
+
+Creates ECR repo, IAM role, Lambda function, and public Function URL on first run. Subsequent runs just update the container image.
+
+### Voice Gateway → Fly.io
+
+```bash
+fly auth login
+./scripts/deploy-voice.sh
+fly secrets set OPENAI_KEY=sk-... BOOKING_ENGINE_URL=https://xxx.lambda-url.eu-central-1.on.aws/
+```
+
+### Cost
+
+| Component | Idle | Active |
+|-----------|------|--------|
+| Lambda (Booking Engine) | $0 | ~$0-1/mo |
+| Fly.io (Voice Gateway) | $0 | $0 (free tier) |
+| Neon PostgreSQL | $0 | $0 (free tier) |
+| **Total infrastructure** | **$0** | **$0-1/mo** |
+
+Plus usage-based: Twilio (per-minute), OpenAI Realtime (per-minute).
 
 ## Design Docs
 
 - [Design Spec](docs/superpowers/specs/2026-03-25-hair-salon-voice-assistant-design.md)
-- [Implementation Plan](docs/superpowers/plans/2026-03-25-hair-salon-voice-assistant.md)
-
-> Note: Design docs describe the original Lakebase/two-LLM architecture. The current implementation uses Delta tables and OpenAI Realtime API instead.
+- [Cloud Deployment Plan](docs/superpowers/plans/2026-04-01-cloud-deployment.md)
+- [Neon Migration Plan](docs/superpowers/plans/2026-04-01-neon-migration.md)

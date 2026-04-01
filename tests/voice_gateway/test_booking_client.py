@@ -27,7 +27,7 @@ def _resp(status: int, json_data=None) -> httpx.Response:
 
 @pytest.fixture
 async def bc():
-    client = BookingClient(base_url=BASE, auth_token="test-token")
+    client = BookingClient(base_url=BASE)
     async with client:
         yield client
 

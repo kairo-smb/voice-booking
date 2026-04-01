@@ -7,9 +7,9 @@ pydantic-settings>=2.0.0
 # HTTP client
 httpx>=0.27.0
 
-# Databricks
-databricks-sdk>=0.81.0
-databricks-sql-connector>=3.0.0
+# PostgreSQL (Neon)
+asyncpg>=0.29.0
+mangum>=1.11.0
 
 # Utilities
 python-multipart>=0.0.9

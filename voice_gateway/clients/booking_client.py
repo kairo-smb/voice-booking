@@ -10,18 +10,14 @@ import httpx
 class BookingClient:
     """Thin async wrapper around the Booking Engine REST API."""
 
-    def __init__(self, base_url: str = "http://localhost:8000", auth_token: str = ""):
+    def __init__(self, base_url: str = "http://localhost:8000"):
         self._base = base_url.rstrip("/")
         if not self._base.startswith("http"):
             self._base = f"https://{self._base}"
-        self._auth_token = auth_token
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self):
-        headers = {}
-        if self._auth_token:
-            headers["Authorization"] = f"Bearer {self._auth_token}"
-        self._client = httpx.AsyncClient(timeout=30.0, headers=headers)
+        self._client = httpx.AsyncClient(timeout=30.0)
         return self
 
     async def __aexit__(self, *args):

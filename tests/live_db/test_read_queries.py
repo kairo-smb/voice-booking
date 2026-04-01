@@ -1,7 +1,7 @@
 """Live DB tests — read-only queries against seed data.
 
-These tests verify query functions work correctly against the real Databricks
-SQL warehouse with the actual seed data from 02_seed_data.sql.
+These tests verify query functions work correctly against the real Neon PostgreSQL
+database with the actual seed data from 02_seed_data.sql.
 """
 from __future__ import annotations
 

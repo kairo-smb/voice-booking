@@ -1,12 +1,11 @@
 """Live DB tests — write operations with cleanup.
 
-Tests that create, modify, and delete records in the real Databricks SQL
-warehouse. All test data is cleaned up after each test.
+Tests that create, modify, and delete records in the real Neon PostgreSQL
+database. All test data is cleaned up after each test.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -71,7 +70,7 @@ class TestCreateAppointmentLive:
         start = _next_weekday_10am()
         appt = await create_appointment(
             shop_id=SHOP_ID,
-            customer_id=UUID(customer["id"]),
+            customer_id=customer["id"],
             staff_id=STAFF_MIRCO,
             service_ids=[SVC_TAGLIO_UOMO],  # 30 min
             start_time=start,
@@ -91,7 +90,7 @@ class TestCreateAppointmentLive:
 
         # First booking succeeds
         appt1 = await create_appointment(
-            SHOP_ID, UUID(customer["id"]), STAFF_MIRCO,
+            SHOP_ID, customer["id"], STAFF_MIRCO,
             [SVC_TAGLIO_UOMO], start,
         )
         cleanup_appointment_ids.append(appt1["id"])
@@ -99,7 +98,7 @@ class TestCreateAppointmentLive:
         # Same slot, same staff — should conflict
         with pytest.raises(SlotConflictError):
             appt2 = await create_appointment(
-                SHOP_ID, UUID(customer["id"]), STAFF_MIRCO,
+                SHOP_ID, customer["id"], STAFF_MIRCO,
                 [SVC_TAGLIO_UOMO], start,
             )
             # If somehow created, clean up
@@ -115,7 +114,7 @@ class TestCreateAppointmentLive:
 
         # Taglio uomo (30 min) + Piega (30 min) = 60 min total
         appt = await create_appointment(
-            SHOP_ID, UUID(customer["id"]), STAFF_MIRCO,
+            SHOP_ID, customer["id"], STAFF_MIRCO,
             [SVC_TAGLIO_UOMO, SVC_PIEGA], start,
         )
         assert appt is not None
@@ -141,12 +140,12 @@ class TestCancelAppointmentLive:
 
         start = _next_weekday_10am() + timedelta(hours=6)
         appt = await create_appointment(
-            SHOP_ID, UUID(customer["id"]), STAFF_MIRCO,
+            SHOP_ID, customer["id"], STAFF_MIRCO,
             [SVC_TAGLIO_UOMO], start,
         )
         cleanup_appointment_ids.append(appt["id"])
 
-        cancelled = await cancel_appointment(SHOP_ID, UUID(appt["id"]))
+        cancelled = await cancel_appointment(SHOP_ID, appt["id"])
         assert cancelled is not None
         assert cancelled["status"] == "cancelled"
 
@@ -158,15 +157,15 @@ class TestCancelAppointmentLive:
 
         start = _next_weekday_10am() + timedelta(days=1)
         appt = await create_appointment(
-            SHOP_ID, UUID(customer["id"]), STAFF_MIRCO,
+            SHOP_ID, customer["id"], STAFF_MIRCO,
             [SVC_TAGLIO_UOMO], start,
         )
         cleanup_appointment_ids.append(appt["id"])
 
         # Cancel once
-        await cancel_appointment(SHOP_ID, UUID(appt["id"]))
+        await cancel_appointment(SHOP_ID, appt["id"])
         # Try to cancel again — should return None
-        result = await cancel_appointment(SHOP_ID, UUID(appt["id"]))
+        result = await cancel_appointment(SHOP_ID, appt["id"])
         assert result is None
 
 
@@ -179,14 +178,14 @@ class TestRescheduleAppointmentLive:
 
         start = _next_weekday_10am() + timedelta(days=2)
         appt = await create_appointment(
-            SHOP_ID, UUID(customer["id"]), STAFF_MIRCO,
+            SHOP_ID, customer["id"], STAFF_MIRCO,
             [SVC_TAGLIO_UOMO], start,
         )
         cleanup_appointment_ids.append(appt["id"])
 
         new_start = start + timedelta(hours=3)
         rescheduled = await reschedule_appointment(
-            SHOP_ID, UUID(appt["id"]), new_start,
+            SHOP_ID, appt["id"], new_start,
         )
         assert rescheduled is not None
         assert rescheduled["status"] == "scheduled"
@@ -204,12 +203,12 @@ class TestListAppointmentsLive:
 
         start = _next_weekday_10am() + timedelta(days=3)
         appt = await create_appointment(
-            SHOP_ID, UUID(customer["id"]), STAFF_MIRCO,
+            SHOP_ID, customer["id"], STAFF_MIRCO,
             [SVC_TAGLIO_UOMO], start,
         )
         cleanup_appointment_ids.append(appt["id"])
 
-        appts = await list_appointments(SHOP_ID, UUID(customer["id"]))
+        appts = await list_appointments(SHOP_ID, customer["id"])
         assert len(appts) >= 1
         found = [a for a in appts if a["id"] == appt["id"]]
         assert len(found) == 1

@@ -1,137 +1,102 @@
--- Virtual Assistant Booking Engine — Delta Tables Schema
--- Target: mircom_test.virtual_assistant on Databricks SQL
--- Run each statement individually in a Databricks SQL notebook or editor.
+-- Virtual Assistant Booking Engine — PostgreSQL Schema
+-- Target: Neon PostgreSQL
+-- Run once to create schema. Idempotent (IF NOT EXISTS).
 
--- ============================================================
--- 0. Catalog & Schema
--- ============================================================
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-CREATE CATALOG IF NOT EXISTS mircom_test;
-
-CREATE SCHEMA IF NOT EXISTS mircom_test.virtual_assistant;
-
--- Grant access (adjust principal as needed)
-GRANT USE CATALOG ON CATALOG mircom_test TO `account users`;
-GRANT USE SCHEMA, SELECT, MODIFY ON SCHEMA mircom_test.virtual_assistant TO `account users`;
-
--- ============================================================
--- 1. Shops
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS mircom_test.virtual_assistant.shops (
-  id                  STRING        NOT NULL,
-  name                STRING        NOT NULL,
-  phone_number        STRING,
-  address             STRING,
-  welcome_message     STRING,
-  tone_instructions   STRING,
-  personality         STRING,
-  special_instructions STRING,
-  is_active           BOOLEAN       NOT NULL DEFAULT true,
-  created_at          TIMESTAMP     NOT NULL DEFAULT current_timestamp()
+CREATE TABLE IF NOT EXISTS shops (
+  id                  UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                TEXT            NOT NULL,
+  phone_number        TEXT,
+  address             TEXT,
+  welcome_message     TEXT,
+  tone_instructions   TEXT,
+  personality         TEXT,
+  special_instructions TEXT,
+  is_active           BOOLEAN         NOT NULL DEFAULT true,
+  created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
 
--- ============================================================
--- 2. Staff
--- ============================================================
+CREATE TABLE IF NOT EXISTS staff (
+  id            UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+  shop_id       UUID            NOT NULL REFERENCES shops(id),
+  full_name     TEXT            NOT NULL,
+  role          TEXT,
+  phone_number  TEXT,
+  email         TEXT,
+  bio           TEXT,
+  is_active     BOOLEAN         NOT NULL DEFAULT true,
+  created_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_staff_shop ON staff(shop_id);
 
-CREATE TABLE IF NOT EXISTS mircom_test.virtual_assistant.staff (
-  id          STRING        NOT NULL,
-  shop_id     STRING        NOT NULL,
-  full_name   STRING        NOT NULL,
-  role        STRING,
-  phone_number STRING,
-  email       STRING,
-  bio         STRING,
-  is_active   BOOLEAN       NOT NULL DEFAULT true,
-  created_at  TIMESTAMP     NOT NULL DEFAULT current_timestamp()
+CREATE TABLE IF NOT EXISTS services (
+  id                UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+  shop_id           UUID            NOT NULL REFERENCES shops(id),
+  service_name      TEXT            NOT NULL,
+  description       TEXT,
+  duration_minutes  INTEGER         NOT NULL,
+  price_eur         NUMERIC(8,2),
+  category          TEXT,
+  is_active         BOOLEAN         NOT NULL DEFAULT true,
+  created_at        TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_services_shop ON services(shop_id);
+
+CREATE TABLE IF NOT EXISTS staff_services (
+  staff_id    UUID    NOT NULL REFERENCES staff(id),
+  service_id  UUID    NOT NULL REFERENCES services(id),
+  PRIMARY KEY (staff_id, service_id)
 );
 
--- ============================================================
--- 3. Services
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS mircom_test.virtual_assistant.services (
-  id                STRING        NOT NULL,
-  shop_id           STRING        NOT NULL,
-  service_name      STRING        NOT NULL,
-  description       STRING,
-  duration_minutes  INT           NOT NULL,
-  price_eur         DECIMAL(8,2),
-  category          STRING,
-  is_active         BOOLEAN       NOT NULL DEFAULT true,
-  created_at        TIMESTAMP     NOT NULL DEFAULT current_timestamp()
+CREATE TABLE IF NOT EXISTS staff_schedules (
+  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  staff_id      UUID        NOT NULL REFERENCES staff(id),
+  day_of_week   INTEGER     NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+  start_time    TEXT        NOT NULL,
+  end_time      TEXT        NOT NULL,
+  UNIQUE (staff_id, day_of_week)
 );
 
--- ============================================================
--- 4. Staff ↔ Services (M2M)
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS mircom_test.virtual_assistant.staff_services (
-  staff_id    STRING  NOT NULL,
-  service_id  STRING  NOT NULL
+CREATE TABLE IF NOT EXISTS customers (
+  id                  UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+  shop_id             UUID            NOT NULL REFERENCES shops(id),
+  full_name           TEXT            NOT NULL,
+  email               TEXT,
+  preferred_staff_id  UUID            REFERENCES staff(id),
+  notes               TEXT,
+  created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_customers_shop ON customers(shop_id);
 
--- ============================================================
--- 5. Staff Schedules
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS mircom_test.virtual_assistant.staff_schedules (
-  id            STRING  NOT NULL,
-  staff_id      STRING  NOT NULL,
-  day_of_week   INT     NOT NULL,   -- 0=Monday .. 6=Sunday (ISO)
-  start_time    STRING  NOT NULL,   -- HH:MM format
-  end_time      STRING  NOT NULL    -- HH:MM format
+CREATE TABLE IF NOT EXISTS phone_contacts (
+  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  phone_number  TEXT        NOT NULL,
+  customer_id   UUID        NOT NULL REFERENCES customers(id),
+  last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (phone_number, customer_id)
 );
+CREATE INDEX IF NOT EXISTS idx_phone_contacts_phone ON phone_contacts(phone_number);
 
--- ============================================================
--- 6. Customers
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS mircom_test.virtual_assistant.customers (
-  id                  STRING        NOT NULL,
-  shop_id             STRING        NOT NULL,
-  full_name           STRING        NOT NULL,
-  email               STRING,
-  preferred_staff_id  STRING,
-  notes               STRING,
-  created_at          TIMESTAMP     NOT NULL DEFAULT current_timestamp()
+CREATE TABLE IF NOT EXISTS appointments (
+  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  shop_id       UUID        NOT NULL REFERENCES shops(id),
+  customer_id   UUID        NOT NULL REFERENCES customers(id),
+  staff_id      UUID        NOT NULL REFERENCES staff(id),
+  start_time    TIMESTAMPTZ NOT NULL,
+  end_time      TIMESTAMPTZ NOT NULL,
+  status        TEXT        NOT NULL DEFAULT 'scheduled',
+  notes         TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_appointments_staff_time ON appointments(staff_id, start_time, end_time);
+CREATE INDEX IF NOT EXISTS idx_appointments_shop ON appointments(shop_id);
+CREATE INDEX IF NOT EXISTS idx_appointments_customer ON appointments(customer_id);
 
--- ============================================================
--- 7. Phone Contacts (caller ID linking)
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS mircom_test.virtual_assistant.phone_contacts (
-  id            STRING      NOT NULL,
-  phone_number  STRING      NOT NULL,
-  customer_id   STRING      NOT NULL,
-  last_seen_at  TIMESTAMP   NOT NULL DEFAULT current_timestamp()
-);
-
--- ============================================================
--- 8. Appointments
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS mircom_test.virtual_assistant.appointments (
-  id            STRING      NOT NULL,
-  shop_id       STRING      NOT NULL,
-  customer_id   STRING      NOT NULL,
-  staff_id      STRING      NOT NULL,
-  start_time    TIMESTAMP   NOT NULL,
-  end_time      TIMESTAMP   NOT NULL,
-  status        STRING      NOT NULL DEFAULT 'scheduled',
-  notes         STRING,
-  created_at    TIMESTAMP   NOT NULL DEFAULT current_timestamp()
-);
-
--- ============================================================
--- 9. Appointment ↔ Services (junction)
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS mircom_test.virtual_assistant.appointment_services (
-  appointment_id    STRING        NOT NULL,
-  service_id        STRING        NOT NULL,
-  duration_minutes  INT           NOT NULL,
-  price_eur         DECIMAL(8,2)
+CREATE TABLE IF NOT EXISTS appointment_services (
+  appointment_id  UUID        NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+  service_id      UUID        NOT NULL REFERENCES services(id),
+  duration_minutes INTEGER    NOT NULL,
+  price_eur       NUMERIC(8,2),
+  PRIMARY KEY (appointment_id, service_id)
 );

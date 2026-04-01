@@ -1,7 +1,7 @@
 """Live DB tests — availability slot generation against real schedules.
 
 Tests the get_available_slots function with real staff schedules, services,
-and existing appointments in Databricks.
+and existing appointments in Neon PostgreSQL.
 """
 from __future__ import annotations
 

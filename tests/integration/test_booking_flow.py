@@ -1,7 +1,7 @@
 """Integration tests — complete booking workflows via the REST API.
 
 These tests exercise multiple routes in sequence, mocking only the DB query
-layer to simulate end-to-end API behaviour without Databricks.
+layer to simulate end-to-end API behaviour without a real database.
 """
 from __future__ import annotations
 
@@ -255,11 +255,9 @@ class TestHealthEndpoint:
             patch("booking_engine.api.app.close_connection", new_callable=AsyncMock),
         ):
             mock_settings = MockSettings.return_value
-            mock_settings.databricks_token = "fake"
-            mock_settings.databricks_server_hostname = "host"
-            mock_settings.databricks_http_path = "/sql"
-            mock_settings.databricks_catalog = "cat"
-            mock_settings.databricks_schema = "sch"
+            mock_settings.database_url = "postgresql://fake"
+            mock_settings.pool_min_size = 2
+            mock_settings.pool_max_size = 10
 
             app = create_app()
             with TestClient(app) as tc:

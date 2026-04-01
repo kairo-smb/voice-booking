@@ -1,12 +1,31 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
-.DS_Store
-.pytest_cache/
-.vscode/
 *.egg-info/
 dist/
 build/
+.venv/
+
+# Environment
 .env
-voice_gateway/app.yml
-voice_gateway/app.yaml
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Test
+.pytest_cache/
+
+# Databricks (legacy)
+.databricks/
+
+# Docker
+*.tar
+
+# Fly.io
+.fly/
