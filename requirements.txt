@@ -9,7 +9,7 @@ httpx>=0.27.0
 
 # PostgreSQL (Neon)
 asyncpg>=0.29.0
-mangum>=1.11.0
+mangum>=0.17
 
 # Utilities
 python-multipart>=0.0.9
