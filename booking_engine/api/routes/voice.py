@@ -85,3 +85,14 @@ async def get_call_detail(shop_id: UUID, call_id: UUID):
         events=[CallEvent(**e) for e in detail["events"]],
     )
     return _wrap(payload.model_dump(mode="json"))
+
+
+@router.patch("/shops/{shop_id}/voice/calls/{call_id}/link-customer")
+async def link_customer(shop_id: UUID, call_id: UUID, body: LinkCustomerRequest):
+    updated = await vq.link_customer(shop_id, call_id, body.customer_id)
+    if not updated:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "call_not_found", "message": f"Call {call_id} not found"},
+        )
+    return _wrap(CallSummary(**updated).model_dump(mode="json"))

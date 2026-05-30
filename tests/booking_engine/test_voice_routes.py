@@ -148,3 +148,42 @@ def test_get_call_detail_ok():
         )
         assert r.status_code == 200
         assert len(r.json()["data"]["transcript"]) == 1
+
+
+def test_link_customer_validates_body():
+    client = TestClient(_app())
+    r = client.patch(
+        f"/api/v1/shops/{uuid4()}/voice/calls/{uuid4()}/link-customer",
+        headers=HEADERS, json={"customer_id": "not-a-uuid"},
+    )
+    assert r.status_code == 422
+
+
+def test_link_customer_ok():
+    updated = {
+        "id": uuid4(), "caller_number": "+39",
+        "customer_id": uuid4(), "customer_match": "existing",
+        "started_at": datetime.now(timezone.utc),
+        "ended_at": None, "duration_seconds": None,
+        "outcome": None, "summary": None, "appointment_id": None,
+    }
+    with patch.object(voice.vq, "link_customer",
+                      AsyncMock(return_value=updated)):
+        client = TestClient(_app())
+        r = client.patch(
+            f"/api/v1/shops/{uuid4()}/voice/calls/{uuid4()}/link-customer",
+            headers=HEADERS,
+            json={"customer_id": str(uuid4())},
+        )
+        assert r.status_code == 200
+        assert r.json()["data"]["customer_match"] == "existing"
+
+
+def test_link_customer_404():
+    with patch.object(voice.vq, "link_customer", AsyncMock(return_value=None)):
+        client = TestClient(_app())
+        r = client.patch(
+            f"/api/v1/shops/{uuid4()}/voice/calls/{uuid4()}/link-customer",
+            headers=HEADERS, json={"customer_id": str(uuid4())},
+        )
+        assert r.status_code == 404
