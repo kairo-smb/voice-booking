@@ -18,25 +18,25 @@ def _settings(secret: str):
 @pytest.mark.asyncio
 async def test_missing_header_rejected():
     with pytest.raises(HTTPException) as exc:
-        await require_control_plane_token.__wrapped__(_Req(None), _settings("s"))
+        await require_control_plane_token(_Req(None), _settings("s"))
     assert exc.value.status_code == 401
 
 
 @pytest.mark.asyncio
 async def test_wrong_token_rejected():
     with pytest.raises(HTTPException) as exc:
-        await require_control_plane_token.__wrapped__(_Req("Bearer nope"), _settings("s"))
+        await require_control_plane_token(_Req("Bearer nope"), _settings("s"))
     assert exc.value.status_code == 401
 
 
 @pytest.mark.asyncio
 async def test_correct_token_accepted():
-    result = await require_control_plane_token.__wrapped__(_Req("Bearer good"), _settings("good"))
+    result = await require_control_plane_token(_Req("Bearer good"), _settings("good"))
     assert result is True
 
 
 @pytest.mark.asyncio
 async def test_empty_server_secret_rejects_all():
     with pytest.raises(HTTPException) as exc:
-        await require_control_plane_token.__wrapped__(_Req("Bearer anything"), _settings(""))
+        await require_control_plane_token(_Req("Bearer anything"), _settings(""))
     assert exc.value.status_code == 503

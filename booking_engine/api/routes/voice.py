@@ -5,10 +5,10 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from booking_engine.api.deps import _get_settings
+from booking_engine.api.deps import require_control_plane_token
 from booking_engine.api.voice_models import (
     VoiceConfigResponse,
     VoiceConfigUpdateRequest,
@@ -19,28 +19,12 @@ from booking_engine.api.voice_models import (
     LinkCustomerRequest,
     VoiceAnalyticsResponse,
 )
-from booking_engine.config import Settings
 from booking_engine.db import voice_queries as vq
-
-
-async def _require_auth(
-    request: Request,
-    settings: Settings = Depends(_get_settings),
-) -> bool:
-    """Bearer-token guard for the control-plane. Mirrors deps.require_control_plane_token
-    but avoids functools.wraps so FastAPI's dep-override mechanism works in tests."""
-    if not settings.control_plane_secret:
-        raise HTTPException(status_code=503, detail="control plane disabled")
-    header = request.headers.get("authorization", "")
-    expected = f"Bearer {settings.control_plane_secret}"
-    if header != expected:
-        raise HTTPException(status_code=401, detail="invalid token")
-    return True
 
 
 router = APIRouter(
     tags=["voice"],
-    dependencies=[Depends(_require_auth)],
+    dependencies=[Depends(require_control_plane_token)],
 )
 
 
