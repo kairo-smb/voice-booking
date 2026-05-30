@@ -62,3 +62,76 @@ async def test_update_voice_config_empty_payload_is_noop(seeded_shop):
     before = await vq.get_voice_config(seeded_shop)
     after = await vq.update_voice_config(seeded_shop, {})
     assert before == after
+
+
+async def test_list_calls_empty(seeded_shop):
+    result = await vq.list_calls(seeded_shop, filters={}, cursor=None, limit=20)
+    assert result == {"items": [], "next_cursor": None}
+
+
+async def _insert_call(shop_id: UUID, *, started: datetime, outcome: str | None = None,
+                       caller: str = "+39000", customer_match: str = "unmatched") -> UUID:
+    cid = uuid4()
+    await execute_void(
+        "INSERT INTO voice_agent.calls "
+        "(id, shop_id, caller_number, customer_match, started_at, ended_at, "
+        " duration_seconds, outcome, summary) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        cid, shop_id, caller, customer_match, started,
+        started + timedelta(minutes=2), 120, outcome,
+        f"summary for {cid}",
+    )
+    return cid
+
+
+async def test_list_calls_pagination_and_filter(seeded_shop):
+    now = datetime.now(timezone.utc)
+    ids = []
+    for i in range(5):
+        ids.append(await _insert_call(seeded_shop, started=now - timedelta(hours=i),
+                                       outcome="booked" if i % 2 == 0 else "abandoned"))
+    page1 = await vq.list_calls(seeded_shop, filters={"outcome": ["booked"]},
+                                cursor=None, limit=2)
+    assert len(page1["items"]) == 2
+    assert all(c["outcome"] == "booked" for c in page1["items"])
+
+
+async def test_get_call_detail_includes_transcript_and_events(seeded_shop):
+    now = datetime.now(timezone.utc)
+    call_id = await _insert_call(seeded_shop, started=now, outcome="booked")
+    await execute_void(
+        "INSERT INTO voice_agent.call_transcripts (call_id, turn_index, role, text, at) "
+        "VALUES ($1, 0, 'assistant', 'Ciao', $2), ($1, 1, 'caller', 'Ciao!', $2)",
+        call_id, now,
+    )
+    await execute_void(
+        "INSERT INTO voice_agent.call_events (call_id, type, payload) "
+        "VALUES ($1, 'function_call', '{\"name\": \"book\"}'::jsonb)",
+        call_id,
+    )
+    detail = await vq.get_call_detail(seeded_shop, call_id)
+    assert detail["call"]["id"] == call_id
+    assert len(detail["transcript"]) == 2
+    assert detail["transcript"][0]["role"] == "assistant"
+    assert len(detail["events"]) == 1
+
+
+async def test_get_call_detail_wrong_shop_returns_none(seeded_shop):
+    now = datetime.now(timezone.utc)
+    call_id = await _insert_call(seeded_shop, started=now)
+    other_shop = uuid4()
+    assert await vq.get_call_detail(other_shop, call_id) is None
+
+
+async def test_link_customer_to_call(seeded_shop):
+    now = datetime.now(timezone.utc)
+    call_id = await _insert_call(seeded_shop, started=now, customer_match="unmatched")
+    cust = uuid4()
+    await execute_void(
+        "INSERT INTO business_app_core.customers (id, shop_id, full_name) "
+        "VALUES ($1, $2, 'Mario')",
+        cust, seeded_shop,
+    )
+    updated = await vq.link_customer(seeded_shop, call_id, cust)
+    assert updated["customer_id"] == cust
+    assert updated["customer_match"] == "existing"
