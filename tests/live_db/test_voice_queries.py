@@ -135,3 +135,24 @@ async def test_link_customer_to_call(seeded_shop):
     updated = await vq.link_customer(seeded_shop, call_id, cust)
     assert updated["customer_id"] == cust
     assert updated["customer_match"] == "existing"
+
+
+async def test_get_analytics_empty(seeded_shop):
+    a = await vq.get_analytics(seeded_shop, from_dt=None, to_dt=None)
+    assert a["volume"]["total"] == 0
+    assert a["outcomes"]["conversion_rate"] == 0.0
+    assert a["demand"]["after_hours_pct"] == 0.0
+
+
+async def test_get_analytics_counts(seeded_shop):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    await _insert_call(seeded_shop, started=now, outcome="booked")
+    await _insert_call(seeded_shop, started=now - timedelta(hours=1), outcome="abandoned")
+    await _insert_call(seeded_shop, started=now - timedelta(hours=2), outcome="failed")
+    a = await vq.get_analytics(seeded_shop, from_dt=None, to_dt=None)
+    assert a["volume"]["total"] == 3
+    assert a["outcomes"]["booked"] == 1
+    assert a["outcomes"]["abandoned"] == 1
+    assert a["outcomes"]["failed"] == 1
+    assert a["outcomes"]["conversion_rate"] == pytest.approx(0.5)
+    assert a["volume"]["failure_rate"] == pytest.approx(1 / 3)
