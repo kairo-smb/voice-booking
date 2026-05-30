@@ -29,3 +29,4 @@ build/
 
 # Fly.io
 .fly/
+.worktrees/
