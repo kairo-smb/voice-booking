@@ -510,3 +510,44 @@ The current infrastructure runs at $0/month idle. The Control Plane should aim f
 - [ ] Scope all queries by `shop_id`
 - [ ] Handle `TIMESTAMPTZ` correctly (store UTC, display in shop timezone)
 - [ ] Test concurrent booking scenarios
+
+---
+
+## Voice Agent Control Plane (Schema: `voice_agent`)
+
+The voice service persists every inbound call into a dedicated schema. The Control Plane reads this data via HTTP — never via direct SQL.
+
+### Ownership
+
+| Concern | Execution Layer | Control Plane |
+|---------|:-:|:-:|
+| `voice_agent.calls` table | Write (gateway) + Read (control endpoints) | None directly (HTTP only) |
+| `voice_agent.call_transcripts` | Write (gateway) + Read (control endpoints) | None directly (HTTP only) |
+| `voice_agent.call_events` | Write (gateway) + Read (control endpoints) | None directly (HTTP only) |
+| `shops.voice`, `shops.language` (new columns) | Read (gateway) | Read + Write via control-plane API |
+| Existing voice prompt fields on `shops` | Read (gateway) | Read + Write via control-plane API |
+
+### Schema
+
+See `booking_engine/db/sql/03_voice_agent_schema.sql` for the authoritative DDL. Cross-schema FKs reference `business_app_core.shops`, `business_app_core.customers`, `business_app_core.appointments` (the live Neon DB keeps base tables in the `business_app_core` schema).
+
+### New REST endpoints
+
+All require `Authorization: Bearer ${CONTROL_PLANE_SECRET}`.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET`   | `/api/v1/shops/{shop_id}/voice/config` | Read voice-agent config |
+| `PATCH` | `/api/v1/shops/{shop_id}/voice/config` | Update config (any subset of fields) |
+| `GET`   | `/api/v1/shops/{shop_id}/voice/calls` | Paginated list with filters |
+| `GET`   | `/api/v1/shops/{shop_id}/voice/calls/{call_id}` | Full call detail (summary + transcript + events) |
+| `PATCH` | `/api/v1/shops/{shop_id}/voice/calls/{call_id}/link-customer` | Manually link an unmatched call to a customer |
+| `GET`   | `/api/v1/shops/{shop_id}/voice/analytics` | Volume + outcomes + demand aggregates |
+
+### Outcome enum
+
+`booked | rescheduled | cancelled | info | abandoned | escalated | failed`
+
+### Customer match enum
+
+`existing | created | unmatched | ambiguous`
