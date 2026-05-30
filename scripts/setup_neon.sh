@@ -12,5 +12,8 @@ psql "$DB_URL" -f booking_engine/db/sql/01_schema.sql
 echo "Seeding data..."
 psql "$DB_URL" -f booking_engine/db/sql/02_seed_data.sql
 
+echo "Applying voice_agent schema..."
+psql "$DB_URL" -f booking_engine/db/sql/03_voice_agent_schema.sql
+
 echo "Done. Verifying..."
 psql "$DB_URL" -c "SELECT name FROM shops;"
