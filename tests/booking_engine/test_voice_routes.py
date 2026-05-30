@@ -77,3 +77,74 @@ def test_patch_config_updates_and_returns_config():
         assert r.status_code == 200
         assert r.json()["data"]["voice"] == "echo"
         upd.assert_awaited_once()
+
+
+def test_list_calls_filters_passed_through():
+    fake = {"items": [], "next_cursor": None}
+    with patch.object(voice.vq, "list_calls",
+                      AsyncMock(return_value=fake)) as lc:
+        client = TestClient(_app())
+        shop = uuid4()
+        r = client.get(
+            f"/api/v1/shops/{shop}/voice/calls"
+            f"?outcome=booked&outcome=abandoned&q=mario&limit=5",
+            headers=HEADERS,
+        )
+        assert r.status_code == 200
+        body = r.json()["data"]
+        assert body == []
+        kwargs = lc.await_args.kwargs
+        assert kwargs["filters"]["outcome"] == ["booked", "abandoned"]
+        assert kwargs["filters"]["q"] == "mario"
+        assert kwargs["limit"] == 5
+
+
+def test_list_calls_returns_items_and_cursor():
+    item = {
+        "id": uuid4(), "caller_number": "+39", "customer_id": None,
+        "customer_match": "unmatched",
+        "started_at": datetime.now(timezone.utc),
+        "ended_at": None, "duration_seconds": None,
+        "outcome": None, "summary": None, "appointment_id": None,
+    }
+    with patch.object(voice.vq, "list_calls",
+                      AsyncMock(return_value={"items": [item], "next_cursor": "abc"})):
+        client = TestClient(_app())
+        r = client.get(f"/api/v1/shops/{uuid4()}/voice/calls", headers=HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body["data"]) == 1
+        assert body["next_cursor"] == "abc"
+
+
+def test_get_call_detail_404():
+    with patch.object(voice.vq, "get_call_detail", AsyncMock(return_value=None)):
+        client = TestClient(_app())
+        r = client.get(
+            f"/api/v1/shops/{uuid4()}/voice/calls/{uuid4()}",
+            headers=HEADERS,
+        )
+        assert r.status_code == 404
+
+
+def test_get_call_detail_ok():
+    call = {
+        "id": uuid4(), "caller_number": "+39", "customer_id": None,
+        "customer_match": "existing",
+        "started_at": datetime.now(timezone.utc),
+        "ended_at": None, "duration_seconds": None,
+        "outcome": "booked", "summary": "ok", "appointment_id": None,
+    }
+    turn = {"turn_index": 0, "role": "assistant", "text": "Ciao",
+            "at": datetime.now(timezone.utc)}
+    ev = {"at": datetime.now(timezone.utc), "type": "function_call", "payload": {}}
+    with patch.object(voice.vq, "get_call_detail", AsyncMock(return_value={
+        "call": call, "transcript": [turn], "events": [ev],
+    })):
+        client = TestClient(_app())
+        r = client.get(
+            f"/api/v1/shops/{uuid4()}/voice/calls/{uuid4()}",
+            headers=HEADERS,
+        )
+        assert r.status_code == 200
+        assert len(r.json()["data"]["transcript"]) == 1
