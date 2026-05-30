@@ -96,3 +96,13 @@ async def link_customer(shop_id: UUID, call_id: UUID, body: LinkCustomerRequest)
             content={"error": "call_not_found", "message": f"Call {call_id} not found"},
         )
     return _wrap(CallSummary(**updated).model_dump(mode="json"))
+
+
+@router.get("/shops/{shop_id}/voice/analytics")
+async def get_analytics(
+    shop_id: UUID,
+    from_: Annotated[datetime | None, Query(alias="from")] = None,
+    to: Annotated[datetime | None, Query()] = None,
+):
+    result = await vq.get_analytics(shop_id, from_dt=from_, to_dt=to)
+    return _wrap(VoiceAnalyticsResponse(**result).model_dump(mode="json"))

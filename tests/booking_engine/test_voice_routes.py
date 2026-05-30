@@ -187,3 +187,28 @@ def test_link_customer_404():
             headers=HEADERS, json={"customer_id": str(uuid4())},
         )
         assert r.status_code == 404
+
+
+def test_get_analytics_ok():
+    fake = {
+        "volume": {"total": 3, "by_day": [], "avg_duration_sec": 120,
+                   "failure_rate": 0.0},
+        "outcomes": {"booked": 2, "rescheduled": 0, "cancelled": 0,
+                     "info": 0, "abandoned": 1, "escalated": 0, "failed": 0,
+                     "conversion_rate": 2/3},
+        "demand": {"top_services": [], "top_staff": [],
+                   "by_hour": [], "by_dow": [], "after_hours_pct": 0.0},
+    }
+    with patch.object(voice.vq, "get_analytics",
+                      AsyncMock(return_value=fake)) as ga:
+        client = TestClient(_app())
+        r = client.get(
+            f"/api/v1/shops/{uuid4()}/voice/analytics"
+            f"?from=2026-05-01T00:00:00Z&to=2026-05-31T23:59:59Z",
+            headers=HEADERS,
+        )
+        assert r.status_code == 200
+        body = r.json()["data"]
+        assert body["volume"]["total"] == 3
+        assert body["outcomes"]["booked"] == 2
+        ga.assert_awaited_once()
