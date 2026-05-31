@@ -40,6 +40,8 @@ async def get_realtime_token(request: Request, shop_id: str = Query(...)):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     services_str = ", ".join(s.get("service_name", "") for s in services)
     staff_str = ", ".join(s.get("full_name", "") for s in staff)
+    voice = shop.get("voice") or "alloy"
+    language = shop.get("language") or "it"
 
     instructions = (
         f"{shop.get('personality', '')}\n"
@@ -48,7 +50,7 @@ async def get_realtime_token(request: Request, shop_id: str = Query(...)):
         f"Servizi disponibili: {services_str}\n"
         f"Staff disponibile: {staff_str}\n\n"
         "REGOLE:\n"
-        "- Rispondi SEMPRE in italiano\n"
+        f"- Rispondi SEMPRE in {language}\n"
         "- Sii breve e naturale, come una vera telefonata\n"
         "- Tono allegro, solare e accogliente\n"
         "- NON usare emoji o simboli\n"
@@ -130,7 +132,7 @@ async def get_realtime_token(request: Request, shop_id: str = Query(...)):
             headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
             json={
                 "model": OPENAI_MODEL,
-                "voice": "coral",
+                "voice": voice,
                 "instructions": instructions,
                 "tools": tools,
                 "turn_detection": {

@@ -22,6 +22,8 @@ class ShopResponse(BaseModel):
     tone_instructions: str | None = None
     personality: str | None = None
     special_instructions: str | None = None
+    voice: str = "alloy"
+    language: str = "it"
     is_active: bool
 
 
