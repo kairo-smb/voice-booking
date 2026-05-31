@@ -24,10 +24,18 @@ async def lifespan(app: FastAPI):
     logger.info("Booking client connected, OpenAI Realtime %s",
                 "enabled" if settings.openai_key else "disabled")
 
+    from voice_gateway.db import init_pool, close_pool
+    if settings.database_url:
+        await init_pool(settings.database_url)
+        logger.info("Voice gateway DB pool ready")
+
+    app.state.call_sessions = {}
+
     yield
 
     if hasattr(app.state, "booking_client") and app.state.booking_client:
         await app.state.booking_client.__aexit__(None, None, None)
+    await close_pool()
 
 
 def create_app() -> FastAPI:
