@@ -21,6 +21,7 @@ async def lifespan(app: FastAPI):
     await bc.__aenter__()
     app.state.booking_client = bc
     app.state._openai_key = settings.openai_key
+    app.state._classifier_model = settings.openai_classifier_model
     logger.info("Booking client connected, OpenAI Realtime %s",
                 "enabled" if settings.openai_key else "disabled")
 

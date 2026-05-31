@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 import httpx
@@ -15,6 +16,8 @@ router = APIRouter(prefix="/api/v1/realtime", tags=["realtime"])
 
 OPENAI_REALTIME_URL = "https://api.openai.com/v1/realtime/sessions"
 OPENAI_MODEL = "gpt-4o-mini-realtime-preview-2024-12-17"
+
+logger = logging.getLogger(__name__)
 
 
 @router.post("/token")
@@ -143,10 +146,24 @@ async def get_realtime_token(request: Request, shop_id: str = Query(...)):
         resp.raise_for_status()
         data = resp.json()
 
+    # Create and persist a CallSession for this call
+    from voice_gateway.call_lifecycle import CallSession
+    caller_number = request.headers.get("x-caller-number") or "+0000"
+    twilio_sid = request.headers.get("x-twilio-call-sid")
+    sess = CallSession(shop_id=UUID(shop_id), caller_number=caller_number, twilio_call_sid=twilio_sid)
+    try:
+        await sess.start()
+    except Exception as e:
+        logger.warning("CallSession.start failed: %s", e)
+        sess.id = None
+    if sess.id is not None:
+        request.app.state.call_sessions[str(sess.id)] = sess
+
     return {
         "token": data["client_secret"]["value"],
         "expires_at": data["client_secret"]["expires_at"],
         "model": data.get("model"),
+        "call_id": str(sess.id) if sess.id else None,
         "shop": {
             "id": shop_id,
             "name": shop.get("name"),
@@ -161,16 +178,26 @@ class FunctionCallRequest(BaseModel):
     shop_id: str
     function_name: str
     arguments: dict
+    call_id: str | None = None
 
 
 @router.post("/action")
 async def execute_action(body: FunctionCallRequest, request: Request):
     """Proxy function calls from the Realtime API to the booking engine."""
-    import logging
-    logger = logging.getLogger(__name__)
     app = request.app
     booking = app.state.booking_client
     logger.info("Action: %s args=%s shop=%s", body.function_name, body.arguments, body.shop_id)
+
+    # Resolve session if call_id provided
+    sess = None
+    if body.call_id:
+        sess = request.app.state.call_sessions.get(body.call_id)
+    if sess:
+        try:
+            await sess.log_event("function_call",
+                                 {"name": body.function_name, "args": body.arguments})
+        except Exception as e:
+            logger.warning("log_event(function_call) failed: %s", e)
 
     try:
         if body.function_name == "check_availability":
@@ -185,6 +212,11 @@ async def execute_action(body: FunctionCallRequest, request: Request):
                         svc_ids.append(svc["id"])
                         break
             if not svc_ids:
+                if sess:
+                    try:
+                        await sess.log_event("function_result", {"name": body.function_name, "slots": []})
+                    except Exception as e:
+                        logger.warning("log_event(function_result) failed: %s", e)
                 return {"slots": [], "message": "Servizio non trovato"}
 
             date_str = body.arguments.get("date")
@@ -205,17 +237,38 @@ async def execute_action(body: FunctionCallRequest, request: Request):
                         break
 
             result = await booking.check_availability(body.shop_id, svc_ids, start, end, staff_id)
+            if sess:
+                try:
+                    await sess.log_event("function_result", {"name": body.function_name})
+                except Exception as e:
+                    logger.warning("log_event(function_result) failed: %s", e)
             return result
 
         elif body.function_name == "get_services":
             services = await booking.get_services(body.shop_id)
+            if sess:
+                try:
+                    await sess.log_event("function_result", {"name": body.function_name})
+                except Exception as e:
+                    logger.warning("log_event(function_result) failed: %s", e)
             return {"services": [{"name": s.get("service_name"), "duration": s.get("duration_minutes"), "price": float(s.get("price_eur", 0))} for s in services]}
 
         elif body.function_name == "create_customer":
             name = body.arguments.get("name", "")
             phone = body.arguments.get("phone")
-            customer = await booking.create_customer(body.shop_id, name, phone)
-            return {"created": True, "name": name, "id": customer.get("id") if customer else None}
+            new_customer = await booking.create_customer(body.shop_id, name, phone)
+            if sess and new_customer and new_customer.get("id"):
+                try:
+                    await sess.attach_new_customer(UUID(new_customer["id"]))
+                    await sess.log_event("function_result", {"name": "create_customer", "customer_id": new_customer["id"]})
+                except Exception as e:
+                    logger.warning("session hook for create_customer failed: %s", e)
+            elif sess:
+                try:
+                    await sess.log_event("function_result", {"name": body.function_name})
+                except Exception as e:
+                    logger.warning("log_event(function_result) failed: %s", e)
+            return {"created": True, "name": name, "id": new_customer.get("id") if new_customer else None}
 
         elif body.function_name == "book_appointment":
             # Resolve customer, service, staff by name
@@ -237,6 +290,11 @@ async def execute_action(body: FunctionCallRequest, request: Request):
                 customer_id = new_cust.get("id") if new_cust else None
 
             if not customer_id:
+                if sess:
+                    try:
+                        await sess.log_event("function_result", {"name": body.function_name, "error": "customer not found or created"})
+                    except Exception as e:
+                        logger.warning("log_event(function_result) failed: %s", e)
                 return {"error": "Impossibile trovare o creare il cliente"}
 
             # Resolve service
@@ -247,6 +305,11 @@ async def execute_action(body: FunctionCallRequest, request: Request):
                     service_id = svc["id"]
                     break
             if not service_id:
+                if sess:
+                    try:
+                        await sess.log_event("function_result", {"name": body.function_name, "error": f"service not found: {service_name}"})
+                    except Exception as e:
+                        logger.warning("log_event(function_result) failed: %s", e)
                 return {"error": f"Servizio '{service_name}' non trovato"}
 
             # Resolve staff
@@ -257,6 +320,11 @@ async def execute_action(body: FunctionCallRequest, request: Request):
                     staff_id = s["id"]
                     break
             if not staff_id:
+                if sess:
+                    try:
+                        await sess.log_event("function_result", {"name": body.function_name, "error": f"staff not found: {staff_name_arg}"})
+                    except Exception as e:
+                        logger.warning("log_event(function_result) failed: %s", e)
                 return {"error": f"Staff '{staff_name_arg}' non trovato"}
 
             # Build start_time
@@ -270,7 +338,18 @@ async def execute_action(body: FunctionCallRequest, request: Request):
                 start_time=start_time,
             )
             if appt:
+                if sess:
+                    try:
+                        sess.set_appointment(UUID(appt["id"]))
+                        await sess.log_event("function_result", {"name": "book_appointment", "appointment_id": appt["id"]})
+                    except Exception as e:
+                        logger.warning("session hook for book_appointment failed: %s", e)
                 return {"booked": True, "appointment_id": appt.get("id"), "start_time": start_time, "staff": staff_name_arg, "service": service_name}
+            if sess:
+                try:
+                    await sess.log_event("function_result", {"name": body.function_name, "error": "booking failed"})
+                except Exception as e:
+                    logger.warning("log_event(function_result) failed: %s", e)
             return {"error": "Errore nella prenotazione"}
 
         elif body.function_name == "list_appointments":
@@ -278,13 +357,78 @@ async def execute_action(body: FunctionCallRequest, request: Request):
             # Find customer by name
             customers = await booking.find_customer_by_name_phone(body.shop_id, customer_name, "")
             if not customers:
+                if sess:
+                    try:
+                        await sess.log_event("function_result", {"name": body.function_name, "appointments": []})
+                    except Exception as e:
+                        logger.warning("log_event(function_result) failed: %s", e)
                 return {"appointments": [], "message": "Cliente non trovato"}
             customer_id = customers[0].get("id")
             appts = await booking.list_appointments(body.shop_id, customer_id)
+            if sess:
+                try:
+                    await sess.log_event("function_result", {"name": body.function_name})
+                except Exception as e:
+                    logger.warning("log_event(function_result) failed: %s", e)
             return {"appointments": [{"id": a.get("id"), "start_time": str(a.get("start_time")), "status": a.get("status"), "staff": a.get("staff_name")} for a in appts]}
 
         else:
+            if sess:
+                try:
+                    await sess.log_event("function_result", {"name": body.function_name, "error": "unknown function"})
+                except Exception as e:
+                    logger.warning("log_event(function_result) failed: %s", e)
             return {"error": f"Unknown function: {body.function_name}"}
 
+    except Exception as exc:
+        if sess:
+            try:
+                await sess.log_event("error", {"name": body.function_name, "detail": str(exc)})
+            except Exception as e:
+                logger.warning("log_event(error) failed: %s", e)
+        return {"error": str(exc)}
+
+
+class TurnIn(BaseModel):
+    call_id: str
+    role: str          # 'caller' | 'assistant' | 'system'
+    text: str
+
+
+@router.post("/transcript")
+async def post_transcript(request: Request, body: TurnIn):
+    sess = request.app.state.call_sessions.get(body.call_id)
+    if not sess:
+        return {"ok": False}
+    try:
+        await sess.append_turn(role=body.role, text=body.text,
+                               at=datetime.now(timezone.utc))
     except Exception as e:
-        return {"error": str(e)}
+        logger.warning("append_turn failed: %s", e)
+        return {"ok": False}
+    return {"ok": True}
+
+
+class EndIn(BaseModel):
+    call_id: str
+
+
+@router.post("/end")
+async def end_call(request: Request, body: EndIn):
+    from voice_gateway.clients.openai_classifier import classify_call
+    sess = request.app.state.call_sessions.pop(body.call_id, None)
+    if not sess:
+        return {"ok": False}
+    try:
+        await sess.finalize(
+            classifier=classify_call,
+            api_key=request.app.state._openai_key,
+            model=getattr(request.app.state, "_classifier_model", "gpt-4o-mini"),
+        )
+    except Exception as e:
+        try:
+            await sess.log_event("error", {"phase": "finalize", "detail": str(e)})
+        except Exception:
+            pass
+        return {"ok": False, "error": str(e)}
+    return {"ok": True}
