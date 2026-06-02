@@ -48,6 +48,9 @@ async def init_connection(settings: Settings) -> None:
         dsn=settings.database_url,
         min_size=settings.pool_min_size,
         max_size=settings.pool_max_size,
+        # Live Neon DB keeps base tables in business_app_core; set search_path
+        # so unqualified table references in queries.py resolve correctly.
+        server_settings={"search_path": "business_app_core, public"},
     )
     logger.info("PostgreSQL connection pool initialized (min=%d, max=%d)",
                 settings.pool_min_size, settings.pool_max_size)
