@@ -14,8 +14,8 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/v1/realtime", tags=["realtime"])
 
-OPENAI_REALTIME_URL = "https://api.openai.com/v1/realtime/sessions"
-OPENAI_MODEL = "gpt-4o-mini-realtime-preview-2024-12-17"
+OPENAI_REALTIME_URL = "https://api.openai.com/v1/realtime/client_secrets"
+OPENAI_MODEL = "gpt-realtime"
 
 logger = logging.getLogger(__name__)
 
@@ -125,24 +125,33 @@ async def get_realtime_token(request: Request, shop_id: str = Query(...)):
         },
     ]
 
-    # Request ephemeral token from OpenAI
+    # Request ephemeral client_secret from OpenAI Realtime API.
+    # Endpoint and body shape per https://platform.openai.com/docs/api-reference/realtime
+    # (replaces the legacy /v1/realtime/sessions endpoint deprecated in 2025).
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(
             OPENAI_REALTIME_URL,
             headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
             json={
-                "model": OPENAI_MODEL,
-                "voice": voice,
-                "instructions": instructions,
-                "tools": tools,
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 800,
-                    "create_response": True,
+                "session": {
+                    "type": "realtime",
+                    "model": OPENAI_MODEL,
+                    "instructions": instructions,
+                    "tools": tools,
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "gpt-4o-mini-transcribe"},
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "threshold": 0.5,
+                                "prefix_padding_ms": 300,
+                                "silence_duration_ms": 800,
+                                "create_response": True,
+                            },
+                        },
+                        "output": {"voice": voice},
+                    },
                 },
-                "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
             },
         )
         resp.raise_for_status()
@@ -161,10 +170,13 @@ async def get_realtime_token(request: Request, shop_id: str = Query(...)):
     if sess.id is not None:
         request.app.state.call_sessions[str(sess.id)] = sess
 
+    # The new /client_secrets endpoint returns {value, expires_at} at top level;
+    # tolerate both shapes for forward/backward compat with the legacy /sessions endpoint.
+    _secret_obj = data.get("client_secret", data)
     return {
-        "token": data["client_secret"]["value"],
-        "expires_at": data["client_secret"]["expires_at"],
-        "model": data.get("model"),
+        "token": _secret_obj.get("value") or data.get("value"),
+        "expires_at": _secret_obj.get("expires_at") or data.get("expires_at"),
+        "model": data.get("model") or OPENAI_MODEL,
         "call_id": str(sess.id) if sess.id else None,
         "shop": {
             "id": shop_id,
