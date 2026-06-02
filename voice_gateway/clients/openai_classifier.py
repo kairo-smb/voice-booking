@@ -51,7 +51,7 @@ async def classify_call(
 
     body = {
         "model": model,
-        "input": [
+        "messages": [
             {"role": "system", "content": _PROMPT},
             {"role": "user", "content": transcript_text or "(nessuna trascrizione disponibile)"},
         ],
@@ -59,7 +59,7 @@ async def classify_call(
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
-            "https://api.openai.com/v1/responses",
+            "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             json=body,
@@ -70,7 +70,7 @@ async def classify_call(
                     "summary": ""}
         data = resp.json()
     try:
-        text = data["output"][0]["content"][0]["text"]
+        text = data["choices"][0]["message"]["content"]
         parsed = json.loads(text)
     except Exception:
         return {"outcome": "failed", "outcome_reason": "classification_invalid", "summary": ""}

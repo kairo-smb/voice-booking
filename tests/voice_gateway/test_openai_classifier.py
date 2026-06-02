@@ -33,12 +33,11 @@ def _patch_httpx_client(post_return):
 
 @pytest.mark.asyncio
 async def test_classify_call_parses_json_response():
-    body = {"output": [{"content": [{"type": "output_text",
-        "text": json.dumps({
-            "outcome": "booked",
-            "outcome_reason": "Cliente ha prenotato taglio venerdi",
-            "summary": "Maria ha prenotato taglio venerdi alle 10:00",
-        })}]}]}
+    body = {"choices": [{"message": {"content": json.dumps({
+        "outcome": "booked",
+        "outcome_reason": "Cliente ha prenotato taglio venerdi",
+        "summary": "Maria ha prenotato taglio venerdi alle 10:00",
+    })}}]}
     with _patch_httpx_client(_make_resp(200, body)):
         result = await classify_call(
             api_key="sk-test", model="gpt-4o-mini",
@@ -52,7 +51,7 @@ async def test_classify_call_parses_json_response():
 
 @pytest.mark.asyncio
 async def test_classify_call_invalid_response_returns_failed():
-    body = {"output": [{"content": [{"type": "output_text", "text": "not json"}]}]}
+    body = {"choices": [{"message": {"content": "not json"}}]}
     with _patch_httpx_client(_make_resp(200, body)):
         result = await classify_call(
             api_key="sk-test", model="gpt-4o-mini",
@@ -64,11 +63,10 @@ async def test_classify_call_invalid_response_returns_failed():
 
 @pytest.mark.asyncio
 async def test_classify_call_unknown_outcome_normalized_to_failed():
-    body = {"output": [{"content": [{"type": "output_text",
-        "text": json.dumps({
-            "outcome": "definitely-not-real",
-            "outcome_reason": "x", "summary": "x",
-        })}]}]}
+    body = {"choices": [{"message": {"content": json.dumps({
+        "outcome": "definitely-not-real",
+        "outcome_reason": "x", "summary": "x",
+    })}}]}
     with _patch_httpx_client(_make_resp(200, body)):
         result = await classify_call(
             api_key="sk-test", model="gpt-4o-mini",
