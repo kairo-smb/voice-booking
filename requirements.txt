@@ -13,6 +13,8 @@ mangum>=0.17
 
 # Utilities
 python-multipart>=0.0.9
+phonenumbers>=8.13
+twilio>=9.0
 
 # Testing
 pytest>=8.0.0
