@@ -30,6 +30,14 @@ def create_app() -> FastAPI:
     app.include_router(appointments.router, prefix="/api/v1")
     from booking_engine.api.routes import voice  # noqa: WPS433
     app.include_router(voice.router, prefix="/api/v1")
+    from booking_engine.api.routes import voice_telephony
+    app.include_router(voice_telephony.router, prefix="/api/v1")
+    from booking_engine.api.routes import voice_twiml
+    app.include_router(voice_twiml.router, prefix="/api/v1")
+    from booking_engine.api.routes import voice_config
+    app.include_router(voice_config.router, prefix="/api/v1")
+    from booking_engine.api.routes import voice_balance
+    app.include_router(voice_balance.router, prefix="/api/v1")
 
     @app.get("/health")
     async def health():
