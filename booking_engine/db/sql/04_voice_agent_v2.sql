@@ -124,23 +124,15 @@ ADD COLUMN IF NOT EXISTS matched_customer_id uuid REFERENCES business_app_core.c
 ADD COLUMN IF NOT EXISTS created_customer_id uuid REFERENCES business_app_core.customers(id) ON DELETE SET NULL,
 ADD COLUMN IF NOT EXISTS created_booking_id uuid REFERENCES business_app_core.appointments(id) ON DELETE SET NULL;
 
--- 9. business_app_core.ai_token_basket_events — additive
-ALTER TABLE business_app_core.ai_token_basket_events
+-- 9. business_app_core.ai_token_log — additive link to voice call
+-- The webapp's real schema stores debit events in `ai_token_log` (cols: shop_id,
+-- payment_id, credits_used, source ENUM ai_credit_source, created_at). We add a
+-- nullable voice_call_id to associate debits with the call that produced them.
+ALTER TABLE business_app_core.ai_token_log
 ADD COLUMN IF NOT EXISTS voice_call_id uuid REFERENCES voice_agent.calls(id) ON DELETE SET NULL;
 
--- Allow 'voice_call' as a source value (CHECK constraint relaxation if present)
-DO $$
-BEGIN
-IF EXISTS (
-SELECT 1 FROM pg_constraint
-WHERE conname = 'ai_token_basket_events_source_check'
-) THEN
-ALTER TABLE business_app_core.ai_token_basket_events
-DROP CONSTRAINT ai_token_basket_events_source_check;
-END IF;
-ALTER TABLE business_app_core.ai_token_basket_events
-ADD CONSTRAINT ai_token_basket_events_source_check
-CHECK (source IN ('chat','voice_call','manual','system'));
-END$$;
+CREATE INDEX IF NOT EXISTS idx_ai_token_log_voice_call
+ON business_app_core.ai_token_log(voice_call_id)
+WHERE voice_call_id IS NOT NULL;
 
 COMMIT;

@@ -93,3 +93,13 @@ async def test_voice_agent_shop_config_has_fallback_columns():
     names = {r['column_name'] for r in rows}
     assert {'manual_fallback_number', 'manual_fallback_normalized',
             'auto_topup_enabled', 'auto_topup_threshold_tokens', 'enabled'}.issubset(names)
+
+
+@pytest.mark.asyncio
+async def test_ai_token_log_has_voice_call_id():
+    rows = await execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema='business_app_core' AND table_name='ai_token_log' "
+        "AND column_name='voice_call_id'"
+    )
+    assert len(rows) > 0
