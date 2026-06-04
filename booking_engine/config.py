@@ -21,3 +21,7 @@ class Settings(BaseSettings):
     voice_max_overage_tokens: int = 5000
 
     model_config = {"env_prefix": ""}
+
+
+def get_settings() -> Settings:
+    return Settings()

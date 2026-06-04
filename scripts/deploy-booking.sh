@@ -84,7 +84,7 @@ if ! aws lambda get-function --function-name "${LAMBDA_FUNCTION}" --region "${AW
         --role "${ROLE_ARN}" \
         --timeout 30 \
         --memory-size 256 \
-        --environment "Variables={DATABASE_URL=${DATABASE_URL:-},POOL_MIN_SIZE=1,POOL_MAX_SIZE=3}" \
+        --environment "Variables={DATABASE_URL=${DATABASE_URL:-},POOL_MIN_SIZE=1,POOL_MAX_SIZE=3,CONTROL_PLANE_SECRET=${CONTROL_PLANE_SECRET:-},TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-},TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-},TWILIO_DEFAULT_COUNTRY=${TWILIO_DEFAULT_COUNTRY:-IT},OPENAI_SIP_PROJECT_ID=${OPENAI_SIP_PROJECT_ID:-},PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-},VOICE_KAIRO_TOKENS_PER_SECOND=${VOICE_KAIRO_TOKENS_PER_SECOND:-18},VOICE_MIN_SESSION_RESERVE_TOKENS=${VOICE_MIN_SESSION_RESERVE_TOKENS:-1500},VOICE_MAX_OVERAGE_TOKENS=${VOICE_MAX_OVERAGE_TOKENS:-5000}}" \
         --region "${AWS_REGION}"
 
     echo "Waiting for function to be Active..."
@@ -114,6 +114,17 @@ else
 
     echo "Waiting for update to complete..."
     aws lambda wait function-updated-v2 --function-name "${LAMBDA_FUNCTION}" --region "${AWS_REGION}"
+
+    # Push environment variables on every deploy so Plan-A vars stay in sync.
+    # Only fires when at least one Plan-A env var is provided by the caller.
+    if [[ -n "${TWILIO_ACCOUNT_SID:-}${OPENAI_SIP_PROJECT_ID:-}${PUBLIC_BASE_URL:-}${CONTROL_PLANE_SECRET:-}" ]]; then
+        echo "Updating Lambda environment variables..."
+        aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION}" \
+            --environment "Variables={DATABASE_URL=${DATABASE_URL:-},POOL_MIN_SIZE=1,POOL_MAX_SIZE=3,CONTROL_PLANE_SECRET=${CONTROL_PLANE_SECRET:-},TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-},TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-},TWILIO_DEFAULT_COUNTRY=${TWILIO_DEFAULT_COUNTRY:-IT},OPENAI_SIP_PROJECT_ID=${OPENAI_SIP_PROJECT_ID:-},PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-},VOICE_KAIRO_TOKENS_PER_SECOND=${VOICE_KAIRO_TOKENS_PER_SECOND:-18},VOICE_MIN_SESSION_RESERVE_TOKENS=${VOICE_MIN_SESSION_RESERVE_TOKENS:-1500},VOICE_MAX_OVERAGE_TOKENS=${VOICE_MAX_OVERAGE_TOKENS:-5000}}" \
+            --region "${AWS_REGION}" >/dev/null
+        aws lambda wait function-updated-v2 --function-name "${LAMBDA_FUNCTION}" --region "${AWS_REGION}"
+    fi
 fi
 
 # ── Step 6: Print result ──
