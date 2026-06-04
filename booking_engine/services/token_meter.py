@@ -65,6 +65,7 @@ async def record_voice_debit(
     duration_seconds: int,
     tool_token_cost: int,
     tokens_per_second: int,
+    previous_tier: str | None = None,
 ) -> None:
     """Debit a completed call's tokens from the shop basket."""
     tokens = duration_seconds * tokens_per_second + tool_token_cost
@@ -73,4 +74,13 @@ async def record_voice_debit(
         tokens=tokens,
         source="voice_call",
         voice_call_id=call_id,
+    )
+    # After debit, check whether we crossed a warning threshold
+    from booking_engine.services.balance_alerts import maybe_emit_balance_alert
+
+    balance = await get_balance(shop_id)
+    last_refill = await get_last_refill_amount(shop_id)
+    await maybe_emit_balance_alert(
+        shop_id=shop_id, balance=balance, last_refill=last_refill,
+        previous_tier=previous_tier,
     )

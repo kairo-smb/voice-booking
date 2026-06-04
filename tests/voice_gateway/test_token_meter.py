@@ -68,7 +68,13 @@ async def test_record_voice_debit_writes_event():
     call_id = uuid4()
     shop_id = uuid4()
     with patch("booking_engine.services.token_meter.insert_debit_event",
-               new=AsyncMock(return_value=None)) as ins:
+               new=AsyncMock(return_value=None)) as ins, \
+         patch("booking_engine.services.token_meter.get_balance",
+               new=AsyncMock(return_value=5000)), \
+         patch("booking_engine.services.token_meter.get_last_refill_amount",
+               new=AsyncMock(return_value=10000)), \
+         patch("booking_engine.services.balance_alerts.maybe_emit_balance_alert",
+               new=AsyncMock(return_value=None)):
         await record_voice_debit(
             shop_id=shop_id, call_id=call_id,
             duration_seconds=180, tool_token_cost=200,
