@@ -157,7 +157,12 @@ All endpoints require `Authorization: Bearer <CONTROL_PLANE_SECRET>`.
 | GET | `/api/v1/voice/config/{shop_id}` | Read voice agent config |
 | PATCH | `/api/v1/voice/config/{shop_id}` | Update voice agent config |
 | GET | `/api/v1/voice/balance/{shop_id}` | Token balance + warning tier for webapp |
+| POST | `/api/v1/voice/heartbeat/forwarding?threshold_days=5` | Path-2 silent-line heartbeat (EventBridge target) |
 
 ### Scheduled job
 
-Add an EventBridge rule that triggers the forwarding heartbeat nightly at 09:00 Europe/Rome. The heartbeat queries `voice_agent.shop_telephony` for Path-2 shops with no inbound calls in 5 days and emits `forwarding_might_be_off` push events.
+Add an EventBridge rule that POSTs to `/api/v1/voice/heartbeat/forwarding` nightly at 09:00 Europe/Rome (07:00 UTC). The endpoint queries `voice_agent.shop_telephony` for Path-2 shops with no inbound calls in 5 days and emits `forwarding_might_be_off` push events. Requires the `Authorization: Bearer <CONTROL_PLANE_SECRET>` header.
+
+### Twilio webhook URL
+
+The `voice_url` configured on each purchased number is `${PUBLIC_BASE_URL}/api/v1/voice/twiml/incoming`. Twilio request signatures are verified against `TWILIO_AUTH_TOKEN` — if the token is unset (e.g. local dev), validation is skipped.

@@ -13,7 +13,8 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Form, Response
+from fastapi import APIRouter, Depends, Form, Request, Response
+from twilio.request_validator import RequestValidator
 
 from booking_engine.config import Settings, get_settings
 from booking_engine.db.voice_config_queries import get_config
@@ -54,14 +55,31 @@ def _dial_fallback(number: str) -> Response:
     return _wrap(f'<Dial timeout="25">{number}</Dial>')
 
 
+async def _verify_twilio_signature(request: Request, settings: Settings) -> bool:
+    """Validate X-Twilio-Signature. Skipped when auth token unset (local/test)."""
+    if not settings.twilio_auth_token:
+        return True
+    signature = request.headers.get("x-twilio-signature", "")
+    if not signature:
+        return False
+    form = await request.form()
+    url = str(request.url)
+    validator = RequestValidator(settings.twilio_auth_token)
+    return validator.validate(url, dict(form), signature)
+
+
 @router.post("/incoming")
 async def incoming(
+    request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
     Called: str = Form(...),
     From: str = Form(default=""),
     CallSid: str = Form(default=""),
 ) -> Response:
     """Twilio fires this on every inbound call."""
+    if not await _verify_twilio_signature(request, settings):
+        logger.warning("twiml.incoming: invalid Twilio signature sid=%s", CallSid)
+        return Response(status_code=403)
     telephony = await get_telephony_by_kairo_number(Called)
     if not telephony:
         logger.warning("twiml.incoming: unknown number %s sid=%s", Called, CallSid)

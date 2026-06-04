@@ -38,6 +38,8 @@ def create_app() -> FastAPI:
     app.include_router(voice_config.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_balance
     app.include_router(voice_balance.router, prefix="/api/v1")
+    from booking_engine.api.routes import voice_heartbeat
+    app.include_router(voice_heartbeat.router, prefix="/api/v1")
 
     @app.get("/health")
     async def health():
