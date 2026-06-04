@@ -111,3 +111,53 @@ If you also want to drop the new schema (destructive — deletes call history):
 DROP SCHEMA voice_agent CASCADE;
 ALTER TABLE business_app_core.shops DROP COLUMN voice, DROP COLUMN language;
 ```
+
+---
+
+## Plan A — Platform deploy notes (2026-06-03)
+
+### New env vars on Lambda
+
+- `TWILIO_ACCOUNT_SID` — Twilio account SID
+- `TWILIO_AUTH_TOKEN` — Twilio auth token
+- `OPENAI_SIP_PROJECT_ID` — OpenAI project ID for SIP routing
+- `PUBLIC_BASE_URL` — public URL of the API Gateway in front of Lambda (used for TwiML voice_url)
+- `VOICE_KAIRO_TOKENS_PER_SECOND` — default 18
+- `VOICE_MIN_SESSION_RESERVE_TOKENS` — default 1500
+- `VOICE_MAX_OVERAGE_TOKENS` — default 5000
+
+### Migration
+
+Run once against prod:
+```bash
+psql "$DATABASE_URL" -f booking_engine/db/sql/04_voice_agent_v2.sql
+```
+
+This migration is additive — no existing columns are modified. It adds:
+- `source`, `phone_normalized`, `household_of`, `phone_shared_with` to `customers`
+- `source`, `voice_call_id`, `confirmation_status` to `appointments`
+- `voice_agent.shop_telephony` — Twilio number provisioning table
+- `voice_agent.shop_config` expansions — fallback, auto-topup, enabled columns
+- `voice_agent.callback_memos` — merchant callback reminders
+- `voice_agent.auth_events` — identity verification audit trail
+- `voice_agent.system_policy` — disclosure/consent text (seeded with it-IT)
+- `voice_agent.calls` extensions — `shop_id`, `matched_customer_id`, `created_customer_id`, `created_booking_id`
+- `ai_token_basket_events.voice_call_id` — links debit events to calls
+
+### New API endpoints
+
+All endpoints require `Authorization: Bearer <CONTROL_PLANE_SECRET>`.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/v1/voice/numbers/search?area_code=02` | Search Twilio available numbers |
+| POST | `/api/v1/voice/numbers/provision` | Purchase and bind a Kairo number |
+| GET | `/api/v1/voice/numbers/{shop_id}` | Get telephony config for a shop |
+| POST | `/api/v1/voice/twiml/incoming` | Dynamic TwiML webhook (Twilio calls this) |
+| GET | `/api/v1/voice/config/{shop_id}` | Read voice agent config |
+| PATCH | `/api/v1/voice/config/{shop_id}` | Update voice agent config |
+| GET | `/api/v1/voice/balance/{shop_id}` | Token balance + warning tier for webapp |
+
+### Scheduled job
+
+Add an EventBridge rule that triggers the forwarding heartbeat nightly at 09:00 Europe/Rome. The heartbeat queries `voice_agent.shop_telephony` for Path-2 shops with no inbound calls in 5 days and emits `forwarding_might_be_off` push events.
