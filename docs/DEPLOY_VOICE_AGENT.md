@@ -166,3 +166,25 @@ Add an EventBridge rule that POSTs to `/api/v1/voice/heartbeat/forwarding` night
 ### Twilio webhook URL
 
 The `voice_url` configured on each purchased number is `${PUBLIC_BASE_URL}/api/v1/voice/twiml/incoming`. Twilio request signatures are verified against `TWILIO_AUTH_TOKEN` — if the token is unset (e.g. local dev), validation is skipped.
+
+---
+
+## Plan B — Tools & identity deploy notes (2026-06-03)
+
+### New env vars on Lambda
+
+- `OPENAI_TOOL_SECRET` — bearer secret for OpenAI tool/event webhooks
+
+### OpenAI configuration
+
+Configure these webhook URLs in the OpenAI Voice dashboard:
+
+- POST `{public_base_url}/voice/events/session.started`
+- POST `{public_base_url}/voice/events/session.turn`
+- POST `{public_base_url}/voice/events/session.ended`
+
+Tool endpoints under `{public_base_url}/voice/tools/*` with `Authorization: Bearer <OPENAI_TOOL_SECRET>`.
+
+### No new migrations — uses tables from Plan A's migration 04
+
+All tables (`voice_agent.calls`, `voice_agent.auth_events`, `voice_agent.callback_memos`, `customers`, `appointments`, etc.) were created by the Plan A migration `04_voice_agent_v2.sql`.
