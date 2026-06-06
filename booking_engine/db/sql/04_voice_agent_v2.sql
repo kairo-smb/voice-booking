@@ -32,7 +32,7 @@ CHECK (confirmation_status IN ('confirmed','pending_sms_confirmation','verificat
 -- 3. voice_agent.shop_telephony
 CREATE TABLE IF NOT EXISTS voice_agent.shop_telephony (
 shop_id uuid PRIMARY KEY REFERENCES business_app_core.shops(id) ON DELETE CASCADE,
-provider text NOT NULL DEFAULT 'twilio',
+provider text NOT NULL DEFAULT 'telnyx',
 kairo_number text NOT NULL,
 kairo_number_sid text NOT NULL,
 salon_existing_number text,
@@ -40,8 +40,25 @@ salon_existing_normalized text GENERATED ALWAYS AS
 (regexp_replace(coalesce(salon_existing_number,''),'\D','','g')) STORED,
 setup_path text NOT NULL CHECK (setup_path IN ('new','forward')),
 provisioned_at timestamptz NOT NULL DEFAULT now(),
-last_inbound_call_at timestamptz
+last_inbound_call_at timestamptz,
+kairo_number_jurisdiction text,
+activation_status text NOT NULL DEFAULT 'active'
+  CHECK (activation_status IN ('active','pending_review','rejected')),
+regulatory_doc_status text,
+regulatory_rejection_reason text,
+regulatory_requirement_group_id text,
+activated_at timestamptz
 );
+
+-- ensure new Path-2 columns exist if table was created by an earlier migration
+ALTER TABLE voice_agent.shop_telephony
+  ADD COLUMN IF NOT EXISTS kairo_number_jurisdiction text,
+  ADD COLUMN IF NOT EXISTS activation_status text NOT NULL DEFAULT 'active'
+    CHECK (activation_status IN ('active','pending_review','rejected')),
+  ADD COLUMN IF NOT EXISTS regulatory_doc_status text,
+  ADD COLUMN IF NOT EXISTS regulatory_rejection_reason text,
+  ADD COLUMN IF NOT EXISTS regulatory_requirement_group_id text,
+  ADD COLUMN IF NOT EXISTS activated_at timestamptz;
 
 -- 4. voice_agent.shop_config — extend if exists, create if missing
 CREATE TABLE IF NOT EXISTS voice_agent.shop_config (

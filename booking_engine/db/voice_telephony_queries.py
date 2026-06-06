@@ -14,24 +14,48 @@ async def upsert_telephony(
     kairo_number_sid: str,
     salon_existing_number: str | None,
     setup_path: str,
+    activation_status: str = "active",
 ) -> dict:
     return await execute_one(
         """
         INSERT INTO voice_agent.shop_telephony
-        (shop_id, provider, kairo_number, kairo_number_sid,
-         salon_existing_number, setup_path)
-        VALUES ($1,$2,$3,$4,$5,$6)
+            (shop_id, provider, kairo_number, kairo_number_sid,
+             salon_existing_number, setup_path, activation_status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)
         ON CONFLICT (shop_id) DO UPDATE SET
-          provider = EXCLUDED.provider,
-          kairo_number = EXCLUDED.kairo_number,
-          kairo_number_sid = EXCLUDED.kairo_number_sid,
-          salon_existing_number = EXCLUDED.salon_existing_number,
-          setup_path = EXCLUDED.setup_path,
-          provisioned_at = now()
+            provider = EXCLUDED.provider,
+            kairo_number = EXCLUDED.kairo_number,
+            kairo_number_sid = EXCLUDED.kairo_number_sid,
+            salon_existing_number = EXCLUDED.salon_existing_number,
+            setup_path = EXCLUDED.setup_path,
+            activation_status = EXCLUDED.activation_status,
+            provisioned_at = now()
         RETURNING *
         """,
         shop_id, provider, kairo_number, kairo_number_sid,
-        salon_existing_number, setup_path,
+        salon_existing_number, setup_path, activation_status,
+    )
+
+
+async def update_telephony_activation(
+    *,
+    kairo_number: str,
+    activation_status: str,
+    regulatory_rejection_reason: str | None = None,
+    activated_at=None,  # datetime | None
+) -> dict | None:
+    from datetime import datetime, timezone
+    ts = activated_at or (datetime.now(timezone.utc) if activation_status == "active" else None)
+    return await execute_one(
+        """
+        UPDATE voice_agent.shop_telephony
+        SET activation_status = $2,
+            regulatory_rejection_reason = $3,
+            activated_at = $4
+        WHERE kairo_number = $1
+        RETURNING *
+        """,
+        kairo_number, activation_status, regulatory_rejection_reason, ts,
     )
 
 
