@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     telnyx_default_country: str = "IT"
     # OpenAI SIP routing
     openai_sip_project_id: str = ""
+    # Voice agent — OpenAI tool + event webhook bearer token
+    openai_tool_secret: str = ""
     # Token meter
     voice_kairo_tokens_per_second: int = 18
     voice_min_session_reserve_tokens: int = 1500
