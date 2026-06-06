@@ -70,3 +70,21 @@ async def update_customer_field(
         )
     await connection.execute_void(sql, customer_id, value)
     return True
+
+
+async def attach_customer_to_call(
+    *, call_id: UUID, created_customer_id: UUID | None = None,
+    matched_customer_id: UUID | None = None,
+) -> None:
+    sets = []
+    args: list = [call_id]
+    if created_customer_id is not None:
+        args.append(created_customer_id)
+        sets.append(f"created_customer_id = ${len(args)}")
+    if matched_customer_id is not None:
+        args.append(matched_customer_id)
+        sets.append(f"matched_customer_id = ${len(args)}")
+    if not sets:
+        return
+    sql = f"UPDATE voice_agent.calls SET {', '.join(sets)} WHERE id = $1"
+    await connection.execute_void(sql, *args)
