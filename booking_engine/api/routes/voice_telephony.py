@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token
-from booking_engine.clients.twilio_numbers import (
+from booking_engine.clients.telnyx_numbers import (
     purchase_number,
     search_available_numbers,
 )
@@ -49,10 +49,9 @@ async def search(
 ) -> dict:
     results = search_available_numbers(
         area_code=area_code,
-        country=settings.twilio_default_country,
+        country=settings.telnyx_default_country,
         limit=limit,
-        account_sid=settings.twilio_account_sid,
-        auth_token=settings.twilio_auth_token,
+        api_key=settings.telnyx_api_key,
     )
     return {"data": [AvailableNumberOut(**r.__dict__).model_dump() for r in results]}
 
@@ -66,16 +65,15 @@ async def provision(
     if body.setup_path == "forward" and not body.salon_existing_number:
         raise HTTPException(400, "salon_existing_number required for forward setup")
 
-    voice_url = f"{settings.public_base_url}/api/v1/voice/twiml/incoming"
+    voice_url = f"{settings.public_base_url}/voice/texml/incoming"
     purchased = purchase_number(
         phone_number=body.phone_number,
         voice_url=voice_url,
-        account_sid=settings.twilio_account_sid,
-        auth_token=settings.twilio_auth_token,
+        api_key=settings.telnyx_api_key,
     )
     row = await q.upsert_telephony(
         shop_id=body.shop_id,
-        provider="twilio",
+        provider="telnyx",
         kairo_number=purchased.phone_number,
         kairo_number_sid=purchased.sid,
         salon_existing_number=body.salon_existing_number,

@@ -14,8 +14,7 @@ AUTH = {"Authorization": "Bearer test-secret"}
 @pytest.fixture(autouse=True)
 def stub_secret(monkeypatch):
     monkeypatch.setenv("CONTROL_PLANE_SECRET", "test-secret")
-    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "AC")
-    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "tok")
+    monkeypatch.setenv("TELNYX_API_KEY", "key")
 
 
 @pytest.mark.asyncio
@@ -29,7 +28,7 @@ async def test_search_numbers_requires_auth():
 
 @pytest.mark.asyncio
 async def test_search_numbers_returns_list():
-    from booking_engine.clients.twilio_numbers import AvailableNumber
+    from booking_engine.clients.telnyx_numbers import AvailableNumber
     with patch("booking_engine.api.routes.voice_telephony.search_available_numbers",
                return_value=[
                    AvailableNumber(phone_number="+390212345678",
@@ -46,7 +45,7 @@ async def test_search_numbers_returns_list():
 
 @pytest.mark.asyncio
 async def test_provision_writes_telephony_row():
-    from booking_engine.clients.twilio_numbers import PurchasedNumber
+    from booking_engine.clients.telnyx_numbers import PurchasedNumber
     with patch("booking_engine.api.routes.voice_telephony.purchase_number",
                return_value=PurchasedNumber(sid="PN1", phone_number="+390212345678")), \
          patch("booking_engine.db.voice_telephony_queries.upsert_telephony",

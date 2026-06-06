@@ -1,6 +1,6 @@
-"""Dynamic TwiML webhook — per-call routing decision.
+"""Dynamic TeXML webhook — per-call routing decision.
 
-Twilio calls this on every inbound call. We respond with either:
+Telnyx calls this on every inbound call. We respond with either:
 - <Dial><Sip>OpenAI SIP endpoint</Sip></Dial> when AI is attached
 - <Dial>fallback_number</Dial> when AI is detached and fallback is set
 - <Say>recorded message</Say> otherwise
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from typing import Annotated
-from uuid import UUID  # noqa: F401 (used by _dial_sip)
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Form, Response
 
@@ -22,7 +22,7 @@ from booking_engine.services.phone_normalize import digits_only
 from booking_engine.services.token_meter import decide_session
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/voice/twiml", tags=["voice-twiml"])
+router = APIRouter(prefix="/voice/texml", tags=["voice-texml"])
 
 
 _SAY_UNAVAILABLE = (
@@ -61,10 +61,10 @@ async def incoming(
     From: str = Form(default=""),
     CallSid: str = Form(default=""),
 ) -> Response:
-    """Legacy Twilio endpoint — kept for backward-compat; traffic now handled by voice_texml."""
+    """Telnyx fires this on every inbound call."""
     telephony = await get_telephony_by_kairo_number(Called)
     if not telephony:
-        logger.warning("twiml.incoming: unknown number %s sid=%s", Called, CallSid)
+        logger.warning("texml.incoming: unknown number %s sid=%s", Called, CallSid)
         return _say_unavailable()
 
     shop_id: UUID = telephony["shop_id"]
@@ -88,7 +88,7 @@ async def incoming(
 
     if fallback and fallback_normalized == salon_existing_normalized:
         logger.warning(
-            "twiml.incoming: fallback equals forwarded number — loop risk, "
+            "texml.incoming: fallback equals forwarded number — loop risk, "
             "playing Say. shop_id=%s sid=%s", shop_id, CallSid,
         )
 
