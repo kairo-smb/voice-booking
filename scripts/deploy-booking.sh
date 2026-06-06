@@ -145,7 +145,7 @@ else
 fi
 
 # ── Step 7: Ensure HTTP API Gateway exists ──
-API_ID=$(aws apigatewayv2 get-apis --query "Items[?Name=='${API_GATEWAY_NAME}'].ApiId" --output text --region "${AWS_REGION}" 2>/dev/null | head -1 | tr -d '[:space:]' || echo "")
+API_ID=$(aws apigatewayv2 get-apis --query "Items[?Name=='${API_GATEWAY_NAME}'].ApiId" --output text --region "${AWS_REGION}" 2>/dev/null | awk '{print $1}' || echo "")
 
 if [[ -z "${API_ID}" ]]; then
   echo ""
