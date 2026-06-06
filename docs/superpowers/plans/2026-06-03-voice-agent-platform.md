@@ -2,13 +2,28 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the foundational voice-booking platform layer: schema migrations, Twilio Numbers API integration for Path-1 number provisioning, dynamic TwiML webhook with detach matrix, token meter mapping, and 3-tier warning + auto top-up.
+**Goal:** Build the foundational voice-booking platform layer: schema migrations, Telnyx Numbers API integration for both Path 1 (Forward, default) and Path 2 (Provision IT number, document collection), dynamic TeXML webhook with simple pre-call routing, token meter mapping, and async warnings + auto top-up.
 
-**Architecture:** All work lands in `voice-booking` repo. Booking Engine (AWS Lambda + FastAPI/Mangum) owns the new endpoints. Schema migrations add additive columns to `business_app_core.customers` and `business_app_core.appointments`, and add new tables in `voice_agent`. Twilio is integrated only at call setup time (dynamic TwiML) and number provisioning — no mid-call orchestration.
+**Architecture:** All work lands in `voice-booking` repo. Booking Engine (AWS Lambda + FastAPI/Mangum) owns the new endpoints. Schema migrations add additive columns to `business_app_core.customers` and `business_app_core.appointments`, and add new tables in `voice_agent`. Telnyx is integrated only at call setup time (TeXML) and number provisioning — no mid-call orchestration.
 
-**Tech Stack:** Python 3.11, FastAPI, asyncpg, Mangum, Twilio Python SDK, libphonenumber, AWS Lambda, Neon Postgres.
+**Tech Stack:** Python 3.11, FastAPI, asyncpg, Mangum, Telnyx Python SDK, libphonenumber, AWS Lambda, Neon Postgres.
 
 **Source spec:** `webapp/docs/superpowers/specs/2026-06-03-voice-agent-realtime-integration-design.md`
+
+---
+
+## Revision 2026-06-06 — read first
+
+This plan was originally written assuming Twilio + an in-call detach matrix + a 3-tier warning ladder + 5,000-token overage tolerance + Path 1 = provision-new-IT-number. The spec has been amended; this plan now reflects:
+
+- **Provider: Telnyx, not Twilio.** TeXML is XML-syntax-compatible with TwiML (verbs `<Response>`, `<Dial>`, `<Sip>`, `<Say>` identical), so the webhook response shape is unchanged. SDK and API surface differ; code blocks below have been updated. Global identifier renames already applied throughout this document: `twilio_numbers` → `telnyx_numbers`, `voice_twiml` → `voice_texml`, `/voice/twiml/incoming` → `/voice/texml/incoming`, `TWILIO_ACCOUNT_SID` → `TELNYX_API_KEY`, `TWILIO_AUTH_TOKEN` → `TELNYX_PUBLIC_KEY`.
+- **Path 1 and Path 2 are swapped.** Path 1 is now **Forward existing number** (default, ~70-80% of shops, instant activation, uses a non-IT receiving DID from a pre-purchased pool). Path 2 is **Provision new IT number** (~20-30%, requires document upload to Telnyx RequirementGroup, 1-3 business day manual review, status webhook subscription). Task 4 (provisioning route) is split accordingly. Task 10 (heartbeat) was previously labeled "Path 2 forwarding heartbeat" — now correctly labeled Path 1.
+- **Token meter simplification:** drop the 3-tier in-call warning ladder, the dynamic detach matrix complexity, and the 5,000-token overage tolerance. Task 5 (token meter) is now: pre-call balance check, post-call deduction, async warnings (push/banner) at 30%/10%/below-reserve thresholds. Once the AI accepts a call, it runs to natural end — no mid-call balance polling, no overage logic. Task 6 (TeXML webhook) is now a 5-state lookup table (see spec Pre-call routing matrix). Remove `voice_max_overage_tokens` from config.
+- **New columns on `voice_agent.shop_telephony`** for Path 2 lifecycle: `kairo_number_jurisdiction`, `activation_status` ('active' | 'pending_review' | 'rejected'), `regulatory_doc_status`, `regulatory_rejection_reason`, `regulatory_requirement_group_id`, `activated_at`. Task 1 schema migration must include these.
+- **New endpoint** `POST /voice/telnyx/number-status` to receive Telnyx number-status webhooks (activated/rejected). Fires `voice_number_activated` or `voice_number_rejected` push events. Add as part of Task 4 deliverable.
+- **Two new push events** beyond the original three: `voice_number_activated`, `voice_number_rejected`. Update Task 9 (balance alerts) and Task 8 (push notification client) accordingly.
+
+**When a code block in this document still shows Twilio-shaped SDK calls** (e.g. `Client(account_sid, auth_token)`, `client.incoming_phone_numbers.create(...)`), treat it as illustrative and translate to the equivalent Telnyx SDK pattern (`telnyx.api_key = ...; telnyx.PhoneNumber.create(...)`, `telnyx.NumberOrder.create(...)` for purchases with regulatory requirements, `telnyx.RequirementGroup.create(...)` for IT document bundles). The implementer should consult Telnyx Python SDK docs (https://github.com/team-telnyx/telnyx-python) when implementing Task 3 and Task 4.
 
 ---
 
@@ -17,17 +32,17 @@
 ### New files
 
 - `booking_engine/db/sql/04_voice_agent_v2.sql` — additive migration (customers fields, appointments fields, voice_agent.callback_memos, voice_agent.shop_config expansions, voice_agent.shop_telephony, voice_agent.system_policy seed, voice_agent.auth_events)
-- `booking_engine/clients/twilio_numbers.py` — thin wrapper around Twilio Numbers API
+- `booking_engine/clients/telnyx_numbers.py` — thin wrapper around Telnyx Numbers API
 - `booking_engine/clients/push_notifications.py` — sends voice_* push events (delegates to existing notification infra)
 - `booking_engine/api/routes/voice_telephony.py` — `/voice/numbers/*` endpoints (search, provision, list)
-- `booking_engine/api/routes/voice_twiml.py` — `/voice/twiml/incoming` dynamic TwiML webhook
+- `booking_engine/api/routes/voice_texml.py` — `/voice/texml/incoming` dynamic TeXML webhook
 - `booking_engine/api/routes/voice_config.py` — `/voice/config/*` PATCH/GET endpoints for Layer 1
 - `booking_engine/services/token_meter.py` — voice-specific debit, warning thresholds, detach decision
 - `booking_engine/services/phone_normalize.py` — wrapper around phonenumbers library
 - `booking_engine/db/voice_telephony_queries.py` — DB queries for shop_telephony + shop_config
 - `booking_engine/db/token_basket_queries.py` — extends existing basket queries with voice debit
-- `tests/voice_gateway/test_twilio_numbers_client.py`
-- `tests/voice_gateway/test_voice_twiml_webhook.py`
+- `tests/voice_gateway/test_telnyx_numbers_client.py`
+- `tests/voice_gateway/test_voice_texml_webhook.py`
 - `tests/voice_gateway/test_voice_config_routes.py`
 - `tests/voice_gateway/test_voice_telephony_routes.py`
 - `tests/voice_gateway/test_token_meter.py`
@@ -35,9 +50,9 @@
 
 ### Modified files
 
-- `booking_engine/config.py` — add Twilio creds, OpenAI SIP project ID, push secrets, token rate config
+- `booking_engine/config.py` — add Telnyx creds, OpenAI SIP project ID, push secrets, token rate config
 - `booking_engine/app.py` — register new routers
-- `requirements.txt` — add `twilio>=9.0`, `phonenumbers>=8.13`
+- `requirements.txt` — add `telnyx>=2.0`, `phonenumbers>=8.13`
 
 ---
 
@@ -55,7 +70,7 @@ Append to `requirements.txt`:
 
 ```
 phonenumbers>=8.13
-twilio>=9.0
+telnyx>=2.0
 ```
 
 - [ ] **Step 2: Write failing test for phone normalization**
@@ -114,7 +129,7 @@ Create `booking_engine/services/phone_normalize.py`:
 """Phone number normalization utilities.
 
 Wraps libphonenumber to convert salon-entered phone strings (varying formats)
-and Twilio-provided caller IDs into a canonical comparable form.
+and Telnyx-provided caller IDs into a canonical comparable form.
 """
 from __future__ import annotations
 
@@ -296,7 +311,7 @@ ALTER TABLE business_app_core.appointments
 -- 3. voice_agent.shop_telephony
 CREATE TABLE IF NOT EXISTS voice_agent.shop_telephony (
   shop_id              uuid PRIMARY KEY REFERENCES business_app_core.shops(id) ON DELETE CASCADE,
-  provider             text NOT NULL DEFAULT 'twilio',
+  provider             text NOT NULL DEFAULT 'telnyx',
   kairo_number         text NOT NULL,
   kairo_number_sid     text NOT NULL,
   salon_existing_number       text,
@@ -435,22 +450,22 @@ git commit -m "feat(voice): additive schema migration for v2 (telephony, memos, 
 
 ---
 
-### Task 3: Twilio Numbers API client
+### Task 3: Telnyx Numbers API client
 
 **Files:**
-- Create: `booking_engine/clients/twilio_numbers.py`
-- Create: `tests/voice_gateway/test_twilio_numbers_client.py`
+- Create: `booking_engine/clients/telnyx_numbers.py`
+- Create: `tests/voice_gateway/test_telnyx_numbers_client.py`
 - Modify: `booking_engine/config.py`
 
-- [ ] **Step 1: Extend config with Twilio settings**
+- [ ] **Step 1: Extend config with Telnyx settings**
 
 Add to `booking_engine/config.py` Settings class:
 
 ```python
-# Twilio
-twilio_account_sid: str = ""
-twilio_auth_token: str = ""
-twilio_default_country: str = "IT"
+# Telnyx
+telnyx_api_key: str = ""
+telnyx_public_key: str = ""
+telnyx_default_country: str = "IT"
 # OpenAI SIP routing
 openai_sip_project_id: str = ""
 # Token meter
@@ -459,19 +474,19 @@ voice_min_session_reserve_tokens: int = 1500
 voice_max_overage_tokens: int = 5000
 ```
 
-- [ ] **Step 2: Write failing tests for the Twilio client**
+- [ ] **Step 2: Write failing tests for the Telnyx client**
 
-Create `tests/voice_gateway/test_twilio_numbers_client.py`:
+Create `tests/voice_gateway/test_telnyx_numbers_client.py`:
 
 ```python
-"""Tests for the Twilio Numbers API client."""
+"""Tests for the Telnyx Numbers API client."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from booking_engine.clients.twilio_numbers import (
+from booking_engine.clients.telnyx_numbers import (
     search_available_numbers,
     purchase_number,
     AvailableNumber,
@@ -479,15 +494,15 @@ from booking_engine.clients.twilio_numbers import (
 
 
 @pytest.fixture
-def fake_twilio():
-    with patch("booking_engine.clients.twilio_numbers.Client") as cls:
+def fake_telnyx():
+    with patch("booking_engine.clients.telnyx_numbers.Client") as cls:
         client = MagicMock()
         cls.return_value = client
         yield client
 
 
-def test_search_available_numbers_returns_typed(fake_twilio):
-    fake_twilio.available_phone_numbers.return_value.local.list.return_value = [
+def test_search_available_numbers_returns_typed(fake_telnyx):
+    fake_telnyx.available_phone_numbers.return_value.local.list.return_value = [
         MagicMock(phone_number="+390212345678",
                   friendly_name="Milano",
                   locality="Milano",
@@ -504,47 +519,47 @@ def test_search_available_numbers_returns_typed(fake_twilio):
     assert isinstance(results[0], AvailableNumber)
 
 
-def test_purchase_number_returns_sid(fake_twilio):
-    fake_twilio.incoming_phone_numbers.create.return_value = MagicMock(
+def test_purchase_number_returns_sid(fake_telnyx):
+    fake_telnyx.incoming_phone_numbers.create.return_value = MagicMock(
         sid="PN1234", phone_number="+390212345678"
     )
     result = purchase_number(
         phone_number="+390212345678",
-        voice_url="https://api.example.com/voice/twiml/incoming",
+        voice_url="https://api.example.com/voice/texml/incoming",
         account_sid="AC", auth_token="tok",
     )
     assert result.sid == "PN1234"
     assert result.phone_number == "+390212345678"
-    fake_twilio.incoming_phone_numbers.create.assert_called_once()
-    kwargs = fake_twilio.incoming_phone_numbers.create.call_args.kwargs
+    fake_telnyx.incoming_phone_numbers.create.assert_called_once()
+    kwargs = fake_telnyx.incoming_phone_numbers.create.call_args.kwargs
     assert kwargs["phone_number"] == "+390212345678"
-    assert kwargs["voice_url"] == "https://api.example.com/voice/twiml/incoming"
+    assert kwargs["voice_url"] == "https://api.example.com/voice/texml/incoming"
     assert kwargs["voice_method"] == "POST"
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
 
 ```
-pytest tests/voice_gateway/test_twilio_numbers_client.py -v
+pytest tests/voice_gateway/test_telnyx_numbers_client.py -v
 ```
 
 Expected: import errors.
 
 - [ ] **Step 4: Implement the client**
 
-Create `booking_engine/clients/twilio_numbers.py`:
+Create `booking_engine/clients/telnyx_numbers.py`:
 
 ```python
-"""Twilio Numbers API client — search and purchase IT geographic numbers.
+"""Telnyx Numbers API client — search and purchase IT geographic numbers.
 
 Used only at onboarding time (Path 1). After purchase, the number's Voice URL
-points to our /voice/twiml/incoming webhook for dynamic per-call routing.
+points to our /voice/texml/incoming webhook for dynamic per-call routing.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from twilio.rest import Client
+import telnyx
 
 
 @dataclass
@@ -593,7 +608,7 @@ def purchase_number(
     account_sid: str,
     auth_token: str,
 ) -> PurchasedNumber:
-    """Purchase a number and bind its Voice URL to the dynamic TwiML webhook."""
+    """Purchase a number and bind its Voice URL to the dynamic TeXML webhook."""
     client = Client(account_sid, auth_token)
     result = client.incoming_phone_numbers.create(
         phone_number=phone_number,
@@ -606,7 +621,7 @@ def purchase_number(
 - [ ] **Step 5: Run tests to verify pass**
 
 ```
-pytest tests/voice_gateway/test_twilio_numbers_client.py -v
+pytest tests/voice_gateway/test_telnyx_numbers_client.py -v
 ```
 
 Expected: 2 passing.
@@ -614,13 +629,23 @@ Expected: 2 passing.
 - [ ] **Step 6: Commit**
 
 ```
-git add booking_engine/clients/twilio_numbers.py tests/voice_gateway/test_twilio_numbers_client.py booking_engine/config.py
-git commit -m "feat(voice): Twilio Numbers API client for IT number search and provisioning"
+git add booking_engine/clients/telnyx_numbers.py tests/voice_gateway/test_telnyx_numbers_client.py booking_engine/config.py
+git commit -m "feat(voice): Telnyx Numbers API client for IT number search and provisioning"
 ```
 
 ---
 
-### Task 4: Telephony provisioning routes
+### Task 4: Telephony provisioning routes (Path 1 + Path 2 split)
+
+> **Revision 2026-06-06:** rewritten in shape. This task now produces five endpoints, not three:
+>
+> - `GET  /voice/numbers/search` — Path 2 only (search Telnyx IT geographic inventory by area code).
+> - `POST /voice/numbers/forward/allocate` — **Path 1, default.** Allocates a non-IT receiving DID from a pre-purchased pool (`shop_telephony.kairo_number_jurisdiction='NL'` or `'US'`), `setup_path='forward'`, `activation_status='active'`. Returns immediately. No documents required.
+> - `POST /voice/numbers/provision/submit` — Path 2 submit. Accepts uploaded documents (multipart: `id_document`, `proof_of_address`, `end_user_type ∈ {persona_fisica, persona_giuridica, ditta_individuale}`, `selected_number`). Creates a Telnyx RequirementGroup, uploads documents, places a conditional NumberOrder, writes `shop_telephony` row with `setup_path='provision'`, `activation_status='pending_review'`, `regulatory_doc_status='submitted'`. Returns 202 Accepted.
+> - `POST /voice/telnyx/number-status` — Telnyx webhook receiver. On `number.status.active` → update `activation_status='active'`, set `activated_at`, fire `voice_number_activated` push. On `number.status.failed` → `activation_status='rejected'`, persist verbatim `regulatory_rejection_reason`, fire `voice_number_rejected` push.
+> - `GET  /voice/numbers/{shop_id}` — unchanged; returns current telephony state.
+>
+> The original Task 4 body below describes the single-endpoint provisioning route. Treat it as a starting point and refactor into the five-endpoint shape per the revision above. The tests pattern (mocking the SDK client, asserting DB writes) still applies; just split per endpoint. Add area-code-vs-address validation to the `provision/submit` handler — reject 400 with a helpful message if the proof-of-address postal code is outside the selected number's geographic prefix.
 
 **Files:**
 - Create: `booking_engine/db/voice_telephony_queries.py`
@@ -650,8 +675,8 @@ AUTH = {"Authorization": "Bearer test-secret"}
 @pytest.fixture(autouse=True)
 def stub_secret(monkeypatch):
     monkeypatch.setenv("CONTROL_PLANE_SECRET", "test-secret")
-    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "AC")
-    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "tok")
+    monkeypatch.setenv("TELNYX_API_KEY", "AC")
+    monkeypatch.setenv("TELNYX_PUBLIC_KEY", "tok")
 
 
 @pytest.mark.asyncio
@@ -664,7 +689,7 @@ async def test_search_numbers_requires_auth():
 
 @pytest.mark.asyncio
 async def test_search_numbers_returns_list():
-    from booking_engine.clients.twilio_numbers import AvailableNumber
+    from booking_engine.clients.telnyx_numbers import AvailableNumber
     with patch("booking_engine.api.routes.voice_telephony.search_available_numbers",
                return_value=[
                    AvailableNumber(phone_number="+390212345678",
@@ -680,7 +705,7 @@ async def test_search_numbers_returns_list():
 
 @pytest.mark.asyncio
 async def test_provision_writes_telephony_row():
-    from booking_engine.clients.twilio_numbers import PurchasedNumber
+    from booking_engine.clients.telnyx_numbers import PurchasedNumber
     with patch("booking_engine.api.routes.voice_telephony.purchase_number",
                return_value=PurchasedNumber(sid="PN1", phone_number="+390212345678")), \
          patch("booking_engine.db.voice_telephony_queries.upsert_telephony") as upsert:
@@ -781,7 +806,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token
-from booking_engine.clients.twilio_numbers import (
+from booking_engine.clients.telnyx_numbers import (
     purchase_number,
     search_available_numbers,
 )
@@ -822,10 +847,10 @@ async def search(
 ) -> dict:
     results = search_available_numbers(
         area_code=area_code,
-        country=settings.twilio_default_country,
+        country=settings.telnyx_default_country,
         limit=limit,
-        account_sid=settings.twilio_account_sid,
-        auth_token=settings.twilio_auth_token,
+        account_sid=settings.telnyx_api_key,
+        auth_token=settings.telnyx_public_key,
     )
     return {"data": [AvailableNumberOut(**r.__dict__).model_dump() for r in results]}
 
@@ -839,16 +864,16 @@ async def provision(
     if body.setup_path == "forward" and not body.salon_existing_number:
         raise HTTPException(400, "salon_existing_number required for forward setup")
 
-    voice_url = f"{settings.public_base_url}/voice/twiml/incoming"
+    voice_url = f"{settings.public_base_url}/voice/texml/incoming"
     purchased = purchase_number(
         phone_number=body.phone_number,
         voice_url=voice_url,
-        account_sid=settings.twilio_account_sid,
-        auth_token=settings.twilio_auth_token,
+        account_sid=settings.telnyx_api_key,
+        auth_token=settings.telnyx_public_key,
     )
     row = await q.upsert_telephony(
         shop_id=body.shop_id,
-        provider="twilio",
+        provider="telnyx",
         kairo_number=purchased.phone_number,
         kairo_number_sid=purchased.sid,
         salon_existing_number=body.salon_existing_number,
@@ -914,7 +939,9 @@ git commit -m "feat(voice): /voice/numbers/* control-plane endpoints (search, pr
 
 ---
 
-### Task 5: Token meter service — debit + 3-tier warning + detach decision
+### Task 5: Token meter service — pre-call check + post-call debit + async warnings
+
+> **Revision 2026-06-06:** simplified. No 3-tier in-call warning ladder, no mid-call overage tolerance. The meter provides three pure functions: `can_start_session(shop_id) -> bool` (pre-call balance check vs `min_session_reserve`), `record_session_debit(call_id, duration_seconds, tool_call_tokens)` (post-call), and `evaluate_async_warnings(shop_id, basket_event) -> list[WarningEvent]` (called from the basket debit hook to produce 30%/10%/below-reserve push events between calls). Remove `voice_max_overage_tokens` and any mid-session balance polling from the original Task 5 design.
 
 **Files:**
 - Create: `booking_engine/db/token_basket_queries.py`
@@ -1179,19 +1206,21 @@ git commit -m "feat(voice): token meter with warning tiers and detach decision"
 
 ---
 
-### Task 6: Dynamic TwiML webhook with detach matrix
+### Task 6: TeXML webhook — single per-call routing decision
+
+> **Revision 2026-06-06:** simplified. The webhook is now a flat 5-state lookup against `shop_config.enabled`, basket balance vs `min_session_reserve`, and presence of `manual_fallback_number`. See spec section "Pre-call routing matrix". No "warning ladder" routing branches; warnings are out-of-band (Task 9).
 
 **Files:**
-- Create: `booking_engine/api/routes/voice_twiml.py`
-- Create: `tests/voice_gateway/test_voice_twiml_webhook.py`
+- Create: `booking_engine/api/routes/voice_texml.py`
+- Create: `tests/voice_gateway/test_voice_texml_webhook.py`
 - Modify: `booking_engine/app.py`
 
-- [ ] **Step 1: Write failing tests for the TwiML webhook**
+- [ ] **Step 1: Write failing tests for the TeXML webhook**
 
-Create `tests/voice_gateway/test_voice_twiml_webhook.py`:
+Create `tests/voice_gateway/test_voice_texml_webhook.py`:
 
 ```python
-"""Tests for the dynamic TwiML webhook (per-call routing decision)."""
+"""Tests for the dynamic TeXML webhook (per-call routing decision)."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
@@ -1221,84 +1250,84 @@ def _telephony(salon_existing: str | None = None):
 
 
 @pytest.mark.asyncio
-async def test_twiml_attaches_when_basket_ok():
-    with patch("booking_engine.api.routes.voice_twiml.get_telephony_by_kairo_number",
+async def test_texml_attaches_when_basket_ok():
+    with patch("booking_engine.api.routes.voice_texml.get_telephony_by_kairo_number",
                new=AsyncMock(return_value=_telephony())), \
-         patch("booking_engine.api.routes.voice_twiml.get_config",
+         patch("booking_engine.api.routes.voice_texml.get_config",
                new=AsyncMock(return_value=_config(enabled=True))), \
-         patch("booking_engine.api.routes.voice_twiml.decide_session",
+         patch("booking_engine.api.routes.voice_texml.decide_session",
                new=AsyncMock(return_value=type("D", (), {
                    "attach": True, "balance": 5000, "detach_reason": None
                })())):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
-            r = await c.post("/voice/twiml/incoming", data=_form_data())
+            r = await c.post("/voice/texml/incoming", data=_form_data())
     assert r.status_code == 200
     assert "<Sip>" in r.text
     assert "openai.com" in r.text
 
 
 @pytest.mark.asyncio
-async def test_twiml_routes_to_fallback_when_detached_with_fallback():
-    with patch("booking_engine.api.routes.voice_twiml.get_telephony_by_kairo_number",
+async def test_texml_routes_to_fallback_when_detached_with_fallback():
+    with patch("booking_engine.api.routes.voice_texml.get_telephony_by_kairo_number",
                new=AsyncMock(return_value=_telephony())), \
-         patch("booking_engine.api.routes.voice_twiml.get_config",
+         patch("booking_engine.api.routes.voice_texml.get_config",
                new=AsyncMock(return_value=_config(enabled=True, fallback="+393900000000"))), \
-         patch("booking_engine.api.routes.voice_twiml.decide_session",
+         patch("booking_engine.api.routes.voice_texml.decide_session",
                new=AsyncMock(return_value=type("D", (), {
                    "attach": False, "balance": 200, "detach_reason": "basket_low"
                })())):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
-            r = await c.post("/voice/twiml/incoming", data=_form_data())
+            r = await c.post("/voice/texml/incoming", data=_form_data())
     assert "<Dial" in r.text
     assert "+393900000000" in r.text
     assert "<Sip>" not in r.text
 
 
 @pytest.mark.asyncio
-async def test_twiml_plays_say_when_detached_without_fallback():
-    with patch("booking_engine.api.routes.voice_twiml.get_telephony_by_kairo_number",
+async def test_texml_plays_say_when_detached_without_fallback():
+    with patch("booking_engine.api.routes.voice_texml.get_telephony_by_kairo_number",
                new=AsyncMock(return_value=_telephony())), \
-         patch("booking_engine.api.routes.voice_twiml.get_config",
+         patch("booking_engine.api.routes.voice_texml.get_config",
                new=AsyncMock(return_value=_config(enabled=True, fallback=None))), \
-         patch("booking_engine.api.routes.voice_twiml.decide_session",
+         patch("booking_engine.api.routes.voice_texml.decide_session",
                new=AsyncMock(return_value=type("D", (), {
                    "attach": False, "balance": 0, "detach_reason": "basket_low"
                })())):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
-            r = await c.post("/voice/twiml/incoming", data=_form_data())
+            r = await c.post("/voice/texml/incoming", data=_form_data())
     assert "<Say" in r.text
     assert "<Dial" not in r.text
 
 
 @pytest.mark.asyncio
-async def test_twiml_loop_safety_falls_back_to_say():
+async def test_texml_loop_safety_falls_back_to_say():
     # fallback equals the salon's forwarded number -> loop risk -> play Say instead
     salon_existing = "+393900000000"
-    with patch("booking_engine.api.routes.voice_twiml.get_telephony_by_kairo_number",
+    with patch("booking_engine.api.routes.voice_texml.get_telephony_by_kairo_number",
                new=AsyncMock(return_value=_telephony(salon_existing=salon_existing))), \
-         patch("booking_engine.api.routes.voice_twiml.get_config",
+         patch("booking_engine.api.routes.voice_texml.get_config",
                new=AsyncMock(return_value=_config(enabled=True, fallback=salon_existing))), \
-         patch("booking_engine.api.routes.voice_twiml.decide_session",
+         patch("booking_engine.api.routes.voice_texml.decide_session",
                new=AsyncMock(return_value=type("D", (), {
                    "attach": False, "balance": 0, "detach_reason": "basket_low"
                })())):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
-            r = await c.post("/voice/twiml/incoming", data=_form_data())
+            r = await c.post("/voice/texml/incoming", data=_form_data())
     assert "<Say" in r.text
     assert "<Dial" not in r.text
 
 
 @pytest.mark.asyncio
-async def test_twiml_returns_say_when_unknown_number():
-    with patch("booking_engine.api.routes.voice_twiml.get_telephony_by_kairo_number",
+async def test_texml_returns_say_when_unknown_number():
+    with patch("booking_engine.api.routes.voice_texml.get_telephony_by_kairo_number",
                new=AsyncMock(return_value=None)):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
-            r = await c.post("/voice/twiml/incoming", data=_form_data())
+            r = await c.post("/voice/texml/incoming", data=_form_data())
     assert r.status_code == 200
     assert "<Say" in r.text
 ```
@@ -1306,7 +1335,7 @@ async def test_twiml_returns_say_when_unknown_number():
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```
-pytest tests/voice_gateway/test_voice_twiml_webhook.py -v
+pytest tests/voice_gateway/test_voice_texml_webhook.py -v
 ```
 
 Expected: 404s / import errors.
@@ -1344,14 +1373,14 @@ async def upsert_config(shop_id: UUID, **fields) -> dict:
     return await connection.execute_one(sql, shop_id, *fields.values())
 ```
 
-- [ ] **Step 4: Implement the TwiML webhook**
+- [ ] **Step 4: Implement the TeXML webhook**
 
-Create `booking_engine/api/routes/voice_twiml.py`:
+Create `booking_engine/api/routes/voice_texml.py`:
 
 ```python
-"""Dynamic TwiML webhook — per-call routing decision.
+"""Dynamic TeXML webhook — per-call routing decision.
 
-Twilio calls this on every inbound call. We respond with either:
+Telnyx calls this on every inbound call. We respond with either:
   - <Dial><Sip>OpenAI SIP endpoint</Sip></Dial>  when AI is attached
   - <Dial>fallback_number</Dial>                  when AI is detached and fallback is set
   - <Say>recorded message</Say>                   otherwise
@@ -1412,7 +1441,7 @@ async def incoming(
     From: str = Form(default=""),
     CallSid: str = Form(default=""),
 ) -> Response:
-    """Twilio fires this on every inbound call."""
+    """Telnyx fires this on every inbound call."""
     telephony = await get_telephony_by_kairo_number(Called)
     if not telephony:
         logger.warning("twiml.incoming: unknown number %s sid=%s", Called, CallSid)
@@ -1451,14 +1480,14 @@ async def incoming(
 In `booking_engine/app.py`:
 
 ```python
-from booking_engine.api.routes import voice_twiml
-app.include_router(voice_twiml.router)
+from booking_engine.api.routes import voice_texml
+app.include_router(voice_texml.router)
 ```
 
 - [ ] **Step 6: Run tests to verify pass**
 
 ```
-pytest tests/voice_gateway/test_voice_twiml_webhook.py -v
+pytest tests/voice_gateway/test_voice_texml_webhook.py -v
 ```
 
 Expected: 5 passing.
@@ -1466,8 +1495,8 @@ Expected: 5 passing.
 - [ ] **Step 7: Commit**
 
 ```
-git add booking_engine/api/routes/voice_twiml.py booking_engine/db/voice_config_queries.py booking_engine/app.py tests/voice_gateway/test_voice_twiml_webhook.py
-git commit -m "feat(voice): dynamic TwiML webhook with detach matrix and Path-2 loop safety"
+git add booking_engine/api/routes/voice_texml.py booking_engine/db/voice_config_queries.py booking_engine/app.py tests/voice_gateway/test_voice_texml_webhook.py
+git commit -m "feat(voice): dynamic TeXML webhook with detach matrix and Path-2 loop safety"
 ```
 
 ---
@@ -2031,7 +2060,9 @@ git commit -m "feat(voice): /voice/balance status endpoint and alert emission on
 
 ---
 
-### Task 10: Path 2 forwarding heartbeat scheduler
+### Task 10: Path 1 forwarding heartbeat scheduler
+
+> **Revision 2026-06-06:** label corrected. This task is the heartbeat for the **Forward** path (Path 1, default) — detects when the salon's own carrier has stopped forwarding to our receiving DID. No equivalent heartbeat is needed for Path 2 (provisioned IT number) because it's a direct number, not a forwarded one.
 
 **Files:**
 - Create: `booking_engine/services/forwarding_heartbeat.py`
@@ -2148,10 +2179,10 @@ Append to `docs/DEPLOY_VOICE_AGENT.md` (existing file from prior session):
 ## Plan A — Platform deploy notes (2026-06-03)
 
 ### New env vars on Lambda
-- `TWILIO_ACCOUNT_SID` — Twilio account SID
-- `TWILIO_AUTH_TOKEN` — Twilio auth token
+- `TELNYX_API_KEY` — Telnyx API key (bearer token for REST + SDK)
+- `TELNYX_PUBLIC_KEY` — Telnyx public key for webhook signature verification
 - `OPENAI_SIP_PROJECT_ID` — OpenAI project ID for SIP routing
-- `PUBLIC_BASE_URL` — public URL of the API Gateway in front of Lambda (used for TwiML voice_url)
+- `PUBLIC_BASE_URL` — public URL of the API Gateway in front of Lambda (used for TeXML voice_url)
 - `VOICE_KAIRO_TOKENS_PER_SECOND` — default 18
 - `VOICE_MIN_SESSION_RESERVE_TOKENS` — default 1500
 - `VOICE_MAX_OVERAGE_TOKENS` — default 5000
@@ -2177,7 +2208,7 @@ git commit -m "docs(voice): Plan A deploy notes (env vars, migration, heartbeat 
 - All 11 tasks committed.
 - `pytest tests/voice_gateway/` passes cleanly.
 - Migration `04_voice_agent_v2.sql` applies cleanly on a fresh DB and on the live dev DB.
-- Following endpoints exist and respond per spec: `GET /voice/numbers/search`, `POST /voice/numbers/provision`, `GET /voice/numbers/{shop_id}`, `POST /voice/twiml/incoming`, `GET /voice/config/{shop_id}`, `PATCH /voice/config/{shop_id}`, `GET /voice/balance/{shop_id}`.
+- Following endpoints exist and respond per spec: `GET /voice/numbers/search`, `POST /voice/numbers/provision`, `GET /voice/numbers/{shop_id}`, `POST /voice/texml/incoming`, `GET /voice/config/{shop_id}`, `PATCH /voice/config/{shop_id}`, `GET /voice/balance/{shop_id}`.
 - Token meter computes correct warning tiers and detach decisions.
 - Push event emitter is wired (stub) and ready for Plan C webapp integration.
 
