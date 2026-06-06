@@ -25,8 +25,11 @@ LAMBDA_FUNCTION="booking-engine-api"
 API_GATEWAY_NAME="booking-engine-api"
 ROLE_NAME="booking-engine-lambda-role"
 
-# Export profile so every aws CLI call in this script uses it
-export AWS_PROFILE
+# Only export AWS_PROFILE locally; in CI, credentials come from env vars set
+# by configure-aws-credentials and exporting a profile overrides them.
+if [[ -z "${AWS_ACCESS_KEY_ID:-}" ]]; then
+  export AWS_PROFILE
+fi
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"

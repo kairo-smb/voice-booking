@@ -72,7 +72,6 @@ jobs:
 
       - name: Deploy
         env:
-          AWS_PROFILE: default
           AWS_REGION: ${{ env.AWS_REGION }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           CONTROL_PLANE_SECRET: ${{ secrets.CONTROL_PLANE_SECRET }}
