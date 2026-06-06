@@ -65,7 +65,7 @@ async def record_voice_debit(
     duration_seconds: int,
     tool_token_cost: int,
     tokens_per_second: int,
-    previous_tier: str | None = None,
+    previous_tier: WarningTier | None = None,
 ) -> None:
     """Debit a completed call's tokens from the shop basket."""
     tokens = duration_seconds * tokens_per_second + tool_token_cost

@@ -71,6 +71,9 @@ async def provision(
         voice_url=voice_url,
         api_key=settings.telnyx_api_key,
     )
+    # Path 2 (new IT number) starts as pending_review; transitions to active/rejected
+    # via the /voice/telnyx/number-status webhook once Telnyx completes the review.
+    activation_status = "pending_review" if body.setup_path == "new" else "active"
     row = await q.upsert_telephony(
         shop_id=body.shop_id,
         provider="telnyx",
@@ -78,6 +81,7 @@ async def provision(
         kairo_number_sid=purchased.sid,
         salon_existing_number=body.salon_existing_number,
         setup_path=body.setup_path,
+        activation_status=activation_status,
     )
     return {"data": TelephonyOut(
         shop_id=row["shop_id"],

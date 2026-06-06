@@ -58,7 +58,13 @@ def purchase_number(
     voice_url: str,
     api_key: str,
 ) -> PurchasedNumber:
-    """Purchase a number and bind its Voice URL to the dynamic TeXML webhook."""
+    """Purchase a number via a Telnyx NumberOrder.
+
+    `voice_url` is recorded for traceability but not applied here — Telnyx
+    uses TeXML Applications (not a per-number URL field) to route inbound
+    calls. The TeXML Application must be pre-configured in the Telnyx portal
+    with this voice_url and associated with the purchased number post-deploy.
+    """
     client = Telnyx(api_key=api_key)
     result = client.number_orders.create(
         phone_numbers=[{"phone_number": phone_number}],

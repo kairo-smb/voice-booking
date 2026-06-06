@@ -1,4 +1,8 @@
-"""Path-2 forwarding heartbeat — finds shops whose forwarded number went silent.
+"""Path 1 forwarding heartbeat — finds shops whose forwarded number went silent.
+
+Path 1 = 'forward' setup (default, ~70-80% of shops): the salon's existing
+carrier number forwards to our Telnyx DID. This heartbeat detects when that
+forwarding has silently stopped (no inbound call in threshold_days).
 
 Run nightly by a Lambda scheduled event. For each silent shop, emit a push
 event 'forwarding_might_be_off'. Webapp surfaces this as a persistent banner.
@@ -12,7 +16,7 @@ from booking_engine.db.connection import execute
 
 
 async def find_silent_forwarded_shops(*, threshold_days: int = 5) -> list[dict]:
-    """Return Path-2 shops with no inbound call in the last `threshold_days`."""
+    """Return Path 1 (forward) shops with no inbound call in the last `threshold_days`."""
     return await execute(
         """
         SELECT shop_id, kairo_number, last_inbound_call_at, setup_path
