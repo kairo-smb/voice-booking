@@ -42,6 +42,10 @@ def create_app() -> FastAPI:
     app.include_router(voice_heartbeat.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_telnyx_webhooks
     app.include_router(voice_telnyx_webhooks.router, prefix="/api/v1")
+    from booking_engine.api.routes import voice_tools_catalog
+    app.include_router(voice_tools_catalog.router)
+    from booking_engine.api.routes import voice_tools_booking
+    app.include_router(voice_tools_booking.router)
     from booking_engine.api.routes import voice_tools_identity
     app.include_router(voice_tools_identity.router)
 
