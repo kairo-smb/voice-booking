@@ -48,6 +48,8 @@ def create_app() -> FastAPI:
     app.include_router(voice_tools_booking.router)
     from booking_engine.api.routes import voice_tools_lifecycle
     app.include_router(voice_tools_lifecycle.router)
+    from booking_engine.api.routes import voice_events
+    app.include_router(voice_events.router)
     from booking_engine.api.routes import voice_tools_identity
     app.include_router(voice_tools_identity.router)
 

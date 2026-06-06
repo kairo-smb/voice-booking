@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from booking_engine.db.connection import execute_one
+from booking_engine.db.connection import execute_one, execute_one as _exec
+
+
+async def get_policy(locale: str = "it-IT") -> dict | None:
+    return await _exec(
+        "SELECT * FROM voice_agent.system_policy WHERE locale = $1",
+        locale,
+    )
 
 
 async def get_config(shop_id: UUID) -> dict | None:
