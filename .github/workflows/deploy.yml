@@ -63,7 +63,7 @@ jobs:
           API_ID=$(aws apigatewayv2 get-apis \
             --query "Items[?Name=='${{ env.API_GATEWAY_NAME }}'].ApiId" \
             --output text \
-            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+            --region ${{ env.AWS_REGION }} 2>/dev/null | head -1 | tr -d '[:space:]' || echo "")
           if [[ -n "$API_ID" ]]; then
             echo "url=https://${API_ID}.execute-api.${{ env.AWS_REGION }}.amazonaws.com" >> "$GITHUB_OUTPUT"
           else
@@ -89,7 +89,7 @@ jobs:
           API_ID=$(aws apigatewayv2 get-apis \
             --query "Items[?Name=='${{ env.API_GATEWAY_NAME }}'].ApiId" \
             --output text \
-            --region ${{ env.AWS_REGION }})
+            --region ${{ env.AWS_REGION }} | head -1 | tr -d '[:space:]')
           NEW_URL="https://${API_ID}.execute-api.${{ env.AWS_REGION }}.amazonaws.com"
 
           CURRENT_ENV=$(aws lambda get-function-configuration \
@@ -112,7 +112,7 @@ jobs:
           API_ID=$(aws apigatewayv2 get-apis \
             --query "Items[?Name=='${{ env.API_GATEWAY_NAME }}'].ApiId" \
             --output text \
-            --region ${{ env.AWS_REGION }} | tr -d '[:space:]')
+            --region ${{ env.AWS_REGION }} | head -1 | tr -d '[:space:]')
           URL="https://${API_ID}.execute-api.${{ env.AWS_REGION }}.amazonaws.com"
           SECRET="${{ secrets.CONTROL_PLANE_SECRET }}"
           SHOP_ID="${{ secrets.DEMO_SHOP_ID }}"
