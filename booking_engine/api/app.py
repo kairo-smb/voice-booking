@@ -34,8 +34,6 @@ def create_app() -> FastAPI:
     app.include_router(voice_telephony.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_texml
     app.include_router(voice_texml.router, prefix="/api/v1")
-    from booking_engine.api.routes import voice_twiml  # kept for backward-compat; remove after cutover
-    app.include_router(voice_twiml.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_config
     app.include_router(voice_config.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_balance
