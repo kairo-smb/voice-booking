@@ -112,3 +112,17 @@ class EscalateIn(BaseModel):
     reason: str
     callback_window: str | None = None
     customer_message: str
+
+
+# Catalog (request models)
+class GetServicesIn(BaseModel):
+    filter: str | None = None
+
+
+class GetStaffForServiceIn(BaseModel):
+    service_id: UUID
+
+
+# Identity (request model for lookup_customer)
+class LookupCustomerIn(BaseModel):
+    phone: str

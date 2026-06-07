@@ -99,6 +99,11 @@ async def modify_booking(
     x_call_id: Annotated[UUID, Header(alias="X-Call-Id")],
 ) -> Envelope[dict]:
     if not body.verification_passed:
+        await log_auth_event(
+            call_id=x_call_id, customer_id=None,
+            verification_question="modify_booking",
+            caller_answer_excerpt="", passed=False,
+        )
         return Envelope[dict](ok=False, error="unauthorized")
     ok = await modify_appointment(
         appointment_id=body.appointment_id,
@@ -120,6 +125,11 @@ async def cancel_booking(
     x_call_id: Annotated[UUID, Header(alias="X-Call-Id")],
 ) -> Envelope[dict]:
     if not body.verification_passed:
+        await log_auth_event(
+            call_id=x_call_id, customer_id=None,
+            verification_question="cancel_booking",
+            caller_answer_excerpt="", passed=False,
+        )
         return Envelope[dict](ok=False, error="unauthorized")
     ok = await cancel_appointment(appointment_id=body.appointment_id)
     await log_auth_event(

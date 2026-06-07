@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header
 from booking_engine.api.deps import require_tool_token
 from booking_engine.api.voice_tool_models import (
     CreateCustomerIn, CreatedCustomerOut, CustomerSummary, Envelope,
-    UpdateCustomerIn,
+    LookupCustomerIn, UpdateCustomerIn,
 )
 from booking_engine.db.voice_tool_queries import (
     attach_customer_to_call, find_customers_by_phone,
@@ -22,13 +22,12 @@ router = APIRouter(prefix="/voice/tools", tags=["voice-tools-identity"])
 
 @router.post("/lookup_customer")
 async def lookup_customer(
-    body: dict,
+    body: LookupCustomerIn,
     _auth: Annotated[bool, Depends(require_tool_token)],
     x_shop_id: Annotated[UUID, Header(alias="X-Shop-Id")],
 ) -> Envelope[list[CustomerSummary]]:
-    phone = body.get("phone", "")
     rows = await find_customers_by_phone(
-        shop_id=x_shop_id, phone_digits=digits_only(phone),
+        shop_id=x_shop_id, phone_digits=digits_only(body.phone),
     )
     summaries = [CustomerSummary(
         customer_id=r["id"], first_name=r["first_name"] or "",

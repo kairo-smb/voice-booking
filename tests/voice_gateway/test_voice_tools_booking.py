@@ -88,15 +88,17 @@ async def test_create_booking_slot_taken_returns_error():
 
 @pytest.mark.asyncio
 async def test_modify_booking_requires_verification():
-    transport = ASGITransport(app=_app)
-    async with AsyncClient(transport=transport, base_url="http://t") as c:
-        r = await c.post(
-            "/voice/tools/modify_booking",
-            headers=AUTH,
-            json={"appointment_id": str(uuid4()),
-                  "verification_passed": False,
-                  "new_slot_start": datetime.now(timezone.utc).isoformat()},
-        )
+    with patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=AsyncMock(return_value=None)):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/modify_booking",
+                headers=AUTH,
+                json={"appointment_id": str(uuid4()),
+                      "verification_passed": False,
+                      "new_slot_start": datetime.now(timezone.utc).isoformat()},
+            )
     body = r.json()
     assert body["ok"] is False
     assert body["error"] == "unauthorized"
@@ -120,3 +122,21 @@ async def test_cancel_booking_writes_audit_event():
     body = r.json()
     assert body["ok"] is True
     audit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancel_booking_logs_failed_verification():
+    appt_id = uuid4()
+    with patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=AsyncMock(return_value=None)):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/cancel_booking",
+                headers=AUTH,
+                json={"appointment_id": str(appt_id),
+                      "verification_passed": False},
+            )
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"] == "unauthorized"
