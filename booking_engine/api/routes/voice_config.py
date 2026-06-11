@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from booking_engine.api.deps import require_control_plane_token
 from booking_engine.db.voice_config_queries import get_config, upsert_config
 from booking_engine.db.voice_telephony_queries import get_telephony
+from booking_engine.db.voice_tone_queries import get_tone_by_id
 from booking_engine.services.phone_normalize import digits_only
 
 router = APIRouter(prefix="/voice/config", tags=["voice-config"])
@@ -18,7 +19,7 @@ router = APIRouter(prefix="/voice/config", tags=["voice-config"])
 
 _PATCHABLE_FIELDS = {
     "enabled", "display_name", "greeting_after_disclosure",
-    "voice_preset", "tone_preset", "business_hours",
+    "voice_preset", "tone_id", "business_hours",
     "answer_mode", "overflow_ring_count",
     "services_to_mention", "retention_days",
     "manual_fallback_number",
@@ -31,7 +32,7 @@ class ConfigPatch(BaseModel):
     display_name: str | None = None
     greeting_after_disclosure: str | None = None
     voice_preset: str | None = Field(default=None, pattern=r"^(warm_female|neutral_female|neutral_male)$")
-    tone_preset: str | None = Field(default=None, pattern=r"^(warm|professional|casual)$")
+    tone_id: UUID | None = None
     business_hours: dict | None = None
     answer_mode: str | None = Field(default=None, pattern=r"^(overflow|always_on)$")
     overflow_ring_count: int | None = Field(default=None, ge=1, le=10)
@@ -60,6 +61,15 @@ async def patch_for_shop(
 ):
     payload = body.model_dump(exclude_unset=True, exclude_none=False)
     payload = {k: v for k, v in payload.items() if k in _PATCHABLE_FIELDS}
+
+    # Tone existence validation
+    if "tone_id" in payload and payload["tone_id"] is not None:
+        tone = await get_tone_by_id(payload["tone_id"])
+        if tone is None:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Unknown tone_id; no matching voice_tones row."},
+            )
 
     # Loop-safety validation: fallback must differ from forwarded number
     if payload.get("manual_fallback_number"):
