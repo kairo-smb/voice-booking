@@ -67,7 +67,7 @@ async def session_started(
         shop_id=x_shop_id, caller_phone=body.caller_phone,
         matched_customer_id=matched_id,
     )
-    assembled = assemble_session_prompt(
+    assembled = await assemble_session_prompt(
         config=config, policy=policy, resolution=resolution,
     )
     return Envelope[dict](ok=True, data={

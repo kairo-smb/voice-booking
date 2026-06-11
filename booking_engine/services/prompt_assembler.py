@@ -1,21 +1,29 @@
 """3-layer system-prompt assembler.
 
 Composes the session prompt sent to OpenAI on session.started:
-  Layer 3 (safety, immutable) → caller context → Layer 1 (personality)
-  → Layer 2 (disclosure) → tool descriptions.
+  Layer 3 (safety, immutable) → caller context → Layer 1 (personality,
+  display, tone) → Layer 2 (disclosure) → tool descriptions.
+
+The tone instruction is fetched from voice_agent.voice_tones via tone_id;
+unknown / missing / lookup failures fall back to DEFAULT_TONE_INSTRUCTION.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
 
+from booking_engine.db.voice_tone_queries import get_tone_by_id
 from booking_engine.services.identity_resolver import ResolutionResult
 from booking_engine.services.safety_layer import (
     DEFAULT_TOOL_ALLOWLIST,
     SAFETY_PROMPT,
     tool_descriptions,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,11 +33,9 @@ class AssembledPrompt:
     voice: str
 
 
-_TONE_INJECT = {
-    "warm": "Tono caloroso, accogliente, mai distante.",
-    "professional": "Tono professionale e diretto, senza fronzoli.",
-    "casual": "Tono informale e amichevole, come parlare a un amico.",
-}
+DEFAULT_TONE_INSTRUCTION = (
+    "Usa un linguaggio chiaro e professionale. Sii utile e diretto."
+)
 
 
 def _caller_context(resolution: ResolutionResult) -> str:
@@ -64,7 +70,20 @@ def _caller_context(resolution: ResolutionResult) -> str:
     )
 
 
-def assemble_session_prompt(
+async def _resolve_tone_instruction(tone_id: UUID | None) -> str:
+    if tone_id is None:
+        return DEFAULT_TONE_INSTRUCTION
+    try:
+        tone = await get_tone_by_id(tone_id)
+    except Exception:
+        logger.exception("voice_tones lookup failed for %s; using default", tone_id)
+        return DEFAULT_TONE_INSTRUCTION
+    if tone is None:
+        return DEFAULT_TONE_INSTRUCTION
+    return tone["system_prompt_instruction"]
+
+
+async def assemble_session_prompt(
     *,
     config: dict[str, Any],
     policy: dict[str, Any],
@@ -72,7 +91,7 @@ def assemble_session_prompt(
     allowlist: list[str] | None = None,
 ) -> AssembledPrompt:
     allowlist = allowlist or DEFAULT_TOOL_ALLOWLIST
-    tone_text = _TONE_INJECT.get(config.get("tone_preset", "warm"), _TONE_INJECT["warm"])
+    tone_text = await _resolve_tone_instruction(config.get("tone_id"))
 
     parts = [
         SAFETY_PROMPT,
