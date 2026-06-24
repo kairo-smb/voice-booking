@@ -1,0 +1,16 @@
+#!/bin/sh
+# Block direct pushes to main — main is reached only via a (CI-gated) PR from QA.
+# QA and feature branches are pushable directly. Client-side guardrail (Free+private
+# repos can't use server-side branch protection). Bypassable with --no-verify.
+protected='^refs/heads/main$'
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if printf '%s' "$remote_ref" | grep -Eq "$protected"; then
+    echo "" >&2
+    echo "  ✗ Direct push to 'main' is blocked. Open a PR from QA instead." >&2
+    echo "    Flow: dev_<name> -> QA (push freely) -> main (PR + green CI)." >&2
+    echo "    (Deliberate override: git push --no-verify)" >&2
+    echo "" >&2
+    exit 1
+  fi
+done
+exit 0
