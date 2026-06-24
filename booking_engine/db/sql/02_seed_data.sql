@@ -20,13 +20,15 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- Staff
-INSERT INTO staff (id, shop_id, full_name, role, bio, is_active)
+-- role is the business_app_core role_enum (owner | member); the job title lives
+-- in job_title. First staff per shop = owner, the rest = member.
+INSERT INTO staff (id, shop_id, full_name, role, job_title, bio, is_active)
 VALUES
-  ('11111111-0000-0000-0000-000000000001', 'a0000000-0000-0000-0000-000000000001', 'Mirco Meazzo', 'stilista senior', 'Stilista con 15 anni di esperienza', true),
-  ('11111111-0000-0000-0000-000000000002', 'a0000000-0000-0000-0000-000000000001', 'Giulia Verdi', 'colorista', 'Esperta di colorazioni e trattamenti', true),
-  ('11111111-0000-0000-0000-000000000003', 'a0000000-0000-0000-0000-000000000001', 'Marco Bianchi', 'stilista', 'Specializzato in tagli classici e barba', true),
-  ('22222222-0000-0000-0000-000000000001', 'b0000000-0000-0000-0000-000000000002', 'Anna Rossi', 'stilista senior', 'Stilista di fama internazionale', true),
-  ('22222222-0000-0000-0000-000000000002', 'b0000000-0000-0000-0000-000000000002', 'Luca Neri', 'colorista', 'Esperto di balayage e meches', true)
+  ('11111111-0000-0000-0000-000000000001', 'a0000000-0000-0000-0000-000000000001', 'Mirco Meazzo', 'owner', 'stilista senior', 'Stilista con 15 anni di esperienza', true),
+  ('11111111-0000-0000-0000-000000000002', 'a0000000-0000-0000-0000-000000000001', 'Giulia Verdi', 'member', 'colorista', 'Esperta di colorazioni e trattamenti', true),
+  ('11111111-0000-0000-0000-000000000003', 'a0000000-0000-0000-0000-000000000001', 'Marco Bianchi', 'member', 'stilista', 'Specializzato in tagli classici e barba', true),
+  ('22222222-0000-0000-0000-000000000001', 'b0000000-0000-0000-0000-000000000002', 'Anna Rossi', 'owner', 'stilista senior', 'Stilista di fama internazionale', true),
+  ('22222222-0000-0000-0000-000000000002', 'b0000000-0000-0000-0000-000000000002', 'Luca Neri', 'member', 'colorista', 'Esperto di balayage e meches', true)
 ON CONFLICT (id) DO NOTHING;
 
 -- Services
