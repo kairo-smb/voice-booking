@@ -39,9 +39,30 @@ PHONE_MARIA = "+39 333 1111111"
 PHONE_LUCA = "+39 333 2222222"
 
 
+# Production Neon endpoint — live_db tests create/delete rows and must NEVER run here.
+_PROD_HOST_FRAGMENT = "ep-weathered-term-agsfwl6w"
+
+
+def _resolve_test_db_url() -> str:
+    """Resolve the DB for live tests, preferring the QA branch and refusing prod.
+
+    These tests write to and delete from real tables, so they run only against
+    TEST_DATABASE_URL (the QA Neon branch). A DATABASE_URL pointing at production
+    is rejected (returns "" → the suite skips) so we can never mutate prod data.
+    """
+    url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
+    if url and _PROD_HOST_FRAGMENT in url:
+        logger.warning(
+            "Refusing to run live_db tests against PRODUCTION Neon. "
+            "Set TEST_DATABASE_URL to the QA branch."
+        )
+        return ""
+    return url
+
+
 def _get_db_settings() -> Settings | None:
-    """Build Settings from DATABASE_URL environment variable."""
-    db_url = os.environ.get("DATABASE_URL", "")
+    """Build Settings from the resolved (non-prod) test database URL."""
+    db_url = _resolve_test_db_url()
     if not db_url:
         return None
     return Settings(database_url=db_url)
