@@ -104,3 +104,23 @@ async def test_finalize_updates_call_with_outcome():
         classifier.assert_awaited_once()
         sql = ev.await_args.args[0]
         assert "UPDATE voice_agent.calls" in sql
+
+
+@pytest.mark.asyncio
+async def test_finalize_persists_service_brief():
+    brief = {"services_requested": [{"servizio": "colore", "note": "piu freddo"}]}
+    classifier = AsyncMock(return_value={
+        "outcome": "escalated", "outcome_reason": "x", "summary": "y",
+        "service_brief": brief,
+    })
+    with patch("voice_gateway.call_lifecycle.execute_void", AsyncMock()) as ev:
+        sess = CallSession(shop_id=uuid4(), caller_number="+39", twilio_call_sid=None)
+        sess.id = uuid4()
+        sess.transcript = [{"role": "caller", "text": "voglio schiarire"}]
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        sess.started_at = _dt.now(_tz.utc) - _td(seconds=90)
+        await sess.finalize(classifier=classifier, api_key="sk", model="gpt")
+        sql = ev.await_args.args[0]
+        assert "service_brief" in sql
+        args = ev.await_args.args
+        assert any(isinstance(a, str) and "colore" in a for a in args)

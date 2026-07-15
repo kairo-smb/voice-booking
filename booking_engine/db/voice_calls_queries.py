@@ -90,17 +90,21 @@ async def list_memos(
     if status:
         return await connection.execute(
             """
-            SELECT * FROM voice_agent.callback_memos
-            WHERE shop_id = $1 AND status = $2
-            ORDER BY created_at DESC LIMIT $3
+            SELECT m.*, c.service_brief, c.summary AS call_summary, c.outcome
+            FROM voice_agent.callback_memos m
+            LEFT JOIN voice_agent.calls c ON c.id = m.call_id
+            WHERE m.shop_id = $1 AND m.status = $2
+            ORDER BY m.created_at DESC LIMIT $3
             """,
             shop_id, status, limit,
         )
     return await connection.execute(
         """
-        SELECT * FROM voice_agent.callback_memos
-        WHERE shop_id = $1
-        ORDER BY created_at DESC LIMIT $2
+        SELECT m.*, c.service_brief, c.summary AS call_summary, c.outcome
+        FROM voice_agent.callback_memos m
+        LEFT JOIN voice_agent.calls c ON c.id = m.call_id
+        WHERE m.shop_id = $1
+        ORDER BY m.created_at DESC LIMIT $2
         """,
         shop_id, limit,
     )

@@ -1,6 +1,7 @@
 """CallSession - owns the persistence lifecycle for one inbound phone call."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
@@ -113,9 +114,10 @@ class CallSession:
             "UPDATE voice_agent.calls SET "
             "  ended_at = $1, duration_seconds = $2, "
             "  outcome = $3, outcome_reason = $4, summary = $5, "
-            "  appointment_id = $6 "
-            "WHERE id = $7",
+            "  appointment_id = $6, service_brief = $7::jsonb "
+            "WHERE id = $8",
             ended_at, duration,
             result["outcome"], result["outcome_reason"], result["summary"],
-            self.appointment_id, self.id,
+            self.appointment_id, json.dumps(result.get("service_brief", {})),
+            self.id,
         )
