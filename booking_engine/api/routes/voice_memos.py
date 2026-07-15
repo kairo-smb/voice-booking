@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from booking_engine.api.deps import require_control_plane_token
 from booking_engine.db.voice_calls_queries import (
-    list_memos, update_memo_status,
+    count_pending_memos, list_memos, update_memo_status,
 )
 
 router = APIRouter(prefix="/voice/memos", tags=["voice-memos"])
@@ -29,6 +29,16 @@ async def list_for_shop(
 ) -> dict:
     rows = await list_memos(shop_id=shop_id, status=status, limit=limit)
     return {"data": rows}
+
+
+@router.get("/{shop_id}/count")
+async def action_center_count(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Action Center tile: number of open escalations for the shop."""
+    n = await count_pending_memos(shop_id=shop_id)
+    return {"data": {"pending_escalations": n}}
 
 
 @router.patch("/{memo_id}")

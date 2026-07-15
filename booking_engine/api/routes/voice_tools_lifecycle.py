@@ -40,10 +40,11 @@ async def escalate_to_merchant(
     call = await get_call(x_call_id)
     if not call:
         return Envelope[dict](ok=False, error="call_not_found")
+    caller_phone = call.get("caller_number")
     memo_id = await insert_callback_memo(
         call_id=x_call_id, shop_id=call["shop_id"],
-        customer_id=call.get("matched_customer_id"),
-        caller_phone=call.get("caller_phone"),
+        customer_id=call.get("customer_id"),
+        caller_phone=caller_phone,
         reason=f"{body.reason} — {body.customer_message}",
         callback_window=body.callback_window,
     )
@@ -55,6 +56,6 @@ async def escalate_to_merchant(
     await send_push(
         shop_id=call["shop_id"], event="voice_new_memo",
         payload={"memo_id": str(memo_id), "reason": body.reason,
-                 "caller_phone": call.get("caller_phone")},
+                 "caller_phone": caller_phone},
     )
     return Envelope[dict](ok=True, data={"memo_id": str(memo_id)})

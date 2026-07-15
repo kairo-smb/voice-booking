@@ -106,6 +106,16 @@ async def list_memos(
     )
 
 
+async def count_pending_memos(*, shop_id: UUID) -> int:
+    """Open-escalation count for the Action Center tile."""
+    row = await connection.execute_one(
+        "SELECT count(*) AS n FROM voice_agent.callback_memos "
+        "WHERE shop_id = $1 AND status = 'pending'",
+        shop_id,
+    )
+    return int(row["n"]) if row else 0
+
+
 async def update_memo_status(
     *, memo_id: UUID, status: str, actioned_by: UUID | None,
 ) -> bool:

@@ -51,3 +51,14 @@ async def test_action_memo_updates_status():
                 json={"status": "actioned", "actioned_by": str(staff_id)},
             )
     assert r.json()["data"]["updated"] is True
+
+@pytest.mark.asyncio
+async def test_action_center_tile_returns_pending_escalation_count():
+    shop_id = uuid4()
+    with patch("booking_engine.api.routes.voice_memos.count_pending_memos",
+               new=AsyncMock(return_value=3)):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get(f"/voice/memos/{shop_id}/count", headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["data"]["pending_escalations"] == 3
