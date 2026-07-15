@@ -67,6 +67,7 @@ class CallDetail(BaseModel):
     call: CallSummary
     transcript: list[TranscriptTurn]
     events: list[CallEvent]
+    service_brief: dict[str, Any] | None = None
 
 
 class LinkCustomerRequest(BaseModel):

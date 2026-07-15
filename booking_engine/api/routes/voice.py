@@ -20,6 +20,8 @@ from booking_engine.api.voice_models import (
     VoiceAnalyticsResponse,
 )
 from booking_engine.db import voice_queries as vq
+from booking_engine.db.voice_tool_queries import list_services
+from booking_engine.services.service_catalog_match import enrich_brief, parse_brief
 
 
 router = APIRouter(
@@ -79,10 +81,15 @@ async def get_call_detail(shop_id: UUID, call_id: UUID):
             status_code=404,
             content={"error": "call_not_found", "message": f"Call {call_id} not found"},
         )
+    brief = parse_brief(detail.get("service_brief"))
+    if brief.get("services_requested"):
+        catalog = await list_services(shop_id=shop_id, filter_q=None)
+        brief = enrich_brief(brief, catalog)
     payload = CallDetail(
         call=CallSummary(**detail["call"]),
         transcript=[TranscriptTurn(**t) for t in detail["transcript"]],
         events=[CallEvent(**e) for e in detail["events"]],
+        service_brief=brief,
     )
     return _wrap(payload.model_dump(mode="json"))
 

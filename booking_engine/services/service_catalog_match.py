@@ -9,6 +9,7 @@ Upgrade path if recall is poor: a per-shop synonym table or an LLM match step.
 """
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from typing import Any
@@ -18,6 +19,28 @@ def _tokens(s: str) -> set[str]:
     s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
     s = re.sub(r"[^a-z0-9\s]", " ", s.lower())
     return {t for t in s.split() if len(t) >= 3}  # drop fillers: un, di, il...
+
+
+def parse_brief(raw: Any) -> dict[str, Any]:
+    """jsonb comes back from asyncpg as a str; tolerate str | dict | None."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {}
+    return {}
+
+
+def enrich_brief(raw: Any, catalog: list[dict[str, Any]]) -> dict[str, Any]:
+    """Parse a stored brief and annotate its services with catalog matches."""
+    brief = parse_brief(raw)
+    if brief.get("services_requested"):
+        brief["services_requested"] = match_services_to_catalog(
+            services_requested=brief["services_requested"], catalog=catalog,
+        )
+    return brief
 
 
 def match_services_to_catalog(

@@ -45,11 +45,13 @@ async def test_check_availability_returns_slots():
 @pytest.mark.asyncio
 async def test_create_booking_inserts_and_attaches_to_call():
     appt_id = uuid4()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    with patch("booking_engine.api.routes.voice_tools_booking.insert_booking_locked",
+    future = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=1)
+    with patch("booking_engine.api.routes.voice_tools_booking.service_belongs_to_shop",
+               new=AsyncMock(return_value=True)), \
+         patch("booking_engine.api.routes.voice_tools_booking.insert_booking_locked",
                new=AsyncMock(return_value={
-                   "id": appt_id, "slot_start": now,
-                   "slot_end": now + timedelta(minutes=30),
+                   "id": appt_id, "slot_start": future,
+                   "slot_end": future + timedelta(minutes=30),
                    "staff_id": uuid4(),
                    "confirmation_status": "confirmed",
                })), \
@@ -61,7 +63,7 @@ async def test_create_booking_inserts_and_attaches_to_call():
                 "/voice/tools/create_booking",
                 headers=AUTH,
                 json={"customer_id": str(uuid4()), "service_id": str(uuid4()),
-                      "slot_start": now.isoformat(), "staff_id": str(uuid4())},
+                      "slot_start": future.isoformat(), "staff_id": str(uuid4())},
             )
     body = r.json()
     assert body["ok"] is True
@@ -70,7 +72,10 @@ async def test_create_booking_inserts_and_attaches_to_call():
 
 @pytest.mark.asyncio
 async def test_create_booking_slot_taken_returns_error():
-    with patch("booking_engine.api.routes.voice_tools_booking.insert_booking_locked",
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    with patch("booking_engine.api.routes.voice_tools_booking.service_belongs_to_shop",
+               new=AsyncMock(return_value=True)), \
+         patch("booking_engine.api.routes.voice_tools_booking.insert_booking_locked",
                new=AsyncMock(side_effect=RuntimeError("slot_taken"))):
         transport = ASGITransport(app=_app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
@@ -78,7 +83,7 @@ async def test_create_booking_slot_taken_returns_error():
                 "/voice/tools/create_booking",
                 headers=AUTH,
                 json={"customer_id": str(uuid4()), "service_id": str(uuid4()),
-                      "slot_start": datetime.now(timezone.utc).isoformat(),
+                      "slot_start": future.isoformat(),
                       "staff_id": str(uuid4())},
             )
     body = r.json()
@@ -121,7 +126,8 @@ async def test_cancel_booking_authorized_cancels_and_audits():
          patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
                new=AsyncMock(return_value={
                    "shop_id": shop, "customer_id": cust,
-                   "phones": ["+39 333 111 0000"]})), \
+                   "phones": ["+39 333 111 0000"],
+                   "start_at": datetime.now(timezone.utc) + timedelta(days=3)})), \
          patch("booking_engine.api.routes.voice_tools_booking.cancel_appointment",
                new=AsyncMock(return_value=True)), \
          patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
@@ -183,7 +189,8 @@ async def test_modify_booking_authorizes_by_caller_phone_ignoring_agent_flag():
          patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
                new=AsyncMock(return_value={
                    "shop_id": shop, "customer_id": cust,
-                   "phones": ["+39 333 111 0000"]})), \
+                   "phones": ["+39 333 111 0000"],
+                   "start_at": datetime.now(timezone.utc) + timedelta(days=3)})), \
          patch("booking_engine.api.routes.voice_tools_booking.modify_appointment",
                new=modify), \
          patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
@@ -194,7 +201,8 @@ async def test_modify_booking_authorizes_by_caller_phone_ignoring_agent_flag():
                 "/voice/tools/modify_booking",
                 headers=_booking_auth_headers(call_id),
                 json={"appointment_id": str(appt),
-                      "new_slot_start": datetime.now(timezone.utc).isoformat(),
+                      "new_slot_start": (datetime.now(timezone.utc)
+                                         + timedelta(days=4)).isoformat(),
                       "verification_passed": False},  # agent says NO; server decides YES
             )
     assert r.json()["ok"] is True
@@ -260,3 +268,169 @@ async def test_cancel_booking_rejected_when_appointment_belongs_to_other_shop():
     assert body["ok"] is False
     assert "wrong_shop" in body["error"]
     cancel.assert_not_awaited()
+
+
+# --- create_booking policy constraints ----------------------------------------
+
+@pytest.mark.asyncio
+async def test_create_booking_rejects_unknown_service():
+    insert = AsyncMock()
+    with patch("booking_engine.api.routes.voice_tools_booking.service_belongs_to_shop",
+               new=AsyncMock(return_value=False)), \
+         patch("booking_engine.api.routes.voice_tools_booking.insert_booking_locked",
+               new=insert):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/create_booking",
+                headers=AUTH,
+                json={"customer_id": str(uuid4()), "service_id": str(uuid4()),
+                      "slot_start": (datetime.now(timezone.utc)
+                                     + timedelta(days=1)).isoformat(),
+                      "staff_id": str(uuid4())},
+            )
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"] == "unknown_service"
+    insert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_booking_rejects_past_slot():
+    insert = AsyncMock()
+    with patch("booking_engine.api.routes.voice_tools_booking.service_belongs_to_shop",
+               new=AsyncMock(return_value=True)), \
+         patch("booking_engine.api.routes.voice_tools_booking.insert_booking_locked",
+               new=insert):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/create_booking",
+                headers=AUTH,
+                json={"customer_id": str(uuid4()), "service_id": str(uuid4()),
+                      "slot_start": (datetime.now(timezone.utc)
+                                     - timedelta(hours=1)).isoformat(),
+                      "staff_id": str(uuid4())},
+            )
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"] == "slot_in_past"
+    insert.assert_not_awaited()
+
+
+# --- modify/cancel policy: lead-time, past slot, unknown service --------------
+
+def _owner_ok(shop, cust, start_at):
+    return {"shop_id": shop, "customer_id": cust,
+            "phones": ["+39 333 111 0000"], "start_at": start_at}
+
+
+@pytest.mark.asyncio
+async def test_modify_booking_denied_when_too_close_to_slot():
+    call_id, shop, cust, appt = uuid4(), uuid4(), uuid4(), uuid4()
+    soon = datetime.now(timezone.utc) + timedelta(minutes=30)  # within 2h lead
+    modify = AsyncMock(return_value=True)
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value={
+                   "id": call_id, "shop_id": shop,
+                   "caller_number": "+39 333 111 0000", "customer_id": cust})), \
+         patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
+               new=AsyncMock(return_value=_owner_ok(shop, cust, soon))), \
+         patch("booking_engine.api.routes.voice_tools_booking.modify_appointment",
+               new=modify), \
+         patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=AsyncMock()):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/modify_booking",
+                headers=_booking_auth_headers(call_id),
+                json={"appointment_id": str(appt),
+                      "new_slot_start": (datetime.now(timezone.utc)
+                                         + timedelta(days=2)).isoformat()},
+            )
+    assert r.json()["error"] == "reschedule_too_close"
+    modify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_booking_denied_when_too_close_to_slot():
+    call_id, shop, cust, appt = uuid4(), uuid4(), uuid4(), uuid4()
+    soon = datetime.now(timezone.utc) + timedelta(minutes=30)
+    cancel = AsyncMock(return_value=True)
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value={
+                   "id": call_id, "shop_id": shop,
+                   "caller_number": "+39 333 111 0000", "customer_id": cust})), \
+         patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
+               new=AsyncMock(return_value=_owner_ok(shop, cust, soon))), \
+         patch("booking_engine.api.routes.voice_tools_booking.cancel_appointment",
+               new=cancel), \
+         patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=AsyncMock()):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/cancel_booking",
+                headers=_booking_auth_headers(call_id),
+                json={"appointment_id": str(appt)},
+            )
+    assert r.json()["error"] == "cancel_too_close"
+    cancel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_modify_booking_rejects_past_new_slot():
+    call_id, shop, cust, appt = uuid4(), uuid4(), uuid4(), uuid4()
+    far = datetime.now(timezone.utc) + timedelta(days=5)
+    modify = AsyncMock(return_value=True)
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value={
+                   "id": call_id, "shop_id": shop,
+                   "caller_number": "+39 333 111 0000", "customer_id": cust})), \
+         patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
+               new=AsyncMock(return_value=_owner_ok(shop, cust, far))), \
+         patch("booking_engine.api.routes.voice_tools_booking.modify_appointment",
+               new=modify), \
+         patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=AsyncMock()):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/modify_booking",
+                headers=_booking_auth_headers(call_id),
+                json={"appointment_id": str(appt),
+                      "new_slot_start": (datetime.now(timezone.utc)
+                                         - timedelta(hours=1)).isoformat()},
+            )
+    assert r.json()["error"] == "slot_in_past"
+    modify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_modify_booking_rejects_unknown_new_service():
+    call_id, shop, cust, appt = uuid4(), uuid4(), uuid4(), uuid4()
+    far = datetime.now(timezone.utc) + timedelta(days=5)
+    modify = AsyncMock(return_value=True)
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value={
+                   "id": call_id, "shop_id": shop,
+                   "caller_number": "+39 333 111 0000", "customer_id": cust})), \
+         patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
+               new=AsyncMock(return_value=_owner_ok(shop, cust, far))), \
+         patch("booking_engine.api.routes.voice_tools_booking.service_belongs_to_shop",
+               new=AsyncMock(return_value=False)), \
+         patch("booking_engine.api.routes.voice_tools_booking.modify_appointment",
+               new=modify), \
+         patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=AsyncMock()):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/modify_booking",
+                headers=_booking_auth_headers(call_id),
+                json={"appointment_id": str(appt),
+                      "new_service_id": str(uuid4())},
+            )
+    assert r.json()["error"] == "unknown_service"
+    modify.assert_not_awaited()

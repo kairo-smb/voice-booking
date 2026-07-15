@@ -118,7 +118,13 @@ async def get_call_detail(shop_id: UUID, call_id: UUID) -> dict | None:
         "WHERE call_id = $1 ORDER BY at",
         call_id,
     )
-    return {"call": call, "transcript": transcript, "events": events}
+    brief_row = await execute_one(
+        "SELECT service_brief FROM voice_agent.calls WHERE id = $1", call_id,
+    )
+    return {
+        "call": call, "transcript": transcript, "events": events,
+        "service_brief": brief_row["service_brief"] if brief_row else None,
+    }
 
 
 async def link_customer(shop_id: UUID, call_id: UUID, customer_id: UUID) -> dict | None:

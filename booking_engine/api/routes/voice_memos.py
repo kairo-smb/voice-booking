@@ -1,8 +1,7 @@
 """Memo endpoints used by webapp to populate Inbox panel."""
 from __future__ import annotations
 
-import json
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -13,7 +12,7 @@ from booking_engine.db.voice_calls_queries import (
     count_pending_memos, list_memos, update_memo_status,
 )
 from booking_engine.db.voice_tool_queries import list_services
-from booking_engine.services.service_catalog_match import match_services_to_catalog
+from booking_engine.services.service_catalog_match import enrich_brief, parse_brief
 
 router = APIRouter(prefix="/voice/memos", tags=["voice-memos"])
 
@@ -23,30 +22,15 @@ class MemoPatch(BaseModel):
     actioned_by: UUID | None = None
 
 
-def _parse_brief(raw: Any) -> dict:
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except ValueError:
-            return {}
-    return {}
-
-
 async def _enrich_briefs(rows: list[dict], shop_id: UUID) -> list[dict]:
     """Attach catalog matches to each memo's requested services (Inbox card)."""
-    parsed = [(row, _parse_brief(row.get("service_brief"))) for row in rows]
+    parsed = [(row, parse_brief(row.get("service_brief"))) for row in rows]
     needs_catalog = any(b.get("services_requested") for _, b in parsed)
     catalog = (
         await list_services(shop_id=shop_id, filter_q=None) if needs_catalog else []
     )
     for row, brief in parsed:
-        if brief.get("services_requested"):
-            brief["services_requested"] = match_services_to_catalog(
-                services_requested=brief["services_requested"], catalog=catalog,
-            )
-        row["service_brief"] = brief
+        row["service_brief"] = enrich_brief(brief, catalog)
     return rows
 
 

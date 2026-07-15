@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     # Token meter
     voice_kairo_tokens_per_second: int = 18
     voice_min_session_reserve_tokens: int = 1500
+    # Within this many hours of the slot, the agent can't self-serve a
+    # reschedule/cancel — it must escalate to the salon.
+    voice_cancellation_lead_time_hours: int = 2
 
     model_config = {"env_prefix": ""}
 

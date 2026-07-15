@@ -284,6 +284,16 @@ async def modify_appointment(
     return True
 
 
+async def service_belongs_to_shop(*, shop_id: UUID, service_id: UUID) -> bool:
+    """True if the service exists in this shop's active catalog."""
+    row = await connection.execute_one(
+        "SELECT 1 AS ok FROM business_app_core.services "
+        "WHERE id = $1 AND shop_id = $2 AND active = true",
+        service_id, shop_id,
+    )
+    return row is not None
+
+
 async def get_appointment_owner(*, appointment_id: UUID) -> dict | None:
     """Return {shop_id, customer_id, phones[]} for an appointment, or None.
 
@@ -291,7 +301,7 @@ async def get_appointment_owner(*, appointment_id: UUID) -> dict | None:
     """
     return await connection.execute_one(
         """
-        SELECT a.shop_id, a.customer_id,
+        SELECT a.shop_id, a.customer_id, a.start_at,
                coalesce(
                  array_agg(pc.phone_number) FILTER (WHERE pc.phone_number IS NOT NULL),
                  '{}'
@@ -300,7 +310,7 @@ async def get_appointment_owner(*, appointment_id: UUID) -> dict | None:
         LEFT JOIN business_app_core.phone_contacts pc
                ON pc.customer_id = a.customer_id
         WHERE a.id = $1
-        GROUP BY a.shop_id, a.customer_id
+        GROUP BY a.shop_id, a.customer_id, a.start_at
         """,
         appointment_id,
     )
