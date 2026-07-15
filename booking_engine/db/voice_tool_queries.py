@@ -284,6 +284,28 @@ async def modify_appointment(
     return True
 
 
+async def get_appointment_owner(*, appointment_id: UUID) -> dict | None:
+    """Return {shop_id, customer_id, phones[]} for an appointment, or None.
+
+    Used to authorize reschedule/cancel: the caller must own this booking.
+    """
+    return await connection.execute_one(
+        """
+        SELECT a.shop_id, a.customer_id,
+               coalesce(
+                 array_agg(pc.phone_number) FILTER (WHERE pc.phone_number IS NOT NULL),
+                 '{}'
+               ) AS phones
+        FROM business_app_core.appointments a
+        LEFT JOIN business_app_core.phone_contacts pc
+               ON pc.customer_id = a.customer_id
+        WHERE a.id = $1
+        GROUP BY a.shop_id, a.customer_id
+        """,
+        appointment_id,
+    )
+
+
 async def cancel_appointment(*, appointment_id: UUID) -> bool:
     await connection.execute_void(
         """

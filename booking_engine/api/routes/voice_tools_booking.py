@@ -70,9 +70,36 @@ async def create_booking(
 
 
 from booking_engine.db.voice_tool_queries import (
-    cancel_appointment, get_next_booking_for_customer, log_auth_event,
-    modify_appointment,
+    cancel_appointment, get_appointment_owner, get_next_booking_for_customer,
+    log_auth_event, modify_appointment,
 )
+from booking_engine.db.voice_calls_queries import get_call
+from booking_engine.services.booking_authz import authorize_booking_change
+
+
+async def _authorize_change(*, call_id: UUID, appointment_id: UUID, action: str):
+    """Server-side ownership check. Returns (owner, reason) — reason 'ok' allows.
+
+    Ignores any agent-supplied verification_passed; the caller's phone (from the
+    call row) must own the appointment, and the appointment must be this shop's.
+    """
+    call = await get_call(call_id)
+    if not call:
+        await log_auth_event(call_id=call_id, customer_id=None,
+                             verification_question=action,
+                             caller_answer_excerpt="call_not_found", passed=False)
+        return None, "call_not_found"
+    owner = await get_appointment_owner(appointment_id=appointment_id)
+    ok, reason = authorize_booking_change(
+        caller_number=call.get("caller_number"),
+        call_shop_id=call["shop_id"], owner=owner,
+    )
+    await log_auth_event(
+        call_id=call_id,
+        customer_id=owner.get("customer_id") if owner else None,
+        verification_question=action, caller_answer_excerpt=reason, passed=ok,
+    )
+    return (owner, reason) if ok else (None, reason)
 
 
 class GetBookingIn(BaseModel):
@@ -98,22 +125,16 @@ async def modify_booking(
     _auth: Annotated[bool, Depends(require_tool_token)],
     x_call_id: Annotated[UUID, Header(alias="X-Call-Id")],
 ) -> Envelope[dict]:
-    if not body.verification_passed:
-        await log_auth_event(
-            call_id=x_call_id, customer_id=None,
-            verification_question="modify_booking",
-            caller_answer_excerpt="", passed=False,
-        )
-        return Envelope[dict](ok=False, error="unauthorized")
+    _owner, reason = await _authorize_change(
+        call_id=x_call_id, appointment_id=body.appointment_id,
+        action="modify_booking",
+    )
+    if reason != "ok":
+        return Envelope[dict](ok=False, error=reason)
     ok = await modify_appointment(
         appointment_id=body.appointment_id,
         new_slot_start=body.new_slot_start,
         new_service_id=body.new_service_id,
-    )
-    await log_auth_event(
-        call_id=x_call_id, customer_id=None,
-        verification_question="modify_booking",
-        caller_answer_excerpt="", passed=True,
     )
     return Envelope[dict](ok=ok, data={"updated": ok})
 
@@ -124,17 +145,11 @@ async def cancel_booking(
     _auth: Annotated[bool, Depends(require_tool_token)],
     x_call_id: Annotated[UUID, Header(alias="X-Call-Id")],
 ) -> Envelope[dict]:
-    if not body.verification_passed:
-        await log_auth_event(
-            call_id=x_call_id, customer_id=None,
-            verification_question="cancel_booking",
-            caller_answer_excerpt="", passed=False,
-        )
-        return Envelope[dict](ok=False, error="unauthorized")
-    ok = await cancel_appointment(appointment_id=body.appointment_id)
-    await log_auth_event(
-        call_id=x_call_id, customer_id=None,
-        verification_question="cancel_booking",
-        caller_answer_excerpt="", passed=True,
+    _owner, reason = await _authorize_change(
+        call_id=x_call_id, appointment_id=body.appointment_id,
+        action="cancel_booking",
     )
+    if reason != "ok":
+        return Envelope[dict](ok=False, error=reason)
+    ok = await cancel_appointment(appointment_id=body.appointment_id)
     return Envelope[dict](ok=ok, data={"cancelled": ok})

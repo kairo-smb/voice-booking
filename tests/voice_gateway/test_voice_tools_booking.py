@@ -87,27 +87,42 @@ async def test_create_booking_slot_taken_returns_error():
 
 
 @pytest.mark.asyncio
-async def test_modify_booking_requires_verification():
-    with patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+async def test_modify_booking_denied_when_call_not_found():
+    call_id = uuid4()
+    modify = AsyncMock(return_value=True)
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value=None)), \
+         patch("booking_engine.api.routes.voice_tools_booking.modify_appointment",
+               new=modify), \
+         patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
                new=AsyncMock(return_value=None)):
         transport = ASGITransport(app=_app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
             r = await c.post(
                 "/voice/tools/modify_booking",
-                headers=AUTH,
+                headers={"Authorization": "Bearer tool-secret",
+                         "X-Call-Id": str(call_id)},
                 json={"appointment_id": str(uuid4()),
-                      "verification_passed": False,
                       "new_slot_start": datetime.now(timezone.utc).isoformat()},
             )
     body = r.json()
     assert body["ok"] is False
-    assert body["error"] == "unauthorized"
+    assert body["error"] == "call_not_found"
+    modify.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_cancel_booking_writes_audit_event():
-    appt_id = uuid4()
-    with patch("booking_engine.api.routes.voice_tools_booking.cancel_appointment",
+async def test_cancel_booking_authorized_cancels_and_audits():
+    call_id, shop, cust, appt = uuid4(), uuid4(), uuid4(), uuid4()
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value={
+                   "id": call_id, "shop_id": shop,
+                   "caller_number": "+39 333 111 0000", "customer_id": cust})), \
+         patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
+               new=AsyncMock(return_value={
+                   "shop_id": shop, "customer_id": cust,
+                   "phones": ["+39 333 111 0000"]})), \
+         patch("booking_engine.api.routes.voice_tools_booking.cancel_appointment",
                new=AsyncMock(return_value=True)), \
          patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
                new=AsyncMock(return_value=None)) as audit:
@@ -115,9 +130,9 @@ async def test_cancel_booking_writes_audit_event():
         async with AsyncClient(transport=transport, base_url="http://t") as c:
             r = await c.post(
                 "/voice/tools/cancel_booking",
-                headers=AUTH,
-                json={"appointment_id": str(appt_id),
-                      "verification_passed": True},
+                headers={"Authorization": "Bearer tool-secret",
+                         "X-Call-Id": str(call_id)},
+                json={"appointment_id": str(appt)},
             )
     body = r.json()
     assert body["ok"] is True
@@ -125,18 +140,123 @@ async def test_cancel_booking_writes_audit_event():
 
 
 @pytest.mark.asyncio
-async def test_cancel_booking_logs_failed_verification():
-    appt_id = uuid4()
-    with patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
-               new=AsyncMock(return_value=None)):
+async def test_cancel_booking_denied_on_phone_mismatch_audits_failure():
+    call_id, shop, cust, appt = uuid4(), uuid4(), uuid4(), uuid4()
+    logged = AsyncMock(return_value=None)
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value={
+                   "id": call_id, "shop_id": shop,
+                   "caller_number": "+39 333 999 9999", "customer_id": cust})), \
+         patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
+               new=AsyncMock(return_value={
+                   "shop_id": shop, "customer_id": cust,
+                   "phones": ["+39 333 111 0000"]})), \
+         patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=logged):
         transport = ASGITransport(app=_app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
             r = await c.post(
                 "/voice/tools/cancel_booking",
-                headers=AUTH,
-                json={"appointment_id": str(appt_id),
-                      "verification_passed": False},
+                headers={"Authorization": "Bearer tool-secret",
+                         "X-Call-Id": str(call_id)},
+                json={"appointment_id": str(appt)},
             )
     body = r.json()
     assert body["ok"] is False
-    assert body["error"] == "unauthorized"
+    assert body["error"] == "phone_mismatch"
+    logged.assert_awaited()
+
+# --- server-side ownership authorization for modify/cancel ---------------------
+
+def _booking_auth_headers(call_id):
+    return {"Authorization": "Bearer tool-secret", "X-Call-Id": str(call_id)}
+
+
+@pytest.mark.asyncio
+async def test_modify_booking_authorizes_by_caller_phone_ignoring_agent_flag():
+    call_id, shop, cust, appt = uuid4(), uuid4(), uuid4(), uuid4()
+    modify = AsyncMock(return_value=True)
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value={
+                   "id": call_id, "shop_id": shop,
+                   "caller_number": "+39 333 111 0000", "customer_id": cust})), \
+         patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
+               new=AsyncMock(return_value={
+                   "shop_id": shop, "customer_id": cust,
+                   "phones": ["+39 333 111 0000"]})), \
+         patch("booking_engine.api.routes.voice_tools_booking.modify_appointment",
+               new=modify), \
+         patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=AsyncMock()):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/modify_booking",
+                headers=_booking_auth_headers(call_id),
+                json={"appointment_id": str(appt),
+                      "new_slot_start": datetime.now(timezone.utc).isoformat(),
+                      "verification_passed": False},  # agent says NO; server decides YES
+            )
+    assert r.json()["ok"] is True
+    modify.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_modify_booking_rejected_on_phone_mismatch_and_not_executed():
+    call_id, shop, cust, appt = uuid4(), uuid4(), uuid4(), uuid4()
+    modify = AsyncMock(return_value=True)
+    logged = AsyncMock()
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value={
+                   "id": call_id, "shop_id": shop,
+                   "caller_number": "+39 333 999 9999", "customer_id": cust})), \
+         patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
+               new=AsyncMock(return_value={
+                   "shop_id": shop, "customer_id": cust,
+                   "phones": ["+39 333 111 0000"]})), \
+         patch("booking_engine.api.routes.voice_tools_booking.modify_appointment",
+               new=modify), \
+         patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=logged):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/modify_booking",
+                headers=_booking_auth_headers(call_id),
+                json={"appointment_id": str(appt),
+                      "verification_passed": True},  # agent says YES; server refuses
+            )
+    body = r.json()
+    assert body["ok"] is False
+    assert "phone_mismatch" in body["error"]
+    modify.assert_not_awaited()
+    logged.assert_awaited()  # denial is audited
+
+
+@pytest.mark.asyncio
+async def test_cancel_booking_rejected_when_appointment_belongs_to_other_shop():
+    call_id, shop, other, cust, appt = uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    cancel = AsyncMock(return_value=True)
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value={
+                   "id": call_id, "shop_id": shop,
+                   "caller_number": "+39 333 111 0000", "customer_id": cust})), \
+         patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
+               new=AsyncMock(return_value={
+                   "shop_id": other, "customer_id": cust,
+                   "phones": ["+39 333 111 0000"]})), \
+         patch("booking_engine.api.routes.voice_tools_booking.cancel_appointment",
+               new=cancel), \
+         patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=AsyncMock()):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/cancel_booking",
+                headers=_booking_auth_headers(call_id),
+                json={"appointment_id": str(appt), "verification_passed": True},
+            )
+    body = r.json()
+    assert body["ok"] is False
+    assert "wrong_shop" in body["error"]
+    cancel.assert_not_awaited()

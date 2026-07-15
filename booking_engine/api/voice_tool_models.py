@@ -90,12 +90,12 @@ class ModifyBookingIn(BaseModel):
     appointment_id: UUID
     new_slot_start: datetime | None = None
     new_service_id: UUID | None = None
-    verification_passed: bool
+    verification_passed: bool | None = None  # ignored; server authorizes by caller phone
 
 
 class CancelBookingIn(BaseModel):
     appointment_id: UUID
-    verification_passed: bool
+    verification_passed: bool | None = None  # ignored; server authorizes by caller phone
 
 
 # Lifecycle
