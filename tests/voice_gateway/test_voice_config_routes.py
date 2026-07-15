@@ -90,3 +90,26 @@ async def test_patch_accepts_distinct_fallback():
             )
             assert r.status_code == 200
             assert r.json()["data"]["manual_fallback_number"] == "+393201234567"
+
+
+@pytest.mark.asyncio
+async def test_patch_accepts_greeting_overflow():
+    shop_id = uuid4()
+    captured = {}
+
+    async def fake_upsert(sid, **kw):
+        captured.update(kw)
+        return {"shop_id": sid, **kw}
+
+    with patch("booking_engine.api.routes.voice_config.upsert_config",
+               new=fake_upsert):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.patch(
+                f"/api/v1/voice/config/{shop_id}",
+                headers=AUTH,
+                json={"greeting_overflow": "Salve, sono l'assistente."},
+            )
+            assert r.status_code == 200
+            assert captured["greeting_overflow"] == "Salve, sono l'assistente."

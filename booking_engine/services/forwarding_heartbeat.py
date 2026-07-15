@@ -16,15 +16,22 @@ from booking_engine.db.connection import execute
 
 
 async def find_silent_forwarded_shops(*, threshold_days: int = 5) -> list[dict]:
-    """Return Path 1 (forward) shops with no inbound call in the last `threshold_days`."""
+    """Return silent Path 1 (forward) shops that are in always_on mode.
+
+    Overflow shops legitimately receive zero AI calls for days (staff answers
+    everything), so silence there is normal — excluding them by joining
+    shop_config.answer_mode avoids false 'forwarding might be off' alerts.
+    """
     return await execute(
         """
-        SELECT shop_id, kairo_number, last_inbound_call_at, setup_path
-        FROM voice_agent.shop_telephony
-        WHERE setup_path = 'forward'
+        SELECT t.shop_id, t.kairo_number, t.last_inbound_call_at, t.setup_path
+        FROM voice_agent.shop_telephony t
+        JOIN voice_agent.shop_config c ON c.shop_id = t.shop_id
+        WHERE t.setup_path = 'forward'
+        AND c.answer_mode = 'always_on'
         AND (
-            last_inbound_call_at IS NULL
-            OR last_inbound_call_at < now() - ($1 || ' days')::interval
+            t.last_inbound_call_at IS NULL
+            OR t.last_inbound_call_at < now() - ($1 || ' days')::interval
         )
         """,
         str(threshold_days),

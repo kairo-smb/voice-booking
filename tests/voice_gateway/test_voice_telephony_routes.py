@@ -71,3 +71,39 @@ async def test_provision_writes_telephony_row():
             assert r.status_code == 200
             body = r.json()
             assert body["data"]["kairo_number"] == "+390212345678"
+
+
+@pytest.mark.asyncio
+async def test_setup_instructions_returns_codes_for_shop():
+    shop = "00000000-0000-0000-0000-000000000001"
+    with patch("booking_engine.db.voice_telephony_queries.get_telephony",
+               return_value={
+                   "shop_id": shop,
+                   "kairo_number": "+390212345678",
+                   "salon_existing_number": "+39 333 1234567",
+               }), \
+         patch("booking_engine.api.routes.voice_telephony.get_config",
+               return_value={"answer_mode": "overflow", "overflow_ring_count": 4}):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get(
+                f"/api/v1/voice/numbers/{shop}/setup-instructions", headers=AUTH)
+            assert r.status_code == 200
+            data = r.json()["data"]
+            assert data["line_type"] == "mobile"
+            assert "**61*+390212345678*11*20#" in data["overflow"]["codes"]
+            assert data["recommended"] == "overflow"
+
+
+@pytest.mark.asyncio
+async def test_setup_instructions_404_when_no_telephony():
+    shop = "00000000-0000-0000-0000-000000000009"
+    with patch("booking_engine.db.voice_telephony_queries.get_telephony",
+               return_value=None):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get(
+                f"/api/v1/voice/numbers/{shop}/setup-instructions", headers=AUTH)
+            assert r.status_code == 404

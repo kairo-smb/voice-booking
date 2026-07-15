@@ -18,7 +18,7 @@ router = APIRouter(prefix="/voice/config", tags=["voice-config"])
 
 
 _PATCHABLE_FIELDS = {
-    "enabled", "display_name", "greeting_after_disclosure",
+    "enabled", "display_name", "greeting_after_disclosure", "greeting_overflow",
     "voice_preset", "tone_id", "business_hours",
     "answer_mode", "overflow_ring_count",
     "services_to_mention", "retention_days",
@@ -31,6 +31,7 @@ class ConfigPatch(BaseModel):
     enabled: bool | None = None
     display_name: str | None = None
     greeting_after_disclosure: str | None = None
+    greeting_overflow: str | None = None
     voice_preset: str | None = Field(default=None, pattern=r"^(warm_female|neutral_female|neutral_male)$")
     tone_id: UUID | None = None
     business_hours: dict | None = None

@@ -147,3 +147,35 @@ async def test_assemble_falls_back_to_default_on_db_error(monkeypatch):
         config=_config(tone_id=uuid4()), policy=_policy(), resolution=resolution,
     )
     assert DEFAULT_TONE_INSTRUCTION in out.prompt
+
+
+@pytest.mark.asyncio
+async def test_overflow_mode_uses_custom_greeting_overflow():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    out = await assemble_session_prompt(
+        config=_config(answer_mode="overflow", greeting_overflow="CIAO_OVERFLOW"),
+        policy=_policy(), resolution=resolution,
+    )
+    assert 'FRASE DI BENVENUTO: "CIAO_OVERFLOW"' in out.prompt
+
+
+@pytest.mark.asyncio
+async def test_overflow_mode_defaults_when_greeting_overflow_empty():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    out = await assemble_session_prompt(
+        config=_config(answer_mode="overflow", greeting_overflow=""),
+        policy=_policy(), resolution=resolution,
+    )
+    # default overflow greeting acknowledges the salon can't pick up right now
+    assert "non possiamo rispondere" in out.prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_always_on_mode_uses_greeting_after_disclosure():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    out = await assemble_session_prompt(
+        config=_config(answer_mode="always_on",
+                       greeting_after_disclosure="BENV_FULL"),
+        policy=_policy(), resolution=resolution,
+    )
+    assert 'FRASE DI BENVENUTO: "BENV_FULL"' in out.prompt

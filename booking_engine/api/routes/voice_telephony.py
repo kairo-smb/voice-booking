@@ -14,6 +14,8 @@ from booking_engine.clients.telnyx_numbers import (
 )
 from booking_engine.config import Settings, get_settings
 from booking_engine.db import voice_telephony_queries as q
+from booking_engine.db.voice_config_queries import get_config
+from booking_engine.services.setup_instructions import build_instructions
 
 router = APIRouter(prefix="/voice/numbers", tags=["voice-telephony"])
 
@@ -90,6 +92,23 @@ async def provision(
         setup_path=row["setup_path"],
         salon_existing_number=row["salon_existing_number"],
     ).model_dump()}
+
+
+@router.get("/{shop_id}/setup-instructions")
+async def setup_instructions(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    telephony = await q.get_telephony(shop_id)
+    if not telephony:
+        raise HTTPException(404, "No telephony provisioned for this shop")
+    config = await get_config(shop_id) or {}
+    return {"data": build_instructions(
+        kairo_number=telephony["kairo_number"],
+        salon_existing_number=telephony.get("salon_existing_number"),
+        answer_mode=config.get("answer_mode", "overflow"),
+        overflow_ring_count=config.get("overflow_ring_count", 4),
+    )}
 
 
 @router.get("/{shop_id}")
