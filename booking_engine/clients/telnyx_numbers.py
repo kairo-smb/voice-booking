@@ -52,23 +52,47 @@ def search_available_numbers(
     ]
 
 
+def ensure_texml_application(*, voice_url: str, api_key: str) -> str:
+    """Return the id of the TeXML Application whose voice webhook is `voice_url`.
+
+    One shared application routes every inbound call to our webhook, which
+    then looks up the shop by the dialed number. Reused if it already exists,
+    created (wired to the account's outbound voice profile for the SIP leg to
+    OpenAI) if not.
+    """
+    client = Telnyx(api_key=api_key)
+    for app in client.texml_applications.list().data:
+        if getattr(app, "voice_url", None) == voice_url:
+            return app.id
+    profiles = client.outbound_voice_profiles.list().data
+    outbound = {"outbound_voice_profile_id": profiles[0].id} if profiles else None
+    created = client.texml_applications.create(
+        friendly_name="kairo-voice",
+        voice_url=voice_url,
+        voice_method="post",
+        outbound=outbound,
+    )
+    return created.data.id
+
+
 def purchase_number(
     *,
     phone_number: str,
     voice_url: str,
     api_key: str,
+    connection_id: str | None = None,
 ) -> PurchasedNumber:
     """Purchase a number via a Telnyx NumberOrder.
 
-    `voice_url` is recorded for traceability but not applied here — Telnyx
-    uses TeXML Applications (not a per-number URL field) to route inbound
-    calls. The TeXML Application must be pre-configured in the Telnyx portal
-    with this voice_url and associated with the purchased number post-deploy.
+    When `connection_id` (a TeXML Application id) is given, the number is born
+    attached to it, so inbound calls route to that app's `voice_url` — no manual
+    portal step. `voice_url` is retained for traceability/logging.
     """
     client = Telnyx(api_key=api_key)
-    result = client.number_orders.create(
-        phone_numbers=[{"phone_number": phone_number}],
-    )
+    order_body: dict = {"phone_numbers": [{"phone_number": phone_number}]}
+    if connection_id:
+        order_body["connection_id"] = connection_id
+    result = client.number_orders.create(**order_body)
     order = result.data
     purchased_number = order.phone_numbers[0].phone_number
     return PurchasedNumber(sid=order.id, phone_number=purchased_number)

@@ -46,7 +46,9 @@ async def test_search_numbers_returns_list():
 @pytest.mark.asyncio
 async def test_provision_writes_telephony_row():
     from booking_engine.clients.telnyx_numbers import PurchasedNumber
-    with patch("booking_engine.api.routes.voice_telephony.purchase_number",
+    with patch("booking_engine.api.routes.voice_telephony.ensure_texml_application",
+               return_value="APP1"), \
+         patch("booking_engine.api.routes.voice_telephony.purchase_number",
                return_value=PurchasedNumber(sid="PN1", phone_number="+390212345678")), \
          patch("booking_engine.db.voice_telephony_queries.upsert_telephony",
                return_value={

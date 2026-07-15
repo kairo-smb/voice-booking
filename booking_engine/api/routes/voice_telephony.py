@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token
 from booking_engine.clients.telnyx_numbers import (
+    ensure_texml_application,
     purchase_number,
     search_available_numbers,
 )
@@ -68,10 +69,14 @@ async def provision(
         raise HTTPException(400, "salon_existing_number required for forward setup")
 
     voice_url = f"{settings.public_base_url}/voice/texml/incoming"
+    app_id = ensure_texml_application(
+        voice_url=voice_url, api_key=settings.telnyx_api_key,
+    )
     purchased = purchase_number(
         phone_number=body.phone_number,
         voice_url=voice_url,
         api_key=settings.telnyx_api_key,
+        connection_id=app_id,
     )
     # Path 2 (new IT number) starts as pending_review; transitions to active/rejected
     # via the /voice/telnyx/number-status webhook once Telnyx completes the review.
