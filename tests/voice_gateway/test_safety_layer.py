@@ -11,6 +11,10 @@ def test_safety_prompt_mentions_key_rules():
     assert "medic" in text  # no medical advice
     assert "prezz" in text or "pric" in text  # no price negotiation
     assert "umano" in text or "salone" in text  # escalation
+    assert "ruolo" in text  # role-lock / anti prompt-injection
+    assert "ambito" in text  # scope limiting
+    assert "privacy" in text  # no PII of other customers
+    assert "inventare" in text  # no hallucination
 
 
 def test_default_allowlist_contains_12_tools():
