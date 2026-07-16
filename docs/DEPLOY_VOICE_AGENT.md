@@ -120,6 +120,9 @@ ALTER TABLE business_app_core.shops DROP COLUMN voice, DROP COLUMN language;
 
 - `TWILIO_ACCOUNT_SID` — Twilio account SID
 - `TWILIO_AUTH_TOKEN` — Twilio auth token
+- `TWILIO_DEFAULT_COUNTRY` — default `EE` (Estonia mobile numbers; see the 2026-07-16 Telnyx→Twilio migration spec)
+- `TWILIO_BUNDLE_SID` — the one Kairo-entity regulatory Bundle, created and approved once, out-of-band, in the Twilio Console — reused across every provisioned DID; leave unset until it exists, `purchase_number` treats it as optional
+- `TWILIO_ADDRESS_SID` — regulatory Address tied to the same Bundle, if Twilio requires one for the number type; also optional
 - `OPENAI_SIP_PROJECT_ID` — OpenAI project ID for SIP routing
 - `PUBLIC_BASE_URL` — public URL of the API Gateway in front of Lambda (used for TwiML voice_url)
 - `VOICE_KAIRO_TOKENS_PER_SECOND` — default 18
