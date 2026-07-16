@@ -68,7 +68,7 @@ async def provision(
     if body.setup_path == "forward" and not body.salon_existing_number:
         raise HTTPException(400, "salon_existing_number required for forward setup")
 
-    voice_url = f"{settings.public_base_url}/voice/twiml/incoming"
+    voice_url = f"{settings.public_base_url}/api/v1/voice/twiml/incoming"
     purchased = purchase_number(
         phone_number=body.phone_number,
         voice_url=voice_url,

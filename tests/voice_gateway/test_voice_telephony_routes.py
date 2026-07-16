@@ -48,7 +48,7 @@ async def test_search_numbers_returns_list():
 async def test_provision_writes_telephony_row():
     from booking_engine.clients.twilio_numbers import PurchasedNumber
     with patch("booking_engine.api.routes.voice_telephony.purchase_number",
-               return_value=PurchasedNumber(sid="PN1", phone_number="+37251234567")), \
+               return_value=PurchasedNumber(sid="PN1", phone_number="+37251234567")) as mock_purchase, \
          patch("booking_engine.db.voice_telephony_queries.upsert_telephony",
                return_value={
                    "shop_id": "00000000-0000-0000-0000-000000000001",
@@ -72,6 +72,9 @@ async def test_provision_writes_telephony_row():
             assert r.status_code == 200
             body = r.json()
             assert body["data"]["kairo_number"] == "+37251234567"
+            assert mock_purchase.call_args.kwargs["voice_url"].endswith(
+                "/api/v1/voice/twiml/incoming"
+            )
 
 
 @pytest.mark.asyncio
