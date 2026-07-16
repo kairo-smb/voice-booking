@@ -1222,3 +1222,118 @@ git status
 ```
 
 If clean, this task needs no commit — it's verification of work already committed in Tasks 1-8.
+
+---
+
+### Task 10: Handle purchase failures cleanly + last cleanup
+
+**Found during the final whole-branch code review.** Two real gaps survived the individual task reviews because each only saw one commit's diff:
+
+1. The design spec is explicit that Twilio purchases can now fail synchronously ("the Twilio purchase call either succeeds immediately... or fails outright, e.g. bundle not yet approved, number no longer available"). `provision()` calls `purchase_number()` with no error handling — a `TwilioRestException` (e.g. bundle not approved yet) currently propagates as an opaque unhandled 500 with no test covering it. Wrap it and return a clear `502` instead.
+2. `tests/voice_gateway/test_voice_openai_incoming.py:32` has a fixture SIP header value `sip:+393331112222@sip.telnyx.com` — unrelated to the Telnyx *client* (it's OpenAI SIP header parsing test data, not telephony-provider code), but it makes the plan's own Task 9 Step 2 grep check ("no telnyx references in .py files") not actually pass. Swap the domain to something provider-neutral so the check is clean.
+
+**Files:**
+- Modify: `booking_engine/api/routes/voice_telephony.py`
+- Modify: `tests/voice_gateway/test_voice_telephony_routes.py`
+- Modify: `tests/voice_gateway/test_voice_openai_incoming.py:32`
+
+- [ ] **Step 1: Write the failing test for purchase failure handling**
+
+Add to `tests/voice_gateway/test_voice_telephony_routes.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_provision_returns_502_when_twilio_purchase_fails():
+    from twilio.base.exceptions import TwilioRestException
+    with patch("booking_engine.api.routes.voice_telephony.purchase_number",
+               side_effect=TwilioRestException(400, "https://api.twilio.com/x", "Bundle not approved")):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/provision",
+                headers=AUTH,
+                json={
+                    "shop_id": "00000000-0000-0000-0000-000000000001",
+                    "phone_number": "+37251234567",
+                    "setup_path": "new",
+                },
+            )
+            assert r.status_code == 502
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/voice_gateway/test_voice_telephony_routes.py -v -k twilio_purchase_fails`
+Expected: FAIL — currently propagates as an unhandled 500, not a clean 502
+
+- [ ] **Step 3: Wrap the purchase call**
+
+In `booking_engine/api/routes/voice_telephony.py`, add this import:
+
+```python
+from twilio.base.exceptions import TwilioRestException
+```
+
+Replace:
+
+```python
+    purchased = purchase_number(
+        phone_number=body.phone_number,
+        voice_url=voice_url,
+        account_sid=settings.twilio_account_sid,
+        auth_token=settings.twilio_auth_token,
+        bundle_sid=settings.twilio_bundle_sid or None,
+        address_sid=settings.twilio_address_sid or None,
+    )
+```
+
+With:
+
+```python
+    try:
+        purchased = purchase_number(
+            phone_number=body.phone_number,
+            voice_url=voice_url,
+            account_sid=settings.twilio_account_sid,
+            auth_token=settings.twilio_auth_token,
+            bundle_sid=settings.twilio_bundle_sid or None,
+            address_sid=settings.twilio_address_sid or None,
+        )
+    except TwilioRestException as exc:
+        raise HTTPException(502, f"Twilio number purchase failed: {exc.msg}") from exc
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/voice_gateway/test_voice_telephony_routes.py -v`
+Expected: PASS (6 tests)
+
+- [ ] **Step 5: Clean up the unrelated leftover string**
+
+In `tests/voice_gateway/test_voice_openai_incoming.py`, replace:
+
+```python
+            {"name": "From", "value": "sip:+393331112222@sip.telnyx.com"},
+```
+
+With:
+
+```python
+            {"name": "From", "value": "sip:+393331112222@sip.example.com"},
+```
+
+- [ ] **Step 6: Run the full suite and the plan's own completeness grep**
+
+Run: `pytest tests/voice_gateway/ tests/booking_engine/ -v --ignore=tests/live_db --ignore=tests/integration`
+Expected: PASS
+
+Run: `grep -rn "telnyx" --include="*.py" booking_engine/ tests/`
+Expected: no output
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add booking_engine/api/routes/voice_telephony.py tests/voice_gateway/test_voice_telephony_routes.py tests/voice_gateway/test_voice_openai_incoming.py
+git commit -m "fix(voice): return 502 on Twilio purchase failure, drop last telnyx.com fixture string"
+```
