@@ -1,5 +1,54 @@
 # Deploy Readiness Brief — 2026-07-16
 
+## UPDATE — evening 2026-07-16 (live wiring + a bigger finding)
+
+**Config wired & validated live:** OpenAI key valid + realtime access confirmed
+(correct model is **`gpt-realtime`**, not `gpt-4o-realtime-preview`); Telnyx
+public key set; `DATABASE_URL` connected to Neon `kairo` (asyncpg-tested); app
+secrets generated. All in the gitignored `.env`.
+
+**Neon migrations 07/08 applied** — but ONLY to the `voice_agent` schema (our
+own: `shop_config.greeting_overflow`, `calls.service_brief`), additive/nullable.
+The shared `business_app_core` schema is **untouched** (other apps use it).
+
+**Constraint from the owner: never change the shared schema.** We adapt OUR code
+to it; revise the schema only if truly impossible.
+
+### The real gap: the voice layer was built against a fictional schema
+The agent's data layer doesn't match the live `business_app_core` schema and has
+never run against it. `booking_engine/db/queries.py` (the webapp booking layer,
+covered by live_db tests) IS correct — reuse it.
+
+| Voice code assumes | Real Neon |
+|---|---|
+| `appointments.start_at / end_at` | `start_time / end_time` |
+| `services.name / duration_min / price_cents / active` | `service_name / duration_minutes / price_eur / is_active` |
+| `customers.first_name / last_name / notes_tags / last_visit_at` | `full_name / tags` (no first/last, no last_visit) |
+| `staff_users` table | `staff` |
+| `staff_schedules.day_date` | `day_of_week` (recurring — logic change) |
+
+This spans `voice_tool_queries.py` **and** its consumers (`identity_resolver`,
+`CustomerSummary` model, `prompt_assembler._caller_context`, tool response
+models). Fixed & live-validated so far: `get_appointment_owner` (authz/lead-time).
+
+### Staged plan to make the agent run on Neon (no schema changes)
+1. **Booking tools** → delegate `voice_tool_queries` (availability/create/modify/
+   cancel/get) to `queries.py` (`get_available_slots`, `create_appointment`,
+   `cancel_appointment`, `reschedule_appointment`). Keep signatures so route
+   unit tests stay green; validate each against live Neon (1419 appts available).
+2. **Catalog/staff tools** → real columns (`service_name`, `duration_minutes`,
+   `price_eur`, `is_active`, `staff`); update tool response models/consumers.
+3. **Identity/customer** → align `find_customers_by_phone`, `insert_customer`,
+   `CustomerSummary`, `prompt_assembler._caller_context` to `full_name`/`tags`.
+4. **Build the OpenAI SIP handler** (`realtime.call.incoming` → accept w/ the 12
+   tools, wrapped as `{"type":"function",...}`) and retire `voice_gateway/realtime.py`.
+5. **Deploy to Fly.io** (decided) → set `PUBLIC_BASE_URL` → configure the OpenAI
+   project webhook + Telnyx TeXML voice_url.
+
+---
+
+# Deploy Readiness Brief — 2026-07-16 (original)
+
 Status of the standalone repo vs. a live, deployed, Neon-wired voice service.
 Written after live testing the Telnyx sub-account and reviewing the OpenAI path.
 

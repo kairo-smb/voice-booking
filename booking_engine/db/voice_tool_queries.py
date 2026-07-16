@@ -301,7 +301,7 @@ async def get_appointment_owner(*, appointment_id: UUID) -> dict | None:
     """
     return await connection.execute_one(
         """
-        SELECT a.shop_id, a.customer_id, a.start_at,
+        SELECT a.shop_id, a.customer_id, a.start_time AS start_at,
                coalesce(
                  array_agg(pc.phone_number) FILTER (WHERE pc.phone_number IS NOT NULL),
                  '{}'
@@ -310,7 +310,7 @@ async def get_appointment_owner(*, appointment_id: UUID) -> dict | None:
         LEFT JOIN business_app_core.phone_contacts pc
                ON pc.customer_id = a.customer_id
         WHERE a.id = $1
-        GROUP BY a.shop_id, a.customer_id, a.start_at
+        GROUP BY a.shop_id, a.customer_id, a.start_time
         """,
         appointment_id,
     )
