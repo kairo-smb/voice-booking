@@ -1,7 +1,7 @@
 """Path 1 forwarding heartbeat — finds shops whose forwarded number went silent.
 
 Path 1 = 'forward' setup (default, ~70-80% of shops): the salon's existing
-carrier number forwards to our Telnyx DID. This heartbeat detects when that
+carrier number forwards to our Twilio DID. This heartbeat detects when that
 forwarding has silently stopped (no inbound call in threshold_days).
 
 Run nightly by a Lambda scheduled event. For each silent shop, emit a push
