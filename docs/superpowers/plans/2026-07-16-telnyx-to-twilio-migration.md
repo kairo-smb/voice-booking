@@ -870,6 +870,87 @@ git commit -m "feat(voice): provision Twilio EE mobile numbers, drop pending_rev
 
 ---
 
+### Task 5b: Fix the provisioned Voice URL missing its `/api/v1` prefix
+
+**Found during Task 4's code quality review.** `voice_telephony.py`'s `provision()` builds the Voice URL bound to each purchased number as `f"{settings.public_base_url}/voice/twiml/incoming"` — but every router in `app.py` (including `voice_twiml.router`) is mounted at `prefix="/api/v1"`, and `docs/DEPLOY_VOICE_AGENT.md` documents the real endpoint as `/api/v1/voice/twiml/incoming`. Without `/api/v1`, every number Twilio ever provisions points at a path that 404s in this app — inbound calls would never reach `voice_twiml.py` at all, let alone the signature verification Task 4 just added. This bug predates this migration (the same missing prefix existed in the Telnyx-era code this was adapted from) and had no test pinning the value, which is why it went unnoticed until an independent review caught it. Fixing it now rather than filing it away, since it makes the rest of this migration's telephony code unreachable in production otherwise.
+
+**Files:**
+- Modify: `booking_engine/api/routes/voice_telephony.py`
+- Modify: `tests/voice_gateway/test_voice_telephony_routes.py`
+
+- [ ] **Step 1: Write the failing test**
+
+In `tests/voice_gateway/test_voice_telephony_routes.py`, extend `test_provision_writes_telephony_row` to assert the `voice_url` Twilio actually receives:
+
+```python
+@pytest.mark.asyncio
+async def test_provision_writes_telephony_row():
+    from booking_engine.clients.twilio_numbers import PurchasedNumber
+    with patch("booking_engine.api.routes.voice_telephony.purchase_number",
+               return_value=PurchasedNumber(sid="PN1", phone_number="+37251234567")) as mock_purchase, \
+         patch("booking_engine.db.voice_telephony_queries.upsert_telephony",
+               return_value={
+                   "shop_id": "00000000-0000-0000-0000-000000000001",
+                   "kairo_number": "+37251234567",
+                   "kairo_number_sid": "PN1",
+                   "setup_path": "new",
+                   "salon_existing_number": None,
+               }):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/provision",
+                headers=AUTH,
+                json={
+                    "shop_id": "00000000-0000-0000-0000-000000000001",
+                    "phone_number": "+37251234567",
+                    "setup_path": "new",
+                },
+            )
+            assert r.status_code == 200
+            body = r.json()
+            assert body["data"]["kairo_number"] == "+37251234567"
+            assert mock_purchase.call_args.kwargs["voice_url"].endswith(
+                "/api/v1/voice/twiml/incoming"
+            )
+```
+
+(This replaces the existing `test_provision_writes_telephony_row` — same test, with the added `mock_purchase` capture and the final `assert` line.)
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/voice_gateway/test_voice_telephony_routes.py -v -k test_provision_writes_telephony_row`
+Expected: FAIL — `voice_url` currently ends with `/voice/twiml/incoming`, missing `/api/v1`
+
+- [ ] **Step 3: Fix the route**
+
+In `booking_engine/api/routes/voice_telephony.py`, replace:
+
+```python
+    voice_url = f"{settings.public_base_url}/voice/twiml/incoming"
+```
+
+With:
+
+```python
+    voice_url = f"{settings.public_base_url}/api/v1/voice/twiml/incoming"
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/voice_gateway/test_voice_telephony_routes.py -v`
+Expected: PASS (5 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add booking_engine/api/routes/voice_telephony.py tests/voice_gateway/test_voice_telephony_routes.py
+git commit -m "fix(voice): include /api/v1 prefix in the provisioned Voice URL"
+```
+
+---
+
 ### Task 6: Retire the Telnyx number-status webhook (no replacement)
 
 Per the design spec: Twilio's one-time Bundle approval happens out-of-band before any shop onboards, so there's no steady-state async status to react to per number. This route and its test are deleted, not adapted.
