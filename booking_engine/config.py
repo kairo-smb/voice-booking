@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     twilio_auth_token: str = ""
     twilio_default_country: str = "EE"
     # One-time regulatory Bundle (KYC) for the shared Kairo entity, reused
-    # across every provisioned DID — see the migration spec linked above.
+    # across every provisioned DID — see
+    # docs/superpowers/specs/2026-07-16-telnyx-to-twilio-migration-design.md
     twilio_bundle_sid: str = ""
     twilio_address_sid: str = ""
     # OpenAI SIP routing

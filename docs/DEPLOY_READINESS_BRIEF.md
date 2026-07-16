@@ -166,8 +166,11 @@ unwired.
    `TELNYX_PUBLIC_KEY`, `DATABASE_URL`.
 6. **Telnyx account:** fund it; complete IT regulatory (one Kairo entity, reused);
    the TeXML app auto-creates on first provision now.
-7. **Harden the Telnyx webhook:** `voice_telnyx_webhooks.py` does **not** verify
-   the `Telnyx-Signature` — spoofable. Small TDD fix (we have `TELNYX_PUBLIC_KEY`).
+7. ~~**Harden the Telnyx webhook:** `voice_telnyx_webhooks.py` does **not** verify
+   the `Telnyx-Signature` — spoofable. Small TDD fix (we have `TELNYX_PUBLIC_KEY`).~~
+   **Resolved by the 2026-07-16 Telnyx→Twilio migration:** `voice_telnyx_webhooks.py`
+   is deleted (no Twilio equivalent needed — see the migration spec); the surviving
+   `voice_twiml.py` webhook verifies `X-Twilio-Signature` via `TWILIO_AUTH_TOKEN`.
 8. **Webapp (separate repo/branch):** render the Action Center tile
    (`/voice/memos/{shop}/count`), the `service_brief` on request/transcript
    cards, and the overflow-greeting editor. Contracts are in place.
