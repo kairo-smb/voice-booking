@@ -62,15 +62,33 @@ async def build_accept_payload(
     resolution: ResolutionResult,
     model: str,
     allowlist: list[str] | None = None,
+    mcp_server_url: str | None = None,
+    mcp_token: str | None = None,
 ) -> dict[str, Any]:
-    """Assemble the /accept body: prompt, mapped voice, and function tools."""
+    """Assemble the /accept body: prompt, mapped voice, and tools.
+
+    When `mcp_server_url` is given, tools are served by our remote MCP server
+    (OpenAI calls it directly, passing `mcp_token` as the bearer). Otherwise the
+    12 function schemas are inlined (fallback / non-MCP path).
+    """
     assembled = await assemble_session_prompt(
         config=config, policy=policy, resolution=resolution, allowlist=allowlist,
     )
+    if mcp_server_url:
+        tools = [{
+            "type": "mcp",
+            "server_label": "kairo",
+            "server_url": mcp_server_url,
+            "authorization": mcp_token,
+            "require_approval": "never",
+            "allowed_tools": [s["name"] for s in assembled.tools],
+        }]
+    else:
+        tools = to_realtime_tools(assembled.tools)
     return {
         "type": "realtime",
         "model": model,
         "instructions": assembled.prompt,
         "voice": _VOICE_MAP.get(assembled.voice, "alloy"),
-        "tools": to_realtime_tools(assembled.tools),
+        "tools": tools,
     }

@@ -18,6 +18,7 @@ from booking_engine.clients.openai_realtime import accept_sip_call
 from booking_engine.config import Settings, get_settings
 from booking_engine.db.voice_calls_queries import insert_call
 from booking_engine.db.voice_config_queries import get_config, get_policy
+from booking_engine.services.call_token import mint_call_token
 from booking_engine.services.identity_resolver import resolve_caller
 from booking_engine.services.realtime_session import (
     build_accept_payload, caller_from_sip_headers, shop_id_from_sip_headers,
@@ -58,13 +59,22 @@ async def incoming(
     matched_id = (
         resolution.unique_match.customer_id if resolution.unique_match else None
     )
-    await insert_call(
+    db_call_id = await insert_call(
         shop_id=shop_id, caller_phone=caller, matched_customer_id=matched_id,
     )
 
+    # Remote MCP: OpenAI calls our tool server directly with a per-call bearer
+    # carrying our internal call/shop ids (distinct from OpenAI's SIP call_id).
+    mcp_url = f"{settings.public_base_url}/mcp" if settings.public_base_url else None
+    mcp_token = (
+        mint_call_token(shop_id=shop_id, call_id=db_call_id,
+                        secret=settings.openai_tool_secret)
+        if mcp_url else None
+    )
     payload = await build_accept_payload(
         config=config, policy=policy, resolution=resolution,
         model=settings.openai_realtime_model,
+        mcp_server_url=mcp_url, mcp_token=mcp_token,
     )
     ok = await accept_sip_call(
         call_id=call_id, payload=payload, api_key=settings.openai_api_key,

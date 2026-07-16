@@ -72,3 +72,21 @@ async def test_accept_payload_maps_voice_preset_to_openai_voice():
         resolution=resolution, model="gpt-realtime",
     )
     assert payload["voice"] == "ash"  # neutral_male -> ash
+
+
+@pytest.mark.asyncio
+async def test_accept_payload_registers_mcp_server_when_url_given():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    payload = await build_accept_payload(
+        config=_config(), policy=_policy(), resolution=resolution,
+        model="gpt-realtime",
+        mcp_server_url="https://x/mcp", mcp_token="tok123",
+    )
+    tools = payload["tools"]
+    assert len(tools) == 1
+    mcp = tools[0]
+    assert mcp["type"] == "mcp"
+    assert mcp["server_url"] == "https://x/mcp"
+    assert mcp["authorization"] == "tok123"
+    assert mcp["require_approval"] == "never"
+    assert "create_booking" in mcp["allowed_tools"]
