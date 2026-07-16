@@ -952,6 +952,9 @@ Cosmetic references to Telnyx left in docstrings/comments, plus keeping the DB c
 - Modify: `booking_engine/api/routes/voice_openai.py:4`
 - Modify: `booking_engine/services/forwarding_heartbeat.py:5`
 - Modify: `booking_engine/services/realtime_session.py:3`
+- Modify: `docs/DEPLOY_READINESS_BRIEF.md:115,132`
+
+**Note found during Task 3's code quality review:** `docs/DEPLOY_READINESS_BRIEF.md` twice names the now-deleted `voice_texml.py` as the file that dials OpenAI's SIP endpoint (lines 115 and 132) — a dead pointer once Task 3 lands. This is a dated, point-in-time status brief (live Telnyx-testing notes, funding decisions, etc.) — **don't rewrite its Telnyx narrative wholesale**, that's an accurate historical record of what was actually tested at the time. Only fix the two literal filename references so the doc doesn't point at a deleted file.
 
 - [ ] **Step 1: Add the migration**
 
@@ -1005,13 +1008,40 @@ With:
 OpenAI native SIP: Twilio dials sip:{project};X-Shop-Id=..@sip.api.openai.com,
 ```
 
+In `docs/DEPLOY_READINESS_BRIEF.md`, replace (line 115):
+
+```
+1. **Native SIP** (what `voice_texml.py` dials: `sip:$PROJECT_ID@sip.api.openai.com`):
+```
+
+With:
+
+```
+1. **Native SIP** (what `voice_twiml.py` dials: `sip:$PROJECT_ID@sip.api.openai.com`):
+```
+
+And replace (line 132, inside the architecture-divergence table):
+
+```
+| Entry | `voice_texml.py` `<Dial><Sip>` to OpenAI | `/realtime/token` ephemeral `client_secrets` (WebRTC/browser) |
+```
+
+With:
+
+```
+| Entry | `voice_twiml.py` `<Dial><Sip>` to OpenAI | `/realtime/token` ephemeral `client_secrets` (WebRTC/browser) |
+```
+
+Leave every other Telnyx mention in that file untouched — it's a dated brief, not living docs.
+
 - [ ] **Step 3: Commit**
 
 ```bash
 git add booking_engine/db/sql/09_shop_telephony_twilio_provider.sql \
         booking_engine/api/routes/voice_openai.py \
         booking_engine/services/forwarding_heartbeat.py \
-        booking_engine/services/realtime_session.py
+        booking_engine/services/realtime_session.py \
+        docs/DEPLOY_READINESS_BRIEF.md
 git commit -m "chore(voice): update Telnyx references to Twilio in comments + DB default"
 ```
 
