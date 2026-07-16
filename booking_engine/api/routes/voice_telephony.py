@@ -6,10 +6,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-
-from booking_engine.api.deps import require_control_plane_token
 from twilio.base.exceptions import TwilioRestException
 
+from booking_engine.api.deps import require_control_plane_token
 from booking_engine.clients.twilio_numbers import (
     purchase_number,
     search_available_numbers,
