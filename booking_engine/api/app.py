@@ -57,6 +57,11 @@ def create_app() -> FastAPI:
     from booking_engine.api.routes import voice_tools_identity
     app.include_router(voice_tools_identity.router)
 
+    # Remote MCP server for OpenAI Realtime tool calls (session manager is run
+    # by the production entrypoint's lifespan, see booking_engine/asgi.py).
+    from booking_engine.mcp_server import mcp_asgi
+    app.mount("/mcp", mcp_asgi)
+
     @app.get("/health")
     async def health():
         return {"status": "ok"}
