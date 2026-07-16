@@ -137,93 +137,46 @@ async def find_availability(
     staff_id: UUID | None,
     max_results: int,
 ) -> list[dict]:
-    """Return open slots for the service. Naive search — refines later."""
+    """Open slots for the service — delegates to the ground-truth booking layer."""
     from datetime import datetime, timedelta
 
-    horizon_start = preferred_when or datetime.utcnow()
-    horizon_end = horizon_start + timedelta(days=14)
-    return await connection.execute(
-        """
-        WITH service AS (
-            SELECT duration_min FROM business_app_core.services WHERE id = $2
-        ),
-        candidates AS (
-            SELECT sched.staff_id,
-                   (sched.day_date + sched.start_time)::timestamptz AS slot_start,
-                   (sched.day_date + sched.start_time + ((SELECT duration_min FROM service) || ' minutes')::interval)::timestamptz AS slot_end
-            FROM business_app_core.staff_schedules sched
-            JOIN business_app_core.staff_services ss
-              ON ss.staff_id = sched.staff_id AND ss.service_id = $2
-            WHERE sched.shop_id = $1
-              AND sched.day_date BETWEEN $3::date AND $4::date
-              AND ($5::uuid IS NULL OR sched.staff_id = $5)
-        ),
-        not_booked AS (
-            SELECT c.*, (SELECT first_name || ' ' || coalesce(last_name,'')
-                         FROM business_app_core.staff_users WHERE id = c.staff_id) AS staff_name
-            FROM candidates c
-            WHERE NOT EXISTS (
-                SELECT 1 FROM business_app_core.appointments a
-                WHERE a.shop_id = $1 AND a.staff_id = c.staff_id
-                  AND tstzrange(a.start_at, a.end_at) && tstzrange(c.slot_start, c.slot_end)
-                  AND a.status NOT IN ('cancelled')
-            )
-        )
-        SELECT * FROM not_booked ORDER BY slot_start LIMIT $6
-        """,
-        shop_id, service_id, horizon_start, horizon_end, staff_id, max_results,
+    from booking_engine.db import queries
+
+    start_date = (preferred_when or datetime.utcnow()).date()
+    end_date = start_date + timedelta(days=14)
+    slots = await queries.get_available_slots(
+        shop_id=shop_id, service_ids=[service_id],
+        start_date=start_date, end_date=end_date, staff_id=staff_id,
     )
+    return slots[:max_results]
 
 
 async def insert_booking_locked(
     *, shop_id: UUID, customer_id: UUID, service_id: UUID,
     slot_start: datetime, staff_id: UUID,
 ) -> dict:
-    """Insert booking with advisory lock to prevent race conditions. Raises on conflict."""
-    pool = connection._get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            bucket = int(slot_start.timestamp() // 900)
-            lock_key = f"{staff_id}|{bucket}"
-            await conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtext($1))", lock_key,
-            )
-            taken = await conn.fetchval(
-                """
-                SELECT EXISTS (
-                  SELECT 1 FROM business_app_core.appointments
-                  WHERE shop_id = $1 AND staff_id = $2
-                    AND start_at = $3 AND status NOT IN ('cancelled')
-                )
-                """,
-                shop_id, staff_id, slot_start,
-            )
-            if taken:
-                raise RuntimeError("slot_taken")
-            row = await conn.fetchrow(
-                """
-                INSERT INTO business_app_core.appointments
-                    (shop_id, customer_id, staff_id, start_at, end_at,
-                     status, source, confirmation_status)
-                SELECT $1, $2, $3, $4,
-                       $4 + (sv.duration_min || ' minutes')::interval,
-                       'confirmed', 'voice_agent', 'confirmed'
-                FROM business_app_core.services sv
-                WHERE sv.id = $5
-                RETURNING id, start_at AS slot_start, end_at AS slot_end,
-                          staff_id, confirmation_status
-                """,
-                shop_id, customer_id, staff_id, slot_start, service_id,
-            )
-            await conn.execute(
-                """
-                INSERT INTO business_app_core.appointment_services
-                    (appointment_id, service_id)
-                VALUES ($1, $2)
-                """,
-                row["id"], service_id,
-            )
-            return dict(row)
+    """Create the appointment via the ground-truth layer. Raises on conflict.
+
+    ponytail: relies on create_appointment's overlap check (no advisory lock).
+    Add a lock only if concurrent voice bookings for the same staff+slot become
+    a real problem.
+    """
+    from booking_engine.db import queries
+
+    try:
+        row = await queries.create_appointment(
+            shop_id=shop_id, customer_id=customer_id, staff_id=staff_id,
+            service_ids=[service_id], start_time=slot_start,
+        )
+    except queries.SlotConflictError:
+        raise RuntimeError("slot_taken")
+    return {
+        "id": row["id"],
+        "slot_start": row["start_time"],
+        "slot_end": row["end_time"],
+        "staff_id": row["staff_id"],
+        "confirmation_status": row.get("confirmation_status") or "confirmed",
+    }
 
 
 async def attach_booking_to_call(*, call_id: UUID, appointment_id: UUID) -> None:
@@ -242,14 +195,14 @@ async def get_next_booking_for_customer(
 ) -> dict | None:
     return await connection.execute_one(
         """
-        SELECT a.id, a.start_at, a.end_at, a.staff_id, a.status,
-               (SELECT name FROM business_app_core.services s
+        SELECT a.id, a.start_time, a.end_time, a.staff_id, a.status,
+               (SELECT s.service_name FROM business_app_core.services s
                 JOIN business_app_core.appointment_services aps ON aps.service_id = s.id
                 WHERE aps.appointment_id = a.id LIMIT 1) AS service_name
         FROM business_app_core.appointments a
         WHERE a.shop_id = $1 AND a.customer_id = $2
-          AND a.start_at > now() AND a.status NOT IN ('cancelled')
-        ORDER BY a.start_at
+          AND a.start_time > now() AND a.status NOT IN ('cancelled')
+        ORDER BY a.start_time
         LIMIT 1
         """,
         shop_id, customer_id,
@@ -257,42 +210,31 @@ async def get_next_booking_for_customer(
 
 
 async def modify_appointment(
-    *, appointment_id: UUID, new_slot_start: datetime | None,
-    new_service_id: UUID | None,
+    *, shop_id: UUID, appointment_id: UUID,
+    new_slot_start: datetime | None,
+    new_service_id: UUID | None = None,
 ) -> bool:
-    from datetime import datetime
+    """Reschedule via the ground-truth layer (cancels + recreates, copies services).
 
-    sets = []
-    args: list = [appointment_id]
-    if new_slot_start is not None:
-        args.append(new_slot_start)
-        sets.append(f"start_at = ${len(args)}")
-        sets.append(
-            f"end_at = ${len(args)} + (end_at - start_at)"
-        )
-    if not sets:
+    ponytail: only time changes are supported for now; new_service_id is ignored.
+    Wire a service swap through appointment_services if the product needs it.
+    """
+    if new_slot_start is None:
         return False
-    sql = (
-        f"UPDATE business_app_core.appointments "
-        f"SET {', '.join(sets)}, updated_at = now() WHERE id = $1"
+    from booking_engine.db import queries
+
+    result = await queries.reschedule_appointment(
+        shop_id=shop_id, appointment_id=appointment_id,
+        new_start_time=new_slot_start,
     )
-    await connection.execute_void(sql, *args)
-    if new_service_id is not None:
-        await connection.execute_void(
-            """
-            UPDATE business_app_core.appointment_services
-            SET service_id = $2 WHERE appointment_id = $1
-            """,
-            appointment_id, new_service_id,
-        )
-    return True
+    return result is not None
 
 
 async def service_belongs_to_shop(*, shop_id: UUID, service_id: UUID) -> bool:
     """True if the service exists in this shop's active catalog."""
     row = await connection.execute_one(
         "SELECT 1 AS ok FROM business_app_core.services "
-        "WHERE id = $1 AND shop_id = $2 AND active = true",
+        "WHERE id = $1 AND shop_id = $2 AND is_active = true",
         service_id, shop_id,
     )
     return row is not None
@@ -320,15 +262,14 @@ async def get_appointment_owner(*, appointment_id: UUID) -> dict | None:
     )
 
 
-async def cancel_appointment(*, appointment_id: UUID) -> bool:
-    await connection.execute_void(
-        """
-        UPDATE business_app_core.appointments
-        SET status = 'cancelled', updated_at = now() WHERE id = $1
-        """,
-        appointment_id,
+async def cancel_appointment(*, shop_id: UUID, appointment_id: UUID) -> bool:
+    """Cancel via the ground-truth layer (also guards shop ownership + status)."""
+    from booking_engine.db import queries
+
+    result = await queries.cancel_appointment(
+        shop_id=shop_id, appointment_id=appointment_id,
     )
-    return True
+    return result is not None
 
 
 async def log_auth_event(

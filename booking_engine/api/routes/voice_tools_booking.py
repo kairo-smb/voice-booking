@@ -154,6 +154,7 @@ async def modify_booking(
     ):
         return Envelope[dict](ok=False, error="unknown_service")
     ok = await modify_appointment(
+        shop_id=owner["shop_id"],
         appointment_id=body.appointment_id,
         new_slot_start=body.new_slot_start,
         new_service_id=body.new_service_id,
@@ -177,5 +178,7 @@ async def cancel_booking(
     if within_lead_time(owner["start_at"], datetime.now(timezone.utc),
                         lead_hours=settings.voice_cancellation_lead_time_hours):
         return Envelope[dict](ok=False, error="cancel_too_close")
-    ok = await cancel_appointment(appointment_id=body.appointment_id)
+    ok = await cancel_appointment(
+        shop_id=owner["shop_id"], appointment_id=body.appointment_id,
+    )
     return Envelope[dict](ok=ok, data={"cancelled": ok})
