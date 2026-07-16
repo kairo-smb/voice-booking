@@ -32,8 +32,8 @@ def create_app() -> FastAPI:
     app.include_router(voice.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_telephony
     app.include_router(voice_telephony.router, prefix="/api/v1")
-    from booking_engine.api.routes import voice_texml
-    app.include_router(voice_texml.router, prefix="/api/v1")
+    from booking_engine.api.routes import voice_twiml
+    app.include_router(voice_twiml.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_openai
     app.include_router(voice_openai.router)
     from booking_engine.api.routes import voice_config
