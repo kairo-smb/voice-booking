@@ -7,12 +7,17 @@ class Settings(BaseSettings):
     pool_min_size: int = 2
     pool_max_size: int = 10
     control_plane_secret: str = ""
-    # Public base URL used for constructing Telnyx webhook URLs
+    # Public base URL used for constructing Twilio webhook URLs
     public_base_url: str = ""
-    # Telnyx
-    telnyx_api_key: str = ""
-    telnyx_public_key: str = ""
-    telnyx_default_country: str = "IT"
+    # Twilio
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_default_country: str = "EE"
+    # One-time regulatory Bundle (KYC) for the shared Kairo entity, reused
+    # across every provisioned DID — see
+    # docs/superpowers/specs/2026-07-16-telnyx-to-twilio-migration-design.md
+    twilio_bundle_sid: str = ""
+    twilio_address_sid: str = ""
     # OpenAI SIP routing
     openai_sip_project_id: str = ""
     openai_api_key: str = ""

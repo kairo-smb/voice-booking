@@ -112,7 +112,7 @@ calls them; we execute and stream results back. Confirmed by OpenAI docs and by
 this repo already doing it. No alternative provider needed.
 
 Two ways OpenAI accepts a phone call:
-1. **Native SIP** (what `voice_texml.py` dials: `sip:$PROJECT_ID@sip.api.openai.com`):
+1. **Native SIP** (what `voice_twiml.py` dials: `sip:$PROJECT_ID@sip.api.openai.com`):
    point the trunk at OpenAI → OpenAI fires a `realtime.call.incoming` webhook →
    you **accept** with session config (`instructions` + `tools`). Native SIP is
    **beta**.
@@ -129,7 +129,7 @@ The repo contains **two agent implementations that don't agree**:
 
 | | booking_engine (SIP path) | voice_gateway/realtime.py |
 |---|---|---|
-| Entry | `voice_texml.py` `<Dial><Sip>` to OpenAI | `/realtime/token` ephemeral `client_secrets` (WebRTC/browser) |
+| Entry | `voice_twiml.py` `<Dial><Sip>` to OpenAI | `/realtime/token` ephemeral `client_secrets` (WebRTC/browser) |
 | Tools | 12 authz'd tools (`create_booking`, `modify_booking` w/ phone-authz, `escalate_to_merchant`, …) in `safety_layer` | 5 inline name-based tools (`book_appointment`, `create_customer`, …), no authz |
 | Function exec | `/voice/tools/*` endpoints (authz, constraints, audit) | `/realtime/action` proxy, name resolution |
 | Prompt/tools registration | `voice/events/session.started` assembles them | inline in the token endpoint |
@@ -166,8 +166,11 @@ unwired.
    `TELNYX_PUBLIC_KEY`, `DATABASE_URL`.
 6. **Telnyx account:** fund it; complete IT regulatory (one Kairo entity, reused);
    the TeXML app auto-creates on first provision now.
-7. **Harden the Telnyx webhook:** `voice_telnyx_webhooks.py` does **not** verify
-   the `Telnyx-Signature` — spoofable. Small TDD fix (we have `TELNYX_PUBLIC_KEY`).
+7. ~~**Harden the Telnyx webhook:** `voice_telnyx_webhooks.py` does **not** verify
+   the `Telnyx-Signature` — spoofable. Small TDD fix (we have `TELNYX_PUBLIC_KEY`).~~
+   **Resolved by the 2026-07-16 Telnyx→Twilio migration:** `voice_telnyx_webhooks.py`
+   is deleted (no Twilio equivalent needed — see the migration spec); the surviving
+   `voice_twiml.py` webhook verifies `X-Twilio-Signature` via `TWILIO_AUTH_TOKEN`.
 8. **Webapp (separate repo/branch):** render the Action Center tile
    (`/voice/memos/{shop}/count`), the `service_brief` on request/transcript
    cards, and the overflow-greeting editor. Contracts are in place.

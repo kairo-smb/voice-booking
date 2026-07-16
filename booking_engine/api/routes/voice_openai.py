@@ -1,7 +1,7 @@
 """OpenAI Realtime SIP incoming-call webhook.
 
 OpenAI fires `realtime.call.incoming` when a SIP call reaches our project. We
-identify the shop (from the X-Shop-Id SIP header Telnyx set), assemble the
+identify the shop (from the X-Shop-Id SIP header we set), assemble the
 session (prompt + the 12 authz'd tools), and accept the call.
 
 ponytail: webhook signature verified only when OPENAI_WEBHOOK_SECRET is set.

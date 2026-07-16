@@ -1,6 +1,6 @@
 """Build the OpenAI Realtime session config to accept an inbound SIP call.
 
-OpenAI native SIP: Telnyx dials sip:{project};X-Shop-Id=..@sip.api.openai.com,
+OpenAI native SIP: Twilio dials sip:{project};X-Shop-Id=..@sip.api.openai.com,
 OpenAI fires a `realtime.call.incoming` webhook, and we POST the session config
 (prompt + the 12 authz'd tools) to /v1/realtime/calls/{call_id}/accept.
 """

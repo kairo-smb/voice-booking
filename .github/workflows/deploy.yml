@@ -75,8 +75,10 @@ jobs:
           AWS_REGION: ${{ env.AWS_REGION }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           CONTROL_PLANE_SECRET: ${{ secrets.CONTROL_PLANE_SECRET }}
-          TELNYX_API_KEY: ${{ secrets.TELNYX_API_KEY }}
-          TELNYX_PUBLIC_KEY: ${{ secrets.TELNYX_PUBLIC_KEY }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_BUNDLE_SID: ${{ secrets.TWILIO_BUNDLE_SID }}
+          TWILIO_ADDRESS_SID: ${{ secrets.TWILIO_ADDRESS_SID }}
           OPENAI_SIP_PROJECT_ID: ${{ secrets.OPENAI_SIP_PROJECT_ID }}
           PUBLIC_BASE_URL: ${{ steps.apiurl.outputs.url }}
         run: |

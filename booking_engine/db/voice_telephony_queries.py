@@ -37,28 +37,6 @@ async def upsert_telephony(
     )
 
 
-async def update_telephony_activation(
-    *,
-    kairo_number: str,
-    activation_status: str,
-    regulatory_rejection_reason: str | None = None,
-    activated_at=None,  # datetime | None
-) -> dict | None:
-    from datetime import datetime, timezone
-    ts = activated_at or (datetime.now(timezone.utc) if activation_status == "active" else None)
-    return await execute_one(
-        """
-        UPDATE voice_agent.shop_telephony
-        SET activation_status = $2,
-            regulatory_rejection_reason = $3,
-            activated_at = $4
-        WHERE kairo_number = $1
-        RETURNING *
-        """,
-        kairo_number, activation_status, regulatory_rejection_reason, ts,
-    )
-
-
 async def get_telephony(shop_id: UUID) -> dict | None:
     return await execute_one(
         "SELECT * FROM voice_agent.shop_telephony WHERE shop_id = $1",

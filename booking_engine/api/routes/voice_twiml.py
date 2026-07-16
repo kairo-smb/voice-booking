@@ -1,6 +1,6 @@
-"""Dynamic TeXML webhook — per-call routing decision.
+"""Dynamic TwiML webhook — per-call routing decision.
 
-Telnyx calls this on every inbound call. We respond with either:
+Twilio calls this on every inbound call. We respond with either:
 - <Dial><Sip>OpenAI SIP endpoint</Sip></Dial> when AI is attached
 - <Dial>fallback_number</Dial> when AI is detached and fallback is set
 - <Say>recorded message</Say> otherwise
@@ -13,7 +13,8 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Form, Response
+from fastapi import APIRouter, Depends, Request, Response
+from twilio.request_validator import RequestValidator
 
 from booking_engine.config import Settings, get_settings
 from booking_engine.db.voice_config_queries import get_config
@@ -22,7 +23,7 @@ from booking_engine.services.phone_normalize import digits_only
 from booking_engine.services.token_meter import decide_session
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/voice/texml", tags=["voice-texml"])
+router = APIRouter(prefix="/voice/twiml", tags=["voice-twiml"])
 
 
 _SAY_UNAVAILABLE = (
@@ -54,17 +55,32 @@ def _dial_fallback(number: str) -> Response:
     return _wrap(f'<Dial timeout="25">{number}</Dial>')
 
 
+def _twilio_signature_valid(request: Request, form: dict, settings: Settings) -> bool:
+    """Verify X-Twilio-Signature; no-op until TWILIO_AUTH_TOKEN is provisioned."""
+    if not settings.twilio_auth_token:
+        return True
+    signature = request.headers.get("X-Twilio-Signature", "")
+    url = f"{settings.public_base_url}/api/v1/voice/twiml/incoming"
+    return RequestValidator(settings.twilio_auth_token).validate(url, form, signature)
+
+
 @router.post("/incoming")
 async def incoming(
+    request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
-    Called: str = Form(...),
-    From: str = Form(default=""),
-    CallSid: str = Form(default=""),
 ) -> Response:
-    """Telnyx fires this on every inbound call."""
-    telephony = await get_telephony_by_kairo_number(Called)
+    """Twilio fires this on every inbound call."""
+    form = dict(await request.form())
+    if not _twilio_signature_valid(request, form, settings):
+        logger.warning("twiml.incoming: invalid Twilio signature")
+        return Response(status_code=403)
+
+    called = form.get("Called", "")
+    call_sid = form.get("CallSid", "")
+
+    telephony = await get_telephony_by_kairo_number(called)
     if not telephony:
-        logger.warning("texml.incoming: unknown number %s sid=%s", Called, CallSid)
+        logger.warning("twiml.incoming: unknown number %s sid=%s", called, call_sid)
         return _say_unavailable()
 
     shop_id: UUID = telephony["shop_id"]
@@ -88,8 +104,8 @@ async def incoming(
 
     if fallback and fallback_normalized == salon_existing_normalized:
         logger.warning(
-            "texml.incoming: fallback equals forwarded number — loop risk, "
-            "playing Say. shop_id=%s sid=%s", shop_id, CallSid,
+            "twiml.incoming: fallback equals forwarded number — loop risk, "
+            "playing Say. shop_id=%s sid=%s", shop_id, call_sid,
         )
 
     return _say_unavailable()

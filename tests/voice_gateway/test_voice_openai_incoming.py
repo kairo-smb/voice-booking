@@ -29,7 +29,7 @@ def _event(shop_id):
     return {"type": "realtime.call.incoming", "data": {
         "call_id": "rtc_123",
         "sip_headers": [
-            {"name": "From", "value": "sip:+393331112222@sip.telnyx.com"},
+            {"name": "From", "value": "sip:+393331112222@sip.example.com"},
             {"name": "X-Shop-Id", "value": str(shop_id)},
         ],
     }}
