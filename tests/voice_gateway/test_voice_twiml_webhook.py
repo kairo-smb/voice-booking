@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient, ASGITransport
+from twilio.request_validator import RequestValidator
 
 from booking_engine.api.app import create_app
 
@@ -113,3 +114,47 @@ async def test_twiml_returns_say_when_unknown_number():
             r = await c.post("/api/v1/voice/twiml/incoming", data=_form_data())
             assert r.status_code == 200
             assert "<Say" in r.text
+
+
+@pytest.mark.asyncio
+async def test_twiml_rejects_invalid_signature(monkeypatch):
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://api.example.com")
+    with patch("booking_engine.api.routes.voice_twiml.get_telephony_by_kairo_number",
+               new=AsyncMock(return_value=_telephony())):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/twiml/incoming",
+                data=_form_data(),
+                headers={"X-Twilio-Signature": "bogus"},
+            )
+            assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_twiml_accepts_valid_signature(monkeypatch):
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://api.example.com")
+    form = _form_data()
+    url = "https://api.example.com/api/v1/voice/twiml/incoming"
+    signature = RequestValidator("test-token").compute_signature(url, form)
+    with patch("booking_engine.api.routes.voice_twiml.get_telephony_by_kairo_number",
+               new=AsyncMock(return_value=_telephony())), \
+         patch("booking_engine.api.routes.voice_twiml.get_config",
+               new=AsyncMock(return_value=_config(enabled=True))), \
+         patch("booking_engine.api.routes.voice_twiml.decide_session",
+               new=AsyncMock(return_value=type("D", (), {
+                   "attach": True, "balance": 5000, "detach_reason": None
+               })())):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/twiml/incoming",
+                data=form,
+                headers={"X-Twilio-Signature": signature},
+            )
+            assert r.status_code == 200
+            assert "<Sip>" in r.text

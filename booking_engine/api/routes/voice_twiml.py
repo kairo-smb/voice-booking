@@ -13,7 +13,8 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Form, Response
+from fastapi import APIRouter, Depends, Request, Response
+from twilio.request_validator import RequestValidator
 
 from booking_engine.config import Settings, get_settings
 from booking_engine.db.voice_config_queries import get_config
@@ -54,17 +55,32 @@ def _dial_fallback(number: str) -> Response:
     return _wrap(f'<Dial timeout="25">{number}</Dial>')
 
 
+def _twilio_signature_valid(request: Request, form: dict, settings: Settings) -> bool:
+    """Verify X-Twilio-Signature; no-op until TWILIO_AUTH_TOKEN is provisioned."""
+    if not settings.twilio_auth_token:
+        return True
+    signature = request.headers.get("X-Twilio-Signature", "")
+    url = f"{settings.public_base_url}/api/v1/voice/twiml/incoming"
+    return RequestValidator(settings.twilio_auth_token).validate(url, form, signature)
+
+
 @router.post("/incoming")
 async def incoming(
+    request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
-    Called: str = Form(...),
-    From: str = Form(default=""),
-    CallSid: str = Form(default=""),
 ) -> Response:
     """Twilio fires this on every inbound call."""
-    telephony = await get_telephony_by_kairo_number(Called)
+    form = dict(await request.form())
+    if not _twilio_signature_valid(request, form, settings):
+        logger.warning("twiml.incoming: invalid Twilio signature")
+        return Response(status_code=403)
+
+    called = form.get("Called", "")
+    call_sid = form.get("CallSid", "")
+
+    telephony = await get_telephony_by_kairo_number(called)
     if not telephony:
-        logger.warning("twiml.incoming: unknown number %s sid=%s", Called, CallSid)
+        logger.warning("twiml.incoming: unknown number %s sid=%s", called, call_sid)
         return _say_unavailable()
 
     shop_id: UUID = telephony["shop_id"]
@@ -89,7 +105,7 @@ async def incoming(
     if fallback and fallback_normalized == salon_existing_normalized:
         logger.warning(
             "twiml.incoming: fallback equals forwarded number — loop risk, "
-            "playing Say. shop_id=%s sid=%s", shop_id, CallSid,
+            "playing Say. shop_id=%s sid=%s", shop_id, call_sid,
         )
 
     return _say_unavailable()
