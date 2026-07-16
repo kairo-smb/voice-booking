@@ -31,6 +31,18 @@ This spans `voice_tool_queries.py` **and** its consumers (`identity_resolver`,
 `CustomerSummary` model, `prompt_assembler._caller_context`, tool response
 models). Fixed & live-validated so far: `get_appointment_owner` (authz/lead-time).
 
+### Governing principle: shared schemas are ground truth
+The voice agent reads/writes REAL data in the shared schemas via `queries.py`;
+`voice_agent` holds only voice-specific/transient state.
+- **business_app_core (ground truth):** shops, staff, staff_services,
+  staff_schedules, services, customers (with `verified`/`phone_verified`),
+  appointments, appointment_services, phone_contacts.
+- **voice_agent (voice-only):** calls, call_transcripts, call_events,
+  callback_memos, auth_events, shop_config, shop_telephony, voice_tones,
+  token basket, `calls.service_brief`.
+- A caller-created customer to verify → `business_app_core.customers`
+  (`verified=false`), linked via `voice_agent.calls.created_customer_id`.
+
 ### Staged plan to make the agent run on Neon (no schema changes)
 1. **Booking tools** → delegate `voice_tool_queries` (availability/create/modify/
    cancel/get) to `queries.py` (`get_available_slots`, `create_appointment`,
