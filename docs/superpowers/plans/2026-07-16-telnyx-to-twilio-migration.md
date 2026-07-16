@@ -878,6 +878,9 @@ Per the design spec: Twilio's one-time Bundle approval happens out-of-band befor
 - Delete: `booking_engine/api/routes/voice_telnyx_webhooks.py`
 - Delete: `tests/voice_gateway/test_voice_telnyx_webhooks.py`
 - Modify: `booking_engine/api/app.py:45-46`
+- Modify: `booking_engine/db/voice_telephony_queries.py`
+
+**Note found during Task 5's code quality review:** `update_telephony_activation()` in `voice_telephony_queries.py` has exactly one caller — `voice_telnyx_webhooks.py`, deleted in this task. Once that's gone, it's dead code (nothing else sets `activation_status` away from its DB default of `"active"`). Remove it here rather than leave unreachable code behind.
 
 - [ ] **Step 1: Remove the route registration**
 
@@ -894,15 +897,47 @@ In `booking_engine/api/app.py`, delete these two lines:
 git rm booking_engine/api/routes/voice_telnyx_webhooks.py tests/voice_gateway/test_voice_telnyx_webhooks.py
 ```
 
-- [ ] **Step 3: Run the full voice_gateway suite to confirm nothing else references it**
+- [ ] **Step 3: Remove the now-dead `update_telephony_activation` function**
+
+In `booking_engine/db/voice_telephony_queries.py`, delete this function (its only caller no longer exists after Step 2):
+
+```python
+async def update_telephony_activation(
+    *,
+    kairo_number: str,
+    activation_status: str,
+    regulatory_rejection_reason: str | None = None,
+    activated_at=None,  # datetime | None
+) -> dict | None:
+    from datetime import datetime, timezone
+    ts = activated_at or (datetime.now(timezone.utc) if activation_status == "active" else None)
+    return await execute_one(
+        """
+        UPDATE voice_agent.shop_telephony
+        SET activation_status = $2,
+            regulatory_rejection_reason = $3,
+            activated_at = $4
+        WHERE kairo_number = $1
+        RETURNING *
+        """,
+        kairo_number, activation_status, regulatory_rejection_reason, ts,
+    )
+```
+
+Leave `upsert_telephony`, `get_telephony`, and `get_telephony_by_kairo_number` untouched — they're still used elsewhere.
+
+- [ ] **Step 4: Run the full voice_gateway suite to confirm nothing else references either deleted symbol**
 
 Run: `pytest tests/voice_gateway/ -v`
 Expected: PASS, no import errors
 
-- [ ] **Step 4: Commit**
+Run: `grep -rn "update_telephony_activation" --include="*.py" booking_engine/ tests/`
+Expected: no output (only the definition you just deleted referenced it)
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add booking_engine/api/app.py
+git add booking_engine/api/app.py booking_engine/db/voice_telephony_queries.py
 git commit -m "chore(voice): retire Telnyx number-status webhook, no Twilio equivalent needed"
 ```
 
