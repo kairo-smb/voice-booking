@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token
+from twilio.base.exceptions import TwilioRestException
+
 from booking_engine.clients.twilio_numbers import (
     purchase_number,
     search_available_numbers,
@@ -69,14 +71,17 @@ async def provision(
         raise HTTPException(400, "salon_existing_number required for forward setup")
 
     voice_url = f"{settings.public_base_url}/api/v1/voice/twiml/incoming"
-    purchased = purchase_number(
-        phone_number=body.phone_number,
-        voice_url=voice_url,
-        account_sid=settings.twilio_account_sid,
-        auth_token=settings.twilio_auth_token,
-        bundle_sid=settings.twilio_bundle_sid or None,
-        address_sid=settings.twilio_address_sid or None,
-    )
+    try:
+        purchased = purchase_number(
+            phone_number=body.phone_number,
+            voice_url=voice_url,
+            account_sid=settings.twilio_account_sid,
+            auth_token=settings.twilio_auth_token,
+            bundle_sid=settings.twilio_bundle_sid or None,
+            address_sid=settings.twilio_address_sid or None,
+        )
+    except TwilioRestException as exc:
+        raise HTTPException(502, f"Twilio number purchase failed: {exc.msg}") from exc
     # The one Kairo-entity regulatory Bundle is approved once, out-of-band,
     # before any shop onboards (see the migration spec) — every purchase
     # after that is synchronous: it succeeds now (active) or raises outright.

@@ -111,3 +111,23 @@ async def test_setup_instructions_404_when_no_telephony():
             r = await c.get(
                 f"/api/v1/voice/numbers/{shop}/setup-instructions", headers=AUTH)
             assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_provision_returns_502_when_twilio_purchase_fails():
+    from twilio.base.exceptions import TwilioRestException
+    with patch("booking_engine.api.routes.voice_telephony.purchase_number",
+               side_effect=TwilioRestException(400, "https://api.twilio.com/x", "Bundle not approved")):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/provision",
+                headers=AUTH,
+                json={
+                    "shop_id": "00000000-0000-0000-0000-000000000001",
+                    "phone_number": "+37251234567",
+                    "setup_path": "new",
+                },
+            )
+            assert r.status_code == 502
