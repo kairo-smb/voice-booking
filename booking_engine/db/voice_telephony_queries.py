@@ -37,7 +37,6 @@ async def upsert_telephony(
     )
 
 
-
 async def get_telephony(shop_id: UUID) -> dict | None:
     return await execute_one(
         "SELECT * FROM voice_agent.shop_telephony WHERE shop_id = $1",
