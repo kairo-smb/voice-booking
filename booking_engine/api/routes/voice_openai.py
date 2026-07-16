@@ -1,0 +1,72 @@
+"""OpenAI Realtime SIP incoming-call webhook.
+
+OpenAI fires `realtime.call.incoming` when a SIP call reaches our project. We
+identify the shop (from the X-Shop-Id SIP header Telnyx set), assemble the
+session (prompt + the 12 authz'd tools), and accept the call.
+
+ponytail: webhook signature verified only when OPENAI_WEBHOOK_SECRET is set.
+Wire mandatory verification once the signing secret is provisioned.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
+
+from booking_engine.clients.openai_realtime import accept_sip_call
+from booking_engine.config import Settings, get_settings
+from booking_engine.db.voice_calls_queries import insert_call
+from booking_engine.db.voice_config_queries import get_config, get_policy
+from booking_engine.services.identity_resolver import resolve_caller
+from booking_engine.services.realtime_session import (
+    build_accept_payload, caller_from_sip_headers, shop_id_from_sip_headers,
+)
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/voice/openai", tags=["voice-openai"])
+
+
+@router.post("/incoming")
+async def incoming(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict:
+    event = await request.json()
+    if event.get("type") != "realtime.call.incoming":
+        return {"status": "ignored"}
+
+    data = event.get("data", {})
+    call_id = data.get("call_id")
+    headers = data.get("sip_headers", [])
+    shop_id = shop_id_from_sip_headers(headers)
+    if not call_id or not shop_id:
+        logger.warning("openai.incoming: missing call_id/shop_id headers=%s", headers)
+        return {"status": "unroutable"}
+
+    config = await get_config(shop_id)
+    if not config:
+        logger.warning("openai.incoming: no config for shop %s", shop_id)
+        return {"status": "no_config"}
+    policy = await get_policy()
+    if not policy:
+        logger.warning("openai.incoming: no policy configured")
+        return {"status": "no_config"}
+
+    caller = caller_from_sip_headers(headers)
+    resolution = await resolve_caller(shop_id=shop_id, caller_phone=caller)
+    matched_id = (
+        resolution.unique_match.customer_id if resolution.unique_match else None
+    )
+    await insert_call(
+        shop_id=shop_id, caller_phone=caller, matched_customer_id=matched_id,
+    )
+
+    payload = await build_accept_payload(
+        config=config, policy=policy, resolution=resolution,
+        model=settings.openai_realtime_model,
+    )
+    ok = await accept_sip_call(
+        call_id=call_id, payload=payload, api_key=settings.openai_api_key,
+    )
+    return {"status": "accepted" if ok else "accept_failed"}

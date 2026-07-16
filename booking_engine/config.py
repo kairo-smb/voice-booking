@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     telnyx_default_country: str = "IT"
     # OpenAI SIP routing
     openai_sip_project_id: str = ""
+    openai_api_key: str = ""
+    openai_realtime_model: str = "gpt-realtime"
+    # OpenAI webhook signing secret (verify realtime.call.incoming when set)
+    openai_webhook_secret: str = ""
     # Voice agent — OpenAI tool + event webhook bearer token
     openai_tool_secret: str = ""
     # Token meter
