@@ -91,24 +91,28 @@ async def attach_customer_to_call(
 
 
 async def list_services(*, shop_id: UUID, filter_q: str | None) -> list[dict]:
+    # Ground-truth business_app_core.services; alias to the keys the tool route
+    # expects (name/duration_min/price_cents). price stored as euros -> cents.
     if filter_q:
         return await connection.execute(
             """
-            SELECT id, name, duration_min, price_cents
+            SELECT id, service_name AS name, duration_minutes AS duration_min,
+                   (price_eur * 100)::int AS price_cents
             FROM business_app_core.services
-            WHERE shop_id = $1 AND active = true
-              AND name ILIKE '%' || $2 || '%'
-            ORDER BY name
+            WHERE shop_id = $1 AND is_active = true
+              AND service_name ILIKE '%' || $2 || '%'
+            ORDER BY service_name
             LIMIT 20
             """,
             shop_id, filter_q,
         )
     return await connection.execute(
         """
-        SELECT id, name, duration_min, price_cents
+        SELECT id, service_name AS name, duration_minutes AS duration_min,
+               (price_eur * 100)::int AS price_cents
         FROM business_app_core.services
-        WHERE shop_id = $1 AND active = true
-        ORDER BY name
+        WHERE shop_id = $1 AND is_active = true
+        ORDER BY service_name
         """,
         shop_id,
     )
@@ -117,11 +121,11 @@ async def list_services(*, shop_id: UUID, filter_q: str | None) -> list[dict]:
 async def list_staff_for_service(*, shop_id: UUID, service_id: UUID) -> list[dict]:
     return await connection.execute(
         """
-        SELECT s.id, (s.first_name || ' ' || coalesce(s.last_name,'')) AS name
-        FROM business_app_core.staff_users s
+        SELECT s.id, s.full_name AS name
+        FROM business_app_core.staff s
         JOIN business_app_core.staff_services ss ON ss.staff_id = s.id
-        WHERE s.shop_id = $1 AND ss.service_id = $2 AND s.active = true
-        ORDER BY s.first_name
+        WHERE s.shop_id = $1 AND ss.service_id = $2 AND s.is_active = true
+        ORDER BY s.full_name
         """,
         shop_id, service_id,
     )
