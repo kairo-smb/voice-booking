@@ -110,16 +110,35 @@ needed at that volume — carrier A2P filtering targets bulk/burst campaign
 patterns, not this scale.
 
 **Explicitly out of scope for this migration:** building the SMS-sending
-feature itself, opt-in capture, and any Alphanumeric Sender ID work. This
-spec only ensures the underlying number *can* do it later. Two things to
-revisit if/when that feature is scoped:
+feature itself and any Alphanumeric Sender ID work. This spec only ensures
+the underlying number *can* do it later. Two-phase plan for that future
+work (documented here for whoever picks it up — nothing to implement yet,
+no SMS code exists in the repo today):
 
-- If marketing volume grows materially beyond small batches, revisit
-  Alphanumeric Sender ID registration (Twilio-managed per-country carrier
-  due diligence) rather than continuing on the raw long code.
-- Customers will see a `+372` (Estonian) number as the SMS sender once this
-  ships, not a branded name — acceptable at small opted-in scale, worth
-  addressing (via Sender ID) if it becomes a trust/branding concern.
+**Phase 1 — raw number, no Sender ID registration needed.** Send from the
+Twilio EE Mobile number's own digits as the SMS sender (`+372…`), with the
+salon's name in the message body/signature (e.g. "— {SalonName}") so the
+customer still recognizes who's texting them. This works immediately, no
+Twilio registration process, because Italy's pre-registration requirement
+applies specifically to *Alphanumeric* senders — plain numeric long codes
+aren't gated by it.
+
+**Phase 2 — opt-in per-shop Alphanumeric Sender ID.** Twilio confirmed Italy
+requires **pre-registration** for Alphanumeric Sender ID: each distinct
+sender-ID string needs its own document submission (proof of ownership of
+that name) and carrier vetting, via Twilio Console/Trust Hub — not instant,
+not a simple bulk API call. Registering the *salon's own name* as sender ID
+therefore means real per-shop KYC and onboarding delay, which conflicts with
+the "one Kairo entity, no per-salon docs" principle used everywhere else in
+this design. Resolution: make it an **explicit, proactive opt-in** a shop
+can request (its own KYC flow, its own delay, only for shops that want their
+own brand as sender) rather than a default every shop goes through. Default
+stays on Phase 1.
+
+Other notes for that future work:
+- If marketing volume grows well beyond small batches even on Phase 1,
+  reconsider deliverability (carrier filtering targets bulk/burst patterns,
+  not registration status per se).
 - If two-way SMS (customer replies) is ever needed, that's a different
   requirement than what's designed here and needs its own scoping.
 
