@@ -14,11 +14,12 @@ async def insert_call(
     row = await connection.execute_one(
         """
         INSERT INTO voice_agent.calls
-            (shop_id, caller_phone, matched_customer_id, started_at)
-        VALUES ($1, $2, $3, now())
+            (shop_id, caller_number, matched_customer_id, customer_match, started_at)
+        VALUES ($1, $2, $3, $4, now())
         RETURNING id
         """,
-        shop_id, caller_phone, matched_customer_id,
+        shop_id, caller_phone or "anonymous", matched_customer_id,
+        "existing" if matched_customer_id else "unmatched",
     )
     return row["id"]
 
