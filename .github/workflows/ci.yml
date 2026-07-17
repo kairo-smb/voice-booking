@@ -112,4 +112,6 @@ jobs:
 
       - name: Delete ephemeral Neon branch
         if: always()
-        run: neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" || true
+        run: |
+          neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" \
+            || echo "::warning::Failed to delete ephemeral branch $CI_BRANCH — manual cleanup needed"
