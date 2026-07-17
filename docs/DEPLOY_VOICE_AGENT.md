@@ -4,7 +4,7 @@ Manual deploy steps for the Booking Engine after the `voice_agent` schema + endp
 
 ## Prerequisites
 
-- AWS CLI configured with credentials for the target account (`aws sts get-caller-identity` should work).
+- `flyctl` installed and authenticated (`fly auth login`).
 - `DATABASE_URL` for the Neon production database (pooler endpoint).
 - A `CONTROL_PLANE_SECRET` value — generate one if you don't already have one stored.
 
@@ -34,8 +34,14 @@ Save it somewhere durable (1Password / AWS Secrets Manager / etc.). You will pas
 Booking Engine deploys automatically via GitHub Actions on push to `main`
 (`.github/workflows/deploy-fly-prod.yml`) — it runs tests, validates
 migrations on a throwaway Neon branch, applies them to production, then
-`flyctl deploy --config fly.toml`. `CONTROL_PLANE_SECRET` and `DATABASE_URL`
-are already configured as GitHub repo secrets; nothing to pass manually.
+`flyctl deploy --config fly.toml`. `DATABASE_URL` is already configured as
+a GitHub repo secret for the migration step. `CONTROL_PLANE_SECRET` is a
+Fly app secret, not a GitHub one — `flyctl deploy` doesn't inject it, so
+it must be set once directly on the Fly app if not already present:
+
+```bash
+fly secrets set CONTROL_PLANE_SECRET='paste-your-32-byte-hex-here' --app kairo-booking-engine
+```
 
 For a manual deploy:
 
@@ -44,7 +50,7 @@ fly auth login
 flyctl deploy --config fly.toml
 ```
 
-## 4. Record the Function URL
+## 4. Record the deployed URL
 
 The Fly app serves at its stable app URL — something like:
 ```

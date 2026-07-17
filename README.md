@@ -45,7 +45,7 @@ voice_gateway/           # Realtime API gateway (FastAPI)
 fly.toml                 # Fly.io app configuration
 scripts/
 ├── setup_neon.sh        # Initialize Neon database (schema + seed)
-├── migrate.sh            # Apply booking_engine/db/sql migrations to a Neon branch
+├── migrate.sh           # Apply booking_engine/db/sql migrations to a Neon branch
 └── deploy-voice.sh      # Deploy Voice Gateway to Fly.io
 ```
 
@@ -89,10 +89,10 @@ DATABASE_URL=postgresql://... pytest tests/live_db/ -v
 
 ## Deployment
 
-Both services deploy to Fly.io via GitHub Actions on push to `main`
-(production) or `QA` (`.github/workflows/deploy-fly-prod.yml` /
-`deploy-qa.yml`) — `flyctl deploy` with `fly.toml` / `fly.qa.toml`. Manual
-deploys:
+Booking Engine deploys automatically to Fly.io via GitHub Actions on push
+to `main` (production) or `QA` (`.github/workflows/deploy-fly-prod.yml` /
+`deploy-qa.yml`) — `flyctl deploy` with `fly.toml` / `fly.qa.toml`. Voice
+Gateway deploys manually only. Manual deploys:
 
 ```bash
 fly auth login
