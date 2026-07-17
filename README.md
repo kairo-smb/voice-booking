@@ -9,12 +9,12 @@ Customer (browser/WebRTC) ←→ OpenAI Realtime API (voice + LLM)
                                     ↕ function calls
                               Voice Gateway (Fly.io)
                                     ↕ HTTPS
-                              Booking Engine (AWS Lambda)
+                              Booking Engine (Fly.io)
                                     ↕ SQL
                               Neon PostgreSQL (serverless)
 ```
 
-**Booking Engine** — Stateless REST API for shops, staff, services, customers, availability, and appointments. Backed by Neon PostgreSQL via asyncpg. Deployed as an AWS Lambda container with Mangum ASGI adapter and Function URL (~300ms cold start, $0 idle).
+**Booking Engine** — Stateless REST API for shops, staff, services, customers, availability, and appointments. Backed by Neon PostgreSQL via asyncpg. Deployed on Fly.io with auto-stop machines ($0 idle).
 
 **Voice Gateway** — Generates ephemeral OpenAI Realtime API tokens with session config (tools, voice, VAD) and proxies function calls from the browser to the Booking Engine. Deployed on Fly.io with auto-stop machines ($0 idle).
 
@@ -29,7 +29,7 @@ booking_engine/          # REST API (FastAPI + Neon PostgreSQL)
 │   └── sql/             # Schema DDL + seed data
 ├── config.py            # Settings (DATABASE_URL, pool sizes)
 ├── requirements.txt     # Service dependencies
-└── Dockerfile           # AWS Lambda container image
+└── Dockerfile.fly       # Fly.io container image
 
 voice_gateway/           # Realtime API gateway (FastAPI)
 ├── api/routes/
@@ -42,11 +42,10 @@ voice_gateway/           # Realtime API gateway (FastAPI)
 ├── requirements.txt     # Service dependencies
 └── Dockerfile           # Fly.io container image
 
-lambda_handler.py        # Mangum entry point for AWS Lambda
 fly.toml                 # Fly.io app configuration
 scripts/
 ├── setup_neon.sh        # Initialize Neon database (schema + seed)
-├── deploy-booking.sh    # Deploy Booking Engine to AWS Lambda
+├── migrate.sh            # Apply booking_engine/db/sql migrations to a Neon branch
 └── deploy-voice.sh      # Deploy Voice Gateway to Fly.io
 ```
 
@@ -90,30 +89,25 @@ DATABASE_URL=postgresql://... pytest tests/live_db/ -v
 
 ## Deployment
 
-### Booking Engine → AWS Lambda
-
-```bash
-AWS_REGION=eu-central-1 DATABASE_URL=postgresql://... ./scripts/deploy-booking.sh
-```
-
-Creates ECR repo, IAM role, Lambda function, and public Function URL on first run. Subsequent runs just update the container image.
-
-### Voice Gateway → Fly.io
+Both services deploy to Fly.io via GitHub Actions on push to `main`
+(production) or `QA` (`.github/workflows/deploy-fly-prod.yml` /
+`deploy-qa.yml`) — `flyctl deploy` with `fly.toml` / `fly.qa.toml`. Manual
+deploys:
 
 ```bash
 fly auth login
-./scripts/deploy-voice.sh
-fly secrets set OPENAI_KEY=sk-... BOOKING_ENGINE_URL=https://xxx.lambda-url.eu-central-1.on.aws/
+flyctl deploy --config fly.toml       # Booking Engine (production)
+./scripts/deploy-voice.sh             # Voice Gateway
 ```
 
 ### Cost
 
 | Component | Idle | Active |
 |-----------|------|--------|
-| Lambda (Booking Engine) | $0 | ~$0-1/mo |
+| Fly.io (Booking Engine) | $0 | $0 (free tier) |
 | Fly.io (Voice Gateway) | $0 | $0 (free tier) |
 | Neon PostgreSQL | $0 | $0 (free tier) |
-| **Total infrastructure** | **$0** | **$0-1/mo** |
+| **Total infrastructure** | **$0** | **$0** |
 
 Plus usage-based: Twilio (per-minute), OpenAI Realtime (per-minute).
 

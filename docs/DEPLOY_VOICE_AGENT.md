@@ -29,26 +29,26 @@ openssl rand -hex 32
 ```
 Save it somewhere durable (1Password / AWS Secrets Manager / etc.). You will paste it into the deploy command below AND into the webapp's environment as `VOICE_AGENT_SECRET`.
 
-## 3. Deploy the Booking Engine to AWS Lambda
+## 3. Deploy the Booking Engine to Fly.io
 
-The existing `scripts/deploy-booking.sh` builds and pushes the container image. The script reads two env vars and forwards them to Lambda as runtime env vars.
+Booking Engine deploys automatically via GitHub Actions on push to `main`
+(`.github/workflows/deploy-fly-prod.yml`) — it runs tests, validates
+migrations on a throwaway Neon branch, applies them to production, then
+`flyctl deploy --config fly.toml`. `CONTROL_PLANE_SECRET` and `DATABASE_URL`
+are already configured as GitHub repo secrets; nothing to pass manually.
+
+For a manual deploy:
 
 ```bash
-AWS_REGION=eu-central-1 \
-  DATABASE_URL='postgresql://neondb_owner:...@...neon.tech/neondb?sslmode=require&channel_binding=require' \
-  CONTROL_PLANE_SECRET='paste-your-32-byte-hex-here' \
-  ./scripts/deploy-booking.sh
+fly auth login
+flyctl deploy --config fly.toml
 ```
-
-The first run creates ECR repo + IAM role + Lambda function + Function URL. Subsequent runs only update the container image.
-
-> If `deploy-booking.sh` does not currently forward `CONTROL_PLANE_SECRET` to the Lambda environment, edit it before running — search for `Environment` / `aws lambda update-function-configuration` and add the variable to the `Variables` map. The variable name MUST be `CONTROL_PLANE_SECRET` (matches `booking_engine/config.py`).
 
 ## 4. Record the Function URL
 
-The script prints the deployed Function URL on success — something like:
+The Fly app serves at its stable app URL — something like:
 ```
-https://abcde12345.lambda-url.eu-central-1.on.aws/
+https://kairo-booking-engine.fly.dev
 ```
 
 You will use this as `VOICE_AGENT_API_URL` in the webapp.
@@ -58,7 +58,7 @@ You will use this as `VOICE_AGENT_API_URL` in the webapp.
 Pick any active shop UUID from your DB. Replace placeholders below.
 
 ```bash
-URL='https://abcde12345.lambda-url.eu-central-1.on.aws'
+URL='https://kairo-booking-engine.fly.dev'
 SECRET='paste-your-32-byte-hex-here'
 SHOP_ID='<existing shop UUID>'
 H="Authorization: Bearer $SECRET"
@@ -91,7 +91,7 @@ Pass criteria:
 Set the two env vars in the webapp's deployment environment (AWS Amplify or local `.env`):
 
 ```
-VOICE_AGENT_API_URL=https://abcde12345.lambda-url.eu-central-1.on.aws
+VOICE_AGENT_API_URL=https://kairo-booking-engine.fly.dev
 VOICE_AGENT_SECRET=paste-your-32-byte-hex-here
 ```
 
@@ -99,11 +99,10 @@ Plan 2 (`docs/superpowers/plans/2026-05-30-inbox-voice-agent-ui.md` in the webap
 
 ## Rollback
 
-The migration is purely additive — no existing tables or columns were altered. Rolling back the Lambda is enough:
+The migration is purely additive — no existing tables or columns were altered. Rolling back the Fly app is enough:
 ```bash
-aws lambda update-function-code \
-  --function-name booking-engine \
-  --image-uri <previous ECR image URI>
+flyctl releases list --app kairo-booking-engine
+flyctl deploy --image <previous-image-ref> --app kairo-booking-engine
 ```
 
 If you also want to drop the new schema (destructive — deletes call history):
@@ -116,7 +115,7 @@ ALTER TABLE business_app_core.shops DROP COLUMN voice, DROP COLUMN language;
 
 ## Plan A — Platform deploy notes (2026-06-03)
 
-### New env vars on Lambda
+### New env vars on Fly.io
 
 - `TWILIO_ACCOUNT_SID` — Twilio account SID
 - `TWILIO_AUTH_TOKEN` — Twilio auth token
@@ -124,7 +123,7 @@ ALTER TABLE business_app_core.shops DROP COLUMN voice, DROP COLUMN language;
 - `TWILIO_BUNDLE_SID` — the one Kairo-entity regulatory Bundle, created and approved once, out-of-band, in the Twilio Console — reused across every provisioned DID; leave unset until it exists, `purchase_number` treats it as optional
 - `TWILIO_ADDRESS_SID` — regulatory Address tied to the same Bundle, if Twilio requires one for the number type; also optional
 - `OPENAI_SIP_PROJECT_ID` — OpenAI project ID for SIP routing
-- `PUBLIC_BASE_URL` — public URL of the API Gateway in front of Lambda (used for TwiML voice_url)
+- `PUBLIC_BASE_URL` — public URL of the Fly app (used for TwiML voice_url)
 - `VOICE_KAIRO_TOKENS_PER_SECOND` — default 18
 - `VOICE_MIN_SESSION_RESERVE_TOKENS` — default 1500
 - `VOICE_MAX_OVERAGE_TOKENS` — default 5000
@@ -174,7 +173,7 @@ The `voice_url` configured on each purchased number is `${PUBLIC_BASE_URL}/api/v
 
 ## Plan B — Tools & identity deploy notes (2026-06-03)
 
-### New env vars on Lambda
+### New env vars on Fly.io
 
 - `OPENAI_TOOL_SECRET` — bearer secret for OpenAI tool/event webhooks
 
