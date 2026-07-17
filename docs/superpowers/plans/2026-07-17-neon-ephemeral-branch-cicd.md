@@ -205,7 +205,9 @@ jobs:
 
       - name: Delete ephemeral Neon branch
         if: always()
-        run: neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" || true
+        run: |
+          neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" \
+            || echo "::warning::Failed to delete ephemeral branch $CI_BRANCH — manual cleanup needed"
 ```
 
 - [ ] **Step 2: Validate YAML syntax**
@@ -351,7 +353,9 @@ jobs:
 
       - name: Delete ephemeral Neon branch
         if: always()
-        run: neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" || true
+        run: |
+          neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" \
+            || echo "::warning::Failed to delete ephemeral branch $CI_BRANCH — manual cleanup needed"
 
   promote-qa:
     name: Refresh and migrate real QA branch
@@ -582,7 +586,9 @@ jobs:
 
       - name: Delete ephemeral Neon branch
         if: always()
-        run: neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" || true
+        run: |
+          neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" \
+            || echo "::warning::Failed to delete ephemeral branch $CI_BRANCH — manual cleanup needed"
 
   migrate-prod:
     name: Migrate production DB
