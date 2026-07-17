@@ -68,6 +68,23 @@ passes does a workflow touch the real target (QA branch or production).
 This is the same pattern `webapp/ci.yml` already uses for PRs; this design
 extends it to voice-booking's PR, QA-release, and prod-release flows alike.
 
+**Known limitation:** the ephemeral branch is a point-in-time
+copy-on-write snapshot taken when it's created — it does not track
+production afterward. Between that snapshot and `migrate-prod` actually
+running against real production (after `unit` + `validate-on-tmp-branch`
+both complete, up to ~12 minutes later), live application traffic keeps
+writing to production. If a migration's success were data-dependent (e.g.
+a `NOT NULL` backfill or a new uniqueness constraint), it's possible —
+though narrow — for validation to pass against the snapshot while the real
+`migrate-prod` run hits a conflict from writes made after the snapshot.
+This is inherent to snapshot-based pre-flight validation, not something
+the `concurrency` group closes (that only serializes workflow runs against
+each other, not against live application writes). Ephemeral-branch
+validation substantially derisks migrations — it replaced a schema-only,
+fake-data local clone with a true copy-on-write clone of prod's real
+schema *and* data — but it is not a complete guarantee against migration
+failure on real production.
+
 ### `ci.yml` (PR into `main`/`QA`)
 
 - `unit` job: unchanged — no DB, runs first, fails fast.
