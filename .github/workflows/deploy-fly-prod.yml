@@ -1,0 +1,122 @@
+name: Deploy Fly Production
+
+# Production Fly release pipeline for the voice-webhook/MCP surface
+# (kairo-booking-engine). Separate from deploy.yml (Lambda REST API) — same
+# codebase, different compute target. Order enforced: tests, then migrations
+# to production, then deploy — a regression or failing migration stops the
+# release before prod is touched.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: booking-engine-prod-release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Unit + live_db tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: kairo_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/kairo_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/kairo_test
+      LOCAL_DB: postgresql://postgres:postgres@localhost:5432/kairo_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio
+
+      - name: Run unit tests
+        run: pytest tests/voice_gateway/ tests/booking_engine/ -q
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Clone Neon schema into local Postgres
+        run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          pg_dump --schema-only --no-owner --no-privileges \
+            "${{ secrets.CI_SCHEMA_SOURCE_URL }}" > /tmp/schema.sql
+          psql -v ON_ERROR_STOP=1 "$LOCAL_DB" -f /tmp/schema.sql
+
+      - name: Load seed data into business_app_core
+        run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          PGOPTIONS="-c search_path=business_app_core,public" \
+            psql -v ON_ERROR_STOP=1 "$LOCAL_DB" -f booking_engine/db/sql/02_seed_data.sql
+
+      - name: Run live_db tests
+        run: pytest tests/live_db/ -q
+
+  migrate-prod:
+    name: Migrate production DB
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard - production database URL must be set
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::DATABASE_URL secret is not set."
+            exit 1
+          fi
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+      - name: Apply migrations to production
+        run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          chmod +x scripts/migrate.sh
+          ./scripts/migrate.sh
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  deploy-prod:
+    name: Deploy production Fly app
+    needs: migrate-prod
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to production Fly app
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only --config fly.toml
+      - name: Smoke check production health
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error https://kairo-booking-engine.fly.dev/health; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Production health check did not pass within 150 seconds" >&2
+          exit 1
