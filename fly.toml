@@ -1,12 +1,8 @@
-app = 'virtual-assistant-voice'
+app = 'kairo-booking-engine'
 primary_region = 'fra'
 
 [build]
-  dockerfile = 'voice_gateway/Dockerfile'
-
-[env]
-  BOOKING_ENGINE_URL = ''
-  # OPENAI_KEY set via: fly secrets set OPENAI_KEY=sk-...
+  dockerfile = 'booking_engine/Dockerfile.fly'
 
 [http_service]
   internal_port = 8080
@@ -21,6 +17,6 @@ primary_region = 'fra'
     soft_limit = 200
 
 [[vm]]
-  memory = '256mb'
+  memory = '512mb'
   cpu_kind = 'shared'
   cpus = 1
