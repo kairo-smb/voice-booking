@@ -1,0 +1,22 @@
+app = 'kairo-booking-engine-qa'
+primary_region = 'fra'
+
+[build]
+  dockerfile = 'booking_engine/Dockerfile.fly'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = 'requests'
+    hard_limit = 250
+    soft_limit = 200
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
