@@ -1,0 +1,154 @@
+name: Deploy QA
+
+# QA release pipeline. Pushes to QA refresh the Neon QA branch from
+# production, run tests, apply migrations to QA, then deploy the QA Fly app.
+# Production is never touched by this workflow.
+
+on:
+  push:
+    branches: [QA]
+  workflow_dispatch:
+
+concurrency:
+  group: booking-engine-qa-release
+  cancel-in-progress: false
+
+jobs:
+  refresh-qa-db:
+    name: Refresh Neon QA from production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+      NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+      NEON_PROD_BRANCH: ${{ vars.NEON_PROD_BRANCH || 'production' }}
+      NEON_QA_BRANCH: ${{ vars.NEON_QA_BRANCH || 'QA' }}
+    steps:
+      - name: Guard - Neon settings must be set
+        run: |
+          missing=0
+          for name in NEON_API_KEY NEON_PROJECT_ID NEON_PROD_BRANCH NEON_QA_BRANCH; do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name} is not set."
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      - name: Install Neon CLI
+        run: |
+          curl -fsSL https://github.com/neondatabase/neon-pkgs/releases/latest/download/neonctl-linux-x64 -o /tmp/neonctl
+          chmod +x /tmp/neonctl
+          sudo mv /tmp/neonctl /usr/local/bin/neonctl
+          neonctl --version
+
+      - name: Restore QA branch from production
+        run: |
+          neonctl branches restore "${NEON_QA_BRANCH}" "${NEON_PROD_BRANCH}" \
+            --project-id "${NEON_PROJECT_ID}"
+
+  test:
+    name: Unit + live_db tests
+    needs: refresh-qa-db
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: kairo_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/kairo_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/kairo_test
+      LOCAL_DB: postgresql://postgres:postgres@localhost:5432/kairo_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio
+
+      - name: Run unit tests
+        run: pytest tests/voice_gateway/ tests/booking_engine/ -q
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Clone Neon schema into local Postgres
+        run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          pg_dump --schema-only --no-owner --no-privileges \
+            "${{ secrets.CI_SCHEMA_SOURCE_URL }}" > /tmp/schema.sql
+          psql -v ON_ERROR_STOP=1 "$LOCAL_DB" -f /tmp/schema.sql
+
+      - name: Load seed data into business_app_core
+        run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          PGOPTIONS="-c search_path=business_app_core,public" \
+            psql -v ON_ERROR_STOP=1 "$LOCAL_DB" -f booking_engine/db/sql/02_seed_data.sql
+
+      - name: Run live_db tests
+        run: pytest tests/live_db/ -q
+
+  migrate-qa:
+    name: Migrate QA DB
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard - QA database URL must be set
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::QA_DATABASE_URL secret is not set."
+            exit 1
+          fi
+        env:
+          DATABASE_URL: ${{ secrets.QA_DATABASE_URL }}
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+      - name: Apply migrations to QA
+        run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          chmod +x scripts/migrate.sh
+          ./scripts/migrate.sh
+        env:
+          DATABASE_URL: ${{ secrets.QA_DATABASE_URL }}
+
+  deploy-qa:
+    name: Deploy QA
+    needs: migrate-qa
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to QA Fly app
+        env:
+          FLY_API_TOKEN: ${{ secrets.QA_FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only --config fly.qa.toml
+      - name: Smoke check QA health
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error https://kairo-booking-engine-qa.fly.dev/health; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "QA health check did not pass within 150 seconds" >&2
+          exit 1
