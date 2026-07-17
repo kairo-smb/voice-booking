@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kairo Voice Test Harness</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+  label { display: block; margin-top: 12px; font-weight: 600; }
+  input { width: 100%; padding: 8px; font-size: 14px; box-sizing: border-box; }
+  button { margin-top: 16px; padding: 10px 20px; font-size: 15px; cursor: pointer; }
+  #log { margin-top: 24px; padding: 12px; background: #f5f5f5; border-radius: 6px;
+         min-height: 200px; white-space: pre-wrap; font-family: monospace; font-size: 13px; }
+  #status { font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Kairo Voice Test Harness</h1>
+  <p>Speaks to the real voice agent (same prompt/tools/DB as a real call) via OpenAI Realtime WebRTC. Tool calls hit the QA Fly app's MCP server — writes land on the QA Neon branch, not production.</p>
+
+  <label for="shopId">Shop ID</label>
+  <input id="shopId" value="">
+
+  <label for="callerPhone">Caller phone (simulated)</label>
+  <input id="callerPhone" value="+390000000000">
+
+  <button id="startBtn">Start Call</button>
+  <button id="hangupBtn" disabled>Hang Up</button>
+
+  <p id="status">Idle</p>
+  <div id="log"></div>
+
+<script>
+let pc = null;
+
+function log(msg) {
+  const el = document.getElementById('log');
+  el.textContent += msg + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+}
+
+document.getElementById('startBtn').onclick = async () => {
+  setStatus('Requesting session...');
+  const shopId = document.getElementById('shopId').value.trim();
+  const callerPhone = document.getElementById('callerPhone').value.trim();
+
+  const sessionResp = await fetch('/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(shopId ? { shop_id: shopId, caller_phone: callerPhone }
+                                 : { caller_phone: callerPhone }),
+  });
+  if (!sessionResp.ok) {
+    const err = await sessionResp.json();
+    setStatus('Failed to create session');
+    log('ERROR: ' + JSON.stringify(err));
+    return;
+  }
+  const { client_secret, call_id } = await sessionResp.json();
+  log('Session created, call_id=' + call_id);
+  setStatus('Connecting...');
+
+  pc = new RTCPeerConnection();
+  const audioEl = document.createElement('audio');
+  audioEl.autoplay = true;
+  pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
+  document.body.appendChild(audioEl);
+
+  const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+  pc.addTrack(mic.getTracks()[0]);
+
+  const dc = pc.createDataChannel('oai-events');
+  dc.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data);
+      if (ev.type && ev.type.endsWith('transcript.delta') && ev.delta) {
+        log(ev.delta);
+      } else if (ev.type === 'response.function_call_arguments.done') {
+        log('[tool call: ' + ev.name + '(' + ev.arguments + ')]');
+      } else if (ev.type === 'error') {
+        log('ERROR: ' + JSON.stringify(ev.error || ev));
+      }
+    } catch (err) {
+      // non-JSON or unrecognized event, ignore
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  const sdpResp = await fetch('https://api.openai.com/v1/realtime/calls', {
+    method: 'POST',
+    body: offer.sdp,
+    headers: {
+      'Authorization': 'Bearer ' + client_secret,
+      'Content-Type': 'application/sdp',
+    },
+  });
+  const answerSdp = await sdpResp.text();
+  await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+
+  setStatus('Connected — talk into your mic');
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('hangupBtn').disabled = false;
+};
+
+document.getElementById('hangupBtn').onclick = () => {
+  if (pc) { pc.close(); pc = null; }
+  setStatus('Idle');
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('hangupBtn').disabled = true;
+};
+</script>
+</body>
+</html>
