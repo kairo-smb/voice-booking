@@ -49,6 +49,10 @@ def test_session_returns_client_secret_and_targets_qa_mcp(client):
     assert kwargs["mcp_server_url"] == "https://kairo-booking-engine-qa.fly.dev/mcp"
     assert kwargs["mcp_token"]
 
+    create_session_mock.assert_awaited_once()
+    _, create_kwargs = create_session_mock.call_args
+    assert create_kwargs["session_config"] == build_payload_mock.return_value
+
 
 def test_session_defaults_shop_id_from_env(client, monkeypatch):
     demo_shop_id = str(uuid4())
