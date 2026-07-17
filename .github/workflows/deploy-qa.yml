@@ -39,7 +39,7 @@ jobs:
       NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
       NEON_PROD_BRANCH: ${{ vars.NEON_PROD_BRANCH || 'production' }}
       QA_DATABASE_URL: ${{ secrets.QA_DATABASE_URL }}
-      CI_BRANCH: booking-qa-release-${{ github.run_id }}
+      CI_BRANCH: booking-qa-release-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
