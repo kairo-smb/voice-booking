@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS staff (
   shop_id       UUID            NOT NULL REFERENCES shops(id),
   full_name     TEXT            NOT NULL,
   role          TEXT,
+  job_title     TEXT,
   phone_number  TEXT,
   email         TEXT,
   bio           TEXT,
