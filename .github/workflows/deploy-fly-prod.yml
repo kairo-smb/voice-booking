@@ -16,8 +16,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
-    name: Unit + live_db tests
+  unit:
+    name: Unit tests (no DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio
+      - name: Run unit tests
+        run: pytest tests/voice_gateway/ tests/booking_engine/ -q
+
+  db-tests:
+    name: live_db against Neon-cloned schema
     runs-on: ubuntu-latest
     timeout-minutes: 12
     services:
@@ -41,11 +55,6 @@ jobs:
           python-version: '3.12'
           cache: pip
 
-      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio
-
-      - name: Run unit tests
-        run: pytest tests/voice_gateway/ tests/booking_engine/ -q
-
       - name: Install PostgreSQL 17 client
         run: |
           sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
@@ -66,12 +75,14 @@ jobs:
           PGOPTIONS="-c search_path=business_app_core,public" \
             psql -v ON_ERROR_STOP=1 "$LOCAL_DB" -f booking_engine/db/sql/02_seed_data.sql
 
+      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio
+
       - name: Run live_db tests
         run: pytest tests/live_db/ -q
 
   migrate-prod:
     name: Migrate production DB
-    needs: test
+    needs: [unit, db-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
