@@ -5,7 +5,10 @@ tool's return value.
 """
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, timedelta, timezone
+
+import pytest
 
 from booking_engine.db import connection
 from booking_engine.db.queries import create_appointment, create_customer
@@ -13,6 +16,11 @@ from booking_engine.db.voice_calls_queries import insert_call
 from booking_engine.services.call_token import mint_call_token
 from booking_engine.services.mcp_tools import execute_tool
 from tests.live_db.conftest import SHOP_ID, STAFF_MIRCO, SVC_TAGLIO_UOMO
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="requires DATABASE_URL for live-DB tests",
+)
 
 
 def _next_weekday(offset_days: int) -> date:

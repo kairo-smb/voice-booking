@@ -3,7 +3,10 @@ route handler → queries), against real Neon-shaped data.
 """
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, timedelta, timezone
+
+import pytest
 
 from booking_engine.db.queries import create_appointment, create_customer
 from booking_engine.db.voice_calls_queries import insert_call
@@ -13,10 +16,15 @@ from tests.live_db.conftest import (
     CUSTOMER_MARIA, PHONE_MARIA, SHOP_ID, STAFF_MIRCO, SVC_TAGLIO_UOMO,
 )
 
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="requires DATABASE_URL for live-DB tests",
+)
+
 
 def _next_weekday() -> date:
     """A date 45+ days out that's Mon-Sat — isolated from the other live_db
-    suites' own booking windows (they use +0..+33 days) so availability and
+    suites' own booking windows (they use +30..+33 days) so availability and
     booking assertions here never collide with theirs."""
     d = date.today() + timedelta(days=45)
     while d.weekday() == 6:
