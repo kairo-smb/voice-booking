@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import asyncpg
+
 from booking_engine.db import connection
 
 
@@ -174,6 +176,16 @@ async def insert_booking_locked(
         )
     except queries.SlotConflictError:
         raise RuntimeError("slot_taken")
+    except asyncpg.exceptions.ForeignKeyViolationError as e:
+        # appointments has two independently-violable FKs on user-supplied
+        # ids: customer_id (unvalidated before this call) and staff_id
+        # (also unvalidated — service_id is the only one pre-checked, via
+        # service_belongs_to_shop in the route). Distinguish via
+        # constraint_name so a bad staff_id isn't misreported as a bad
+        # customer_id.
+        if e.constraint_name == "appointments_staff_id_fkey":
+            raise RuntimeError("invalid_staff")
+        raise RuntimeError("invalid_customer")
     return {
         "id": row["id"],
         "slot_start": row["start_time"],
