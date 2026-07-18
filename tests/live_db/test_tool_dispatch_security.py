@@ -247,10 +247,7 @@ async def test_create_booking_nonexistent_customer_returns_clean_error(
     )
 
     # customer_id is well-formed but references no real row — this reaches
-    # create_appointment's raw INSERT (booking_engine/db/queries.py), which
-    # has no try/except around the customer_id FK constraint. What matters
-    # is that the dispatch chain degrades to *some* clean JSON dict instead
-    # of crashing execute_tool() itself or leaking a raw traceback body —
-    # OpenAI-generated tool arguments are untrusted input.
-    assert resp.get("ok") is not True
-    assert "Traceback" not in str(resp)
+    # create_appointment's raw INSERT (booking_engine/db/queries.py).
+    # insert_booking_locked catches the resulting FK violation and
+    # translates it to a clean envelope error (see voice_tool_queries.py).
+    assert resp == {"ok": False, "error": "invalid_customer"}
