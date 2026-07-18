@@ -8,6 +8,92 @@ stays as the record of what was true and decided at the time.
 
 ---
 
+## 2026-07-18 — CI/CD: ephemeral Neon branches, seed-data bug fix, Lambda removal
+
+**Decision:** Replace the local-Postgres-container + `pg_dump --schema-only`
+CI mechanism with real, throwaway Neon branches (copy-on-write children of
+`production`) across all three DB-touching workflows — `ci.yml` (PR checks),
+`deploy-qa.yml` (QA release), `deploy-fly-prod.yml` (prod release) — matching
+the pattern already in use by the `webapp` repo, which shares this same Neon
+project. QA and prod releases now validate migrations + `tests/live_db/`
+against a disposable branch *before* ever touching the real QA branch or
+production. Also deleted the superseded AWS Lambda deploy path and fixed the
+seed-script bug that had silently blocked every CI/QA/prod run since
+2026-07-16.
+
+**Why this was needed:** every CI, QA, and prod-release run had been failing
+since the Telnyx→Twilio merge, always at the same step:
+`ERROR: there is no unique or exclusion constraint matching the ON CONFLICT
+specification` on `booking_engine/db/sql/02_seed_data.sql:75`. Root-caused by
+querying the real Neon schema directly (not guessing): the local bootstrap
+schema (`01_schema.sql`) declares `UNIQUE (staff_id, day_of_week)` on
+`staff_schedules`, but the real `business_app_core.staff_schedules` table has
+only ever had a plain non-unique index on those columns — the two schemas
+had silently diverged, and CI's `db-tests` job was seeding fake fixture data
+into a `pg_dump`-cloned copy of the *real* schema, which the seed script was
+never written against. Per this file's own 2026-07-16 entry ("shared schemas
+are ground truth... revise the schema only if truly impossible"), the fix
+is on the query side, not the schema side: `ON CONFLICT (staff_id,
+day_of_week) DO NOTHING` → a `WHERE NOT EXISTS (...)` guard, which is
+constraint-independent and works identically against both schemas.
+
+**Why ephemeral branches, not just a bug patch:** the failure exposed a
+deeper gap — CI was testing against a bare schema clone with fake seed data,
+never the real, current shape of the shared `business_app_core` database
+that `webapp` and `marketing-engine` also write to. Fixing only the one
+broken query would have left that gap open for the next schema drift.
+Ephemeral, copy-on-write Neon branches (create → migrate → seed → test →
+delete, per run) give CI real prod-shaped data at effectively no cost
+(copy-on-write) and no risk (every write lands on a disposable branch,
+production is only ever read). This mirrors `webapp/ci.yml`'s existing
+PR-time pattern, extended here to also gate the push-triggered QA/prod
+release workflows, not just PRs.
+
+**Lambda removal:** `docs/DEPLOY_READINESS_BRIEF.md` had already recorded
+"Deploy to Fly.io (decided)" superseding an earlier AWS Lambda plan, but the
+Lambda deploy path (`deploy.yml`, `lambda_handler.py`, a Lambda-only
+`Dockerfile`, `deploy-booking.sh`, its test, the `mangum` dependency) was
+never actually deleted — found and removed as part of this work, since
+`deploy.yml` would otherwise have kept firing on every push to `main`
+alongside the real Fly deploy.
+
+**Issues caught by review before merge (subagent-driven development, spec +
+code-quality review per task):**
+- Ephemeral-branch delete failures were originally swallowed with `|| true`
+  — silently orphaning branches in the shared Neon project on any transient
+  API failure. Changed to emit a visible `::warning::` while still not
+  failing the job.
+- `deploy-qa.yml`'s ephemeral branch name initially omitted
+  `github.run_attempt` (unlike `ci.yml`'s), which would have collided with
+  itself on a re-run of a failed workflow. Fixed and backported to
+  `deploy-fly-prod.yml` before it shipped with the same gap.
+- The Lambda→Fly.io README/deploy-guide rewrite initially overclaimed "both
+  services deploy via GitHub Actions" (only Booking Engine does; Voice
+  Gateway is manual-only) and implied `CONTROL_PLANE_SECRET` was already
+  configured via GitHub Actions secrets when it's actually a Fly app secret
+  (`fly secrets set`, separate from CI) — left uncorrected, either could have
+  caused a real production 401 or a false assumption about deploy coverage.
+
+**Implementation notes:**
+- Spec: `docs/superpowers/specs/2026-07-17-neon-ephemeral-branch-cicd-design.md`.
+  Plan: `docs/superpowers/plans/2026-07-17-neon-ephemeral-branch-cicd.md`.
+- Built in worktree `.worktrees/neon-ephemeral-branch-cicd`, branch
+  `feat/neon-ephemeral-branch-cicd`, PR #4 into `QA`.
+- The seed-data fix and the ephemeral-branch CI itself were both verified
+  against the real, live Neon project (`kairo`, `falling-bread-89568725`)
+  before merge — the seed fix via a throwaway MCP-created branch, tested
+  twice for idempotency; the full `ci.yml` flow via two real PR CI runs
+  (both green), each provisioning and cleanly deleting a real ephemeral
+  branch.
+
+**Still needed:** merge PR #4 into `QA`; manually remove now-unused GitHub
+repo secrets — `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`CONTROL_PLANE_SECRET`, `DEMO_SHOP_ID` (Lambda-only) and
+`CI_SCHEMA_SOURCE_URL` (only used by the removed `pg_dump` mechanism) — same
+manual, out-of-band cleanup category as the old `TELNYX_*` secrets.
+
+---
+
 ## 2026-07-16 — Telephony provider: Telnyx → Twilio
 
 **Decision:** Provision Twilio **Estonia (EE) Mobile** numbers as the
