@@ -15,9 +15,11 @@ stays as the record of what was true and decided at the time.
 (`execute_tool()` → `/voice/tools/{name}` route → `safety_layer`
 authz/constraints → `queries.py`) against real Neon-shaped data, calling
 `execute_tool()` directly (the exact function OpenAI's MCP path calls) with
-no mocking. 22 new tests: 5 read-tool, 7 write-tool, 10 security (token
+no mocking. 24 new tests: 5 read-tool, 7 write-tool, 12 security (token
 integrity, cross-shop authz, phone-mismatch authz, lead-time/past-slot
-constraints, malformed input, unknown-tool-name rejection).
+constraints, unknown-tool-name rejection, malformed/missing-field input,
+and the two independently-violable FK scenarios — nonexistent `customer_id`
+and nonexistent `staff_id` — each asserted separately).
 
 **Why this gap existed:** `tests/voice_gateway/test_voice_tools_*.py` covers
 the route handlers but mocks every DB call; `tests/live_db/*.py` covers the
