@@ -205,7 +205,9 @@ jobs:
 
       - name: Delete ephemeral Neon branch
         if: always()
-        run: neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" || true
+        run: |
+          neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" \
+            || echo "::warning::Failed to delete ephemeral branch $CI_BRANCH — manual cleanup needed"
 ```
 
 - [ ] **Step 2: Validate YAML syntax**
@@ -276,7 +278,7 @@ jobs:
       NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
       NEON_PROD_BRANCH: ${{ vars.NEON_PROD_BRANCH || 'production' }}
       QA_DATABASE_URL: ${{ secrets.QA_DATABASE_URL }}
-      CI_BRANCH: booking-qa-release-${{ github.run_id }}
+      CI_BRANCH: booking-qa-release-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -351,7 +353,9 @@ jobs:
 
       - name: Delete ephemeral Neon branch
         if: always()
-        run: neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" || true
+        run: |
+          neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" \
+            || echo "::warning::Failed to delete ephemeral branch $CI_BRANCH — manual cleanup needed"
 
   promote-qa:
     name: Refresh and migrate real QA branch
@@ -507,7 +511,7 @@ jobs:
       NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
       NEON_PROD_BRANCH: ${{ vars.NEON_PROD_BRANCH || 'production' }}
       QA_DATABASE_URL: ${{ secrets.QA_DATABASE_URL }}
-      CI_BRANCH: booking-prod-release-${{ github.run_id }}
+      CI_BRANCH: booking-prod-release-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -582,7 +586,9 @@ jobs:
 
       - name: Delete ephemeral Neon branch
         if: always()
-        run: neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" || true
+        run: |
+          neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" \
+            || echo "::warning::Failed to delete ephemeral branch $CI_BRANCH — manual cleanup needed"
 
   migrate-prod:
     name: Migrate production DB
@@ -715,10 +721,23 @@ dependency."
 
 ---
 
-### Task 6: Update README.md
+### Task 6: Update README.md, DEPLOY_VOICE_AGENT.md, root requirements.txt
 
 **Files:**
 - Modify: `README.md`
+- Modify: `docs/DEPLOY_VOICE_AGENT.md`
+- Modify: `requirements.txt` (root-level, distinct from `booking_engine/requirements.txt`)
+
+Task 5's code review found two more live (non-historical) references to the
+deleted Lambda path that weren't in the original plan: `docs/DEPLOY_VOICE_AGENT.md`
+is an operational runbook (not a dated decision-history entry — it has its
+own "Rollback" and "Post-deploy smoke test" sections meant to be followed
+today) whose "Deploy the Booking Engine to AWS Lambda" section now
+instructs running a script that no longer exists; and the root-level
+`requirements.txt` (a separate file from `booking_engine/requirements.txt`,
+referenced by README's quickstart `pip install -r requirements.txt` step)
+still lists `mangum>=0.17` even though nothing installs from it anymore
+requires that adapter.
 
 - [ ] **Step 1: Fix the architecture diagram**
 
@@ -855,11 +874,92 @@ to:
 | **Total infrastructure** | **$0** | **$0** |
 ```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Remove `mangum` from the root `requirements.txt`**
+
+In `requirements.txt` (repo root — NOT `booking_engine/requirements.txt`,
+which Task 5 already fixed), delete the line:
+
+```
+mangum>=0.17
+```
+
+Leave every other line untouched (this file also lists testing deps like
+`pytest`, `respx` that `booking_engine/requirements.txt` doesn't carry —
+don't try to reconcile the two files, just drop the stale line).
+
+- [ ] **Step 7: Fix `docs/DEPLOY_VOICE_AGENT.md`**
+
+Change section `## 3. Deploy the Booking Engine to AWS Lambda` (and its
+contents, which reference the deleted `scripts/deploy-booking.sh`):
+
+```
+## 3. Deploy the Booking Engine to AWS Lambda
+
+The existing `scripts/deploy-booking.sh` builds and pushes the container image. The script reads two env vars and forwards them to Lambda as runtime env vars.
 
 ```bash
-git add README.md
-git commit -m "docs: update README for Fly.io Booking Engine deploy, remove Lambda"
+AWS_REGION=eu-central-1 \
+  DATABASE_URL='postgresql://neondb_owner:...@...neon.tech/neondb?sslmode=require&channel_binding=require' \
+  CONTROL_PLANE_SECRET='paste-your-32-byte-hex-here' \
+  ./scripts/deploy-booking.sh
+```
+
+The first run creates ECR repo + IAM role + Lambda function + Function URL. Subsequent runs only update the container image.
+
+> If `deploy-booking.sh` does not currently forward `CONTROL_PLANE_SECRET` to the Lambda environment, edit it before running — search for `Environment` / `aws lambda update-function-configuration` and add the variable to the `Variables` map. The variable name MUST be `CONTROL_PLANE_SECRET` (matches `booking_engine/config.py`).
+```
+
+to:
+
+```
+## 3. Deploy the Booking Engine to Fly.io
+
+Booking Engine deploys automatically via GitHub Actions on push to `main`
+(`.github/workflows/deploy-fly-prod.yml`) — it runs tests, validates
+migrations on a throwaway Neon branch, applies them to production, then
+`flyctl deploy --config fly.toml`. `CONTROL_PLANE_SECRET` and `DATABASE_URL`
+are already configured as GitHub repo secrets; nothing to pass manually.
+
+For a manual deploy:
+
+```bash
+fly auth login
+flyctl deploy --config fly.toml
+```
+```
+
+Then fix the two later references to the Lambda-style Function URL, since
+that concept doesn't apply to Fly.io:
+
+- In `## 4. Record the Function URL`, change the example URL block and the
+  sentence around it to describe the Fly app's URL instead
+  (`https://kairo-booking-engine.fly.dev`) rather than a Lambda Function
+  URL — do not invent a new placeholder pattern, just replace
+  `https://abcde12345.lambda-url.eu-central-1.on.aws/`-style examples with
+  `https://kairo-booking-engine.fly.dev` throughout the file (`## 4`,
+  `## 5`, `## 6`).
+- In `## Rollback`, change "Rolling back the Lambda is enough" and the
+  `aws lambda update-function-code` example to a Fly rollback instead:
+
+  ```
+  Rolling back the Fly app is enough:
+  ```bash
+  flyctl releases list --app kairo-booking-engine
+  flyctl deploy --image <previous-image-ref> --app kairo-booking-engine
+  ```
+  ```
+
+- Anywhere else in the file that says "on Lambda" (the "New env vars on
+  Lambda" headings under "Plan A" and "Plan B") — change to "on Fly.io".
+  Don't touch anything else in the file (endpoint tables, migration
+  commands, schema descriptions are all still accurate and unrelated to
+  the deploy target).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add README.md docs/DEPLOY_VOICE_AGENT.md requirements.txt
+git commit -m "docs: update README + deploy guide for Fly.io Booking Engine, remove Lambda"
 ```
 
 ---
@@ -878,7 +978,7 @@ Expected: `OK: <path>` printed three times, no errors.
 
 - [ ] **Step 2: Confirm the Lambda workflow is gone and no stray references remain**
 
-Run: `ls .github/workflows/ && grep -rln "AWS Lambda\|lambda_handler\|deploy-booking" README.md .github/workflows/ 2>/dev/null`
+Run: `ls .github/workflows/ && grep -rln "AWS Lambda\|lambda_handler\|deploy-booking\|mangum" README.md docs/DEPLOY_VOICE_AGENT.md requirements.txt .github/workflows/ 2>/dev/null`
 Expected: `ls` shows exactly `ci.yml deploy-fly-prod.yml deploy-qa.yml`; the `grep` prints no output.
 
 - [ ] **Step 3: Run the full local unit suite one more time**

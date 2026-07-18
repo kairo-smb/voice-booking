@@ -72,7 +72,10 @@ INSERT INTO staff_schedules (id, staff_id, day_of_week, start_time, end_time)
 SELECT gen_random_uuid(), s.id, d.day, '10:00', '18:00'
 FROM staff s
 CROSS JOIN (VALUES (0),(1),(2),(3),(4),(5)) AS d(day)
-ON CONFLICT (staff_id, day_of_week) DO NOTHING;
+WHERE NOT EXISTS (
+  SELECT 1 FROM staff_schedules ss
+  WHERE ss.staff_id = s.id AND ss.day_of_week = d.day
+);
 
 -- Sample Customers
 INSERT INTO customers (id, shop_id, full_name, preferred_staff_id)

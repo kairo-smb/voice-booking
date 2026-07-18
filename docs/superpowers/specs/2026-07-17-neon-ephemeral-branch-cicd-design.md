@@ -68,6 +68,23 @@ passes does a workflow touch the real target (QA branch or production).
 This is the same pattern `webapp/ci.yml` already uses for PRs; this design
 extends it to voice-booking's PR, QA-release, and prod-release flows alike.
 
+**Known limitation:** the ephemeral branch is a point-in-time
+copy-on-write snapshot taken when it's created — it does not track
+production afterward. Between that snapshot and `migrate-prod` actually
+running against real production (after `unit` + `validate-on-tmp-branch`
+both complete, up to ~12 minutes later), live application traffic keeps
+writing to production. If a migration's success were data-dependent (e.g.
+a `NOT NULL` backfill or a new uniqueness constraint), it's possible —
+though narrow — for validation to pass against the snapshot while the real
+`migrate-prod` run hits a conflict from writes made after the snapshot.
+This is inherent to snapshot-based pre-flight validation, not something
+the `concurrency` group closes (that only serializes workflow runs against
+each other, not against live application writes). Ephemeral-branch
+validation substantially derisks migrations — it replaced a schema-only,
+fake-data local clone with a true copy-on-write clone of prod's real
+schema *and* data — but it is not a complete guarantee against migration
+failure on real production.
+
 ### `ci.yml` (PR into `main`/`QA`)
 
 - `unit` job: unchanged — no DB, runs first, fails fast.
@@ -99,7 +116,7 @@ New job order:
 1. `unit` — unchanged.
 2. `validate-on-tmp-branch` — same create/migrate/test/delete sequence as
    `ci.yml`'s `db-tests` job (branch name
-   `booking-qa-release-${{ github.run_id }}`).
+   `booking-qa-release-${{ github.run_id }}-${{ github.run_attempt }}`).
 3. `promote-qa` (only if validation passed) — today's `refresh-qa-db` +
    `migrate-qa` logic, unchanged: `neonctl branches restore` the real `QA`
    branch from `production`, then apply migrations for real.
@@ -138,6 +155,10 @@ secrets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 `CONTROL_PLANE_SECRET`, `DEMO_SHOP_ID`) become unused once `deploy.yml` is
 gone — deleting repo secrets is a manual, out-of-band action like the
 `TWILIO_*` secret additions were, not something done from this repo.
+Likewise `CI_SCHEMA_SOURCE_URL` (the old `pg_dump --schema-only` source for
+the now-removed local-container mechanism) is no longer referenced
+anywhere in the workflows this change introduces — also unused, also
+flagged for the same manual cleanup rather than actioned here.
 
 ## What doesn't change
 
