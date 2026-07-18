@@ -8,6 +8,90 @@ stays as the record of what was true and decided at the time.
 
 ---
 
+## 2026-07-17 — Live tool-dispatch + security test coverage
+
+**Decision:** Add `tests/live_db/test_tool_dispatch_{reads,writes,security}.py`
+— the first tests to exercise the *entire* real dispatch chain
+(`execute_tool()` → `/voice/tools/{name}` route → `safety_layer`
+authz/constraints → `queries.py`) against real Neon-shaped data, calling
+`execute_tool()` directly (the exact function OpenAI's MCP path calls) with
+no mocking. 22 new tests: 5 read-tool, 7 write-tool, 10 security (token
+integrity, cross-shop authz, phone-mismatch authz, lead-time/past-slot
+constraints, malformed input, unknown-tool-name rejection).
+
+**Why this gap existed:** `tests/voice_gateway/test_voice_tools_*.py` covers
+the route handlers but mocks every DB call; `tests/live_db/*.py` covers the
+query layer but calls it directly, below the authz layer. Nothing exercised
+`safety_layer`'s authz/constraint logic against a real row or the real
+schema — a regression there (e.g. `modify_booking` silently dropping its
+phone check) would have passed every existing test. Verified this class of
+regression actually gets caught: manually removed the phone-mismatch check
+in `booking_authz.py` and confirmed (via a monkeypatch-driven simulation of
+the full dispatch path, since the QA branch currently lacks seed data —
+see below) that execution then proceeds past the point it should have been
+rejected, then restored the check.
+
+**A real production bug was found and fixed along the way, not just a test
+gap:** while strengthening a security test for malformed input, discovered
+that `create_booking` with a syntactically valid but nonexistent
+`customer_id` crashed `execute_tool()` itself with an unhandled
+`asyncpg.exceptions.ForeignKeyViolationError`, instead of returning a clean
+error — because `insert_booking_locked`
+(`booking_engine/db/voice_tool_queries.py`) only caught `SlotConflictError`,
+never a customer/staff FK violation from the underlying raw INSERT in
+`booking_engine/db/queries.py::create_appointment`. Fixed by catching
+`asyncpg.exceptions.ForeignKeyViolationError` alongside the existing
+`SlotConflictError` catch, distinguishing `invalid_staff` vs
+`invalid_customer` via the exception's `constraint_name` (since both
+columns are independently-violable FKs and only `service_id` was already
+pre-validated before this call). A stale or hallucinated `customer_id`
+reaching this path in production — plausible, since OpenAI supplies tool
+arguments — would have crashed a live call's tool invocation before this
+fix. Checked the sibling `webapp` repo's own booking-creation code
+(`src/lib/db/repositories/appointments.repo.ts`) for the same bug class:
+it does NOT share this crash risk — its callers wrap the insert in a
+generic catch-all that degrades to a clean 500 (less precise error
+messaging, but no crash), and its agent-facing path additionally
+pre-validates `customer_id`/`staff_id`/`service_id` against the shop before
+ever attempting the insert.
+
+**Two things discovered while writing these tests, worth knowing:**
+- `modify_booking`/`cancel_booking` authorize off the **call row's stored
+  `shop_id`** (read back via `get_call()`), not the `X-Shop-Id` header the
+  MCP dispatch layer sends — cross-shop tests have to insert the call
+  itself under the wrong shop, a header alone doesn't reach this check.
+- `update_customer_from_call` (`booking_engine/api/routes/voice_tools_identity.py`)
+  has **no shop-ownership check at all** — any valid call token can update
+  any customer row's `email`/`tags` regardless of which shop the call
+  belongs to. Not fixed here (out of scope for a test-coverage plan —
+  changing production authz logic is a different, riskier kind of change
+  than the narrow FK-crash fix above, which was pure error-handling, not a
+  policy decision); flagged as a fast-follow.
+
+**Also flagged, not actioned:** `voice_gateway/` (the old 5-tool, no-authz
+agent implementation) is dead code — neither `fly.toml` nor `fly.qa.toml`
+build it, only `booking_engine/Dockerfile.fly`. It's still imported by ~6
+test files (`tests/voice_gateway/test_call_lifecycle.py`,
+`test_db.py`, `test_booking_client.py`, `test_openai_classifier.py`,
+`test_realtime_lifecycle.py`, `tests/live_db/test_voice_gateway_persistence.py`),
+and the CI workflow files that reference it are the ones another concurrent
+effort (the ephemeral-branch-CI spec) is already modifying — deleting it is
+a separate follow-up, not part of this work.
+
+**Still needed before this closes the loop end-to-end:** the ephemeral-branch
+CI pipeline (separate, in-flight effort — as of this writing, memory records
+it's fixed and PR #4 is open into QA, not yet merged) needs to run these
+tests in CI. As of this writing the QA Neon branch itself still lacks the
+`02_seed_data.sql` fixture rows these tests (and the pre-existing
+`tests/live_db/*.py` suite) depend on — every new test currently fails with
+`ForeignKeyViolationError` on `shop_id` when run against the QA branch
+directly, confirmed not a code defect (verified the failure mode is
+exclusively that one exception class). Run locally against the QA branch
+via `TEST_DATABASE_URL` once seeded, or wait for the concurrent effort's PR
+to merge.
+- Spec: `docs/superpowers/specs/2026-07-17-live-tool-dispatch-security-tests-design.md`.
+  Plan: `docs/superpowers/plans/2026-07-17-live-tool-dispatch-security-tests.md`.
+
 ## 2026-07-16 — Telephony provider: Telnyx → Twilio
 
 **Decision:** Provision Twilio **Estonia (EE) Mobile** numbers as the
