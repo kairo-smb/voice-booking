@@ -263,3 +263,48 @@ async def test_create_booking_nonexistent_customer_returns_clean_error(
     # translates it to a clean envelope error (see voice_tool_queries.py).
     assert resp["ok"] is False
     assert resp["error"] == "invalid_customer"
+
+
+async def test_create_booking_nonexistent_staff_returns_clean_error(
+    db_connection, tool_app, settings, cleanup_call_ids, cleanup_customer_ids,
+):
+    customer = await create_customer(SHOP_ID, "Dispatch NonexistentStaff")
+    cleanup_customer_ids.append(customer["id"])
+    call_id = await insert_call(shop_id=SHOP_ID, caller_phone=None, matched_customer_id=None)
+    cleanup_call_ids.append(call_id)
+    token = _token(SHOP_ID, call_id, settings)
+    nonexistent_staff_id = uuid4()
+
+    resp = await execute_tool(
+        "create_booking",
+        {"customer_id": str(customer["id"]), "service_id": str(SVC_TAGLIO_UOMO),
+         "slot_start": _slot(66).isoformat(), "staff_id": str(nonexistent_staff_id)},
+        token=token, secret=settings.openai_tool_secret, app=tool_app,
+    )
+
+    assert resp["ok"] is False
+    assert resp["error"] == "invalid_staff"
+
+
+async def test_create_booking_missing_required_field_returns_clean_error(
+    db_connection, tool_app, settings, cleanup_call_ids,
+):
+    call_id = await insert_call(shop_id=SHOP_ID, caller_phone=None, matched_customer_id=None)
+    cleanup_call_ids.append(call_id)
+    token = _token(SHOP_ID, call_id, settings)
+
+    resp = await execute_tool(
+        "create_booking",
+        {"customer_id": "not-a-real-uuid", "service_id": str(SVC_TAGLIO_UOMO)},
+        token=token, secret=settings.openai_tool_secret, app=tool_app,
+    )
+
+    # Missing slot_start/staff_id and a malformed customer_id trigger FastAPI's
+    # own pydantic validation (422) before any booking_engine code runs at
+    # all — a different failure mode than test_create_booking_nonexistent_*,
+    # which sends fully well-typed requests that fail deeper in the stack.
+    # execute_tool() passes the 422 body through unchanged (r.json() succeeds
+    # for a 422), so it won't match the ok/error envelope shape — what matters
+    # is it degrades to *some* clean JSON dict, not a crash or raw traceback.
+    assert resp.get("ok") is not True
+    assert "Traceback" not in str(resp)
