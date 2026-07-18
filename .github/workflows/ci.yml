@@ -92,6 +92,7 @@ jobs:
 
       - name: Apply migrations to the ephemeral branch
         run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
           chmod +x scripts/migrate.sh
           ./scripts/migrate.sh
         env:

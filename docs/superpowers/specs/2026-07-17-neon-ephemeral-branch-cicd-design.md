@@ -116,7 +116,7 @@ New job order:
 1. `unit` — unchanged.
 2. `validate-on-tmp-branch` — same create/migrate/test/delete sequence as
    `ci.yml`'s `db-tests` job (branch name
-   `booking-qa-release-${{ github.run_id }}`).
+   `booking-qa-release-${{ github.run_id }}-${{ github.run_attempt }}`).
 3. `promote-qa` (only if validation passed) — today's `refresh-qa-db` +
    `migrate-qa` logic, unchanged: `neonctl branches restore` the real `QA`
    branch from `production`, then apply migrations for real.
@@ -155,6 +155,10 @@ secrets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 `CONTROL_PLANE_SECRET`, `DEMO_SHOP_ID`) become unused once `deploy.yml` is
 gone — deleting repo secrets is a manual, out-of-band action like the
 `TWILIO_*` secret additions were, not something done from this repo.
+Likewise `CI_SCHEMA_SOURCE_URL` (the old `pg_dump --schema-only` source for
+the now-removed local-container mechanism) is no longer referenced
+anywhere in the workflows this change introduces — also unused, also
+flagged for the same manual cleanup rather than actioned here.
 
 ## What doesn't change
 
