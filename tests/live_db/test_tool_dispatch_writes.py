@@ -16,10 +16,14 @@ from tests.live_db.conftest import SHOP_ID, STAFF_MIRCO, SVC_TAGLIO_UOMO
 
 
 def _next_weekday(offset_days: int) -> date:
-    """A Mon-Sat date `offset_days` out. Callers below space their offsets
-    (50/51/52) apart so their created appointments never collide with each
-    other, with test_tool_dispatch_reads.py's +45 day window, or with the
-    other live_db suites' own +0..+33 day windows."""
+    """A Mon-Sat date `offset_days` out. Callers below use offsets spaced at
+    least 2 raw days apart (50/52/54) — the Sunday-skip adjustment below only
+    ever shifts a date forward by at most 1 day, so a 2-day raw gap between
+    offsets is always collision-free regardless of what day "today" is (a
+    1-day gap is NOT safe: if one offset lands on Sunday and bumps forward,
+    it can land on the exact same date as a neighboring offset one day later).
+    This also keeps clear of test_tool_dispatch_reads.py's +45 day window and
+    the other live_db suites' own +0..+33 day windows."""
     d = date.today() + timedelta(days=offset_days)
     while d.weekday() == 6:
         d += timedelta(days=1)
@@ -128,7 +132,7 @@ async def test_modify_booking_authorized_changes_slot(
     phone = "+39 333 9990002"
     customer = await create_customer(SHOP_ID, "Dispatch ModifyTest", phone)
     cleanup_customer_ids.append(customer["id"])
-    start = _slot(51)
+    start = _slot(52)
     appt = await create_appointment(SHOP_ID, customer["id"], STAFF_MIRCO,
                                     [SVC_TAGLIO_UOMO], start)
     cleanup_appointment_ids.append(appt["id"])
@@ -158,7 +162,7 @@ async def test_cancel_booking_authorized_cancels(
     phone = "+39 333 9990003"
     customer = await create_customer(SHOP_ID, "Dispatch CancelTest", phone)
     cleanup_customer_ids.append(customer["id"])
-    start = _slot(52)
+    start = _slot(54)
     appt = await create_appointment(SHOP_ID, customer["id"], STAFF_MIRCO,
                                     [SVC_TAGLIO_UOMO], start)
     cleanup_appointment_ids.append(appt["id"])

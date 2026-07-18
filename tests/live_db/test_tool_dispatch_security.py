@@ -24,8 +24,13 @@ def _next_weekday(offset_days: int) -> date:
 
 def _slot(offset_days: int, hour: int = 11) -> datetime:
     """A Mon-Sat slot far enough out to be outside any cancellation lead time.
-    Offsets 60/61/62/63 are spaced apart from each other and from the other
-    live_db suites' +0..+52 day windows."""
+    Callers below use offsets spaced at least 2 raw days apart (60/62/64/66)
+    — the Sunday-skip adjustment above only ever shifts a date forward by at
+    most 1 day, so a 2-day raw gap between offsets is always collision-free
+    regardless of what day "today" is (a 1-day gap is NOT safe: if one offset
+    lands on Sunday and bumps forward, it can land on the exact same date as
+    a neighboring offset one day later). This also keeps clear of the other
+    live_db suites' +30..+54 day windows."""
     return datetime.combine(_next_weekday(offset_days), datetime.min.time().replace(hour=hour),
                             tzinfo=timezone.utc)
 
@@ -112,7 +117,7 @@ async def test_cancel_booking_rejects_call_from_different_shop(
     phone = "+39 333 9990011"
     customer = await create_customer(SHOP_ID, "Dispatch CrossShopCancel", phone)
     cleanup_customer_ids.append(customer["id"])
-    start = _slot(61)
+    start = _slot(62)
     appt = await create_appointment(SHOP_ID, customer["id"], STAFF_MIRCO,
                                     [SVC_TAGLIO_UOMO], start)
     cleanup_appointment_ids.append(appt["id"])
@@ -142,7 +147,7 @@ async def test_modify_booking_rejects_phone_mismatch(
     caller_phone = "+39 333 9990013"  # a different number calling in
     customer = await create_customer(SHOP_ID, "Dispatch PhoneMismatch", owner_phone)
     cleanup_customer_ids.append(customer["id"])
-    start = _slot(62)
+    start = _slot(64)
     appt = await create_appointment(SHOP_ID, customer["id"], STAFF_MIRCO,
                                     [SVC_TAGLIO_UOMO], start)
     cleanup_appointment_ids.append(appt["id"])
@@ -248,7 +253,7 @@ async def test_create_booking_nonexistent_customer_returns_clean_error(
     resp = await execute_tool(
         "create_booking",
         {"customer_id": str(nonexistent_customer_id), "service_id": str(SVC_TAGLIO_UOMO),
-         "slot_start": _slot(63).isoformat(), "staff_id": str(STAFF_MIRCO)},
+         "slot_start": _slot(66).isoformat(), "staff_id": str(STAFF_MIRCO)},
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
