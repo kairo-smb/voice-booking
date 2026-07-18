@@ -97,7 +97,8 @@ async def test_modify_booking_rejects_call_from_different_shop(
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
-    assert resp == {"ok": False, "error": "wrong_shop"}
+    assert resp["ok"] is False
+    assert resp["error"] == "wrong_shop"
     row = await connection.execute_one(
         "SELECT start_time FROM business_app_core.appointments WHERE id = $1", appt["id"],
     )
@@ -125,7 +126,8 @@ async def test_cancel_booking_rejects_call_from_different_shop(
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
-    assert resp == {"ok": False, "error": "wrong_shop"}
+    assert resp["ok"] is False
+    assert resp["error"] == "wrong_shop"
     row = await connection.execute_one(
         "SELECT status FROM business_app_core.appointments WHERE id = $1", appt["id"],
     )
@@ -156,7 +158,8 @@ async def test_modify_booking_rejects_phone_mismatch(
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
-    assert resp == {"ok": False, "error": "phone_mismatch"}
+    assert resp["ok"] is False
+    assert resp["error"] == "phone_mismatch"
 
 
 async def test_modify_booking_rejects_within_lead_time(
@@ -183,7 +186,8 @@ async def test_modify_booking_rejects_within_lead_time(
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
-    assert resp == {"ok": False, "error": "reschedule_too_close"}
+    assert resp["ok"] is False
+    assert resp["error"] == "reschedule_too_close"
 
 
 async def test_cancel_booking_rejects_within_lead_time(
@@ -207,7 +211,8 @@ async def test_cancel_booking_rejects_within_lead_time(
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
-    assert resp == {"ok": False, "error": "cancel_too_close"}
+    assert resp["ok"] is False
+    assert resp["error"] == "cancel_too_close"
 
 
 async def test_create_booking_rejects_slot_in_past(
@@ -228,7 +233,8 @@ async def test_create_booking_rejects_slot_in_past(
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
-    assert resp == {"ok": False, "error": "slot_in_past"}
+    assert resp["ok"] is False
+    assert resp["error"] == "slot_in_past"
 
 
 async def test_create_booking_nonexistent_customer_returns_clean_error(
@@ -250,4 +256,5 @@ async def test_create_booking_nonexistent_customer_returns_clean_error(
     # create_appointment's raw INSERT (booking_engine/db/queries.py).
     # insert_booking_locked catches the resulting FK violation and
     # translates it to a clean envelope error (see voice_tool_queries.py).
-    assert resp == {"ok": False, "error": "invalid_customer"}
+    assert resp["ok"] is False
+    assert resp["error"] == "invalid_customer"
