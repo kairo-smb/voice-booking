@@ -116,11 +116,14 @@ document.getElementById('startBtn').onclick = async () => {
       return;  // non-JSON, ignore
     }
 
-    if (ev.type === 'response.audio_transcript.delta' && ev.delta) {
+    if ((ev.type === 'response.audio_transcript.delta' ||
+         ev.type === 'response.output_audio_transcript.delta') && ev.delta) {
       appendAgentDelta(ev.delta);
-    } else if (ev.type === 'response.audio_transcript.done') {
+    } else if (ev.type === 'response.audio_transcript.done' ||
+               ev.type === 'response.output_audio_transcript.done') {
       agentLineEl = null;  // next delta starts a fresh line
-    } else if (ev.type === 'response.mcp_call_arguments.done') {
+    } else if (ev.type === 'response.mcp_call.in_progress' ||
+               ev.type === 'response.mcp_call_arguments.done') {
       // Model has decided to call an MCP tool and finished streaming arguments —
       // the call itself is now in flight on OpenAI's side.
       setMcpIndicator('in-progress', 'calling ' + (ev.name || 'tool') + '...');
