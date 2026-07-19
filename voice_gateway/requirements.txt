@@ -1,5 +1,0 @@
-pydantic-settings
-httpx
-fastapi
-uvicorn
-asyncpg==0.30.0
