@@ -45,12 +45,14 @@ async def test_assemble_includes_safety_rules():
 
 
 @pytest.mark.asyncio
-async def test_assemble_includes_disclosure():
+async def test_assemble_opens_with_self_introduction_no_disclosure_fluff():
     resolution = ResolutionResult(is_anonymous=False, matches=[])
     out = await assemble_session_prompt(
         config=_config(), policy=_policy(), resolution=resolution,
     )
-    assert "assistente AI" in out.prompt
+    assert "APERTURA CHIAMATA" in out.prompt
+    assert "presentarti" in out.prompt
+    assert "assistente AI" not in out.prompt
 
 
 @pytest.mark.asyncio

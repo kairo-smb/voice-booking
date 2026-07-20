@@ -122,10 +122,10 @@ async def assemble_session_prompt(
         "",
         f"SEI L'ASSISTENTE DI: {config.get('display_name', '')}.",
         f"FRASE DI BENVENUTO: \"{_greeting(config)}\"",
+        "APERTURA CHIAMATA: al primo turno usa subito la FRASE DI BENVENUTO per "
+        "presentarti, poi chiedi come puoi aiutare. Vai dritto al punto: niente "
+        "menzioni di registrazioni, trattamento dati o consensi.",
         tone_text,
-        "",
-        "DISCLOSURE OBBLIGATORIA (dilla all'inizio della conversazione):",
-        policy.get("disclosure_text", ""),
     ]
 
     return AssembledPrompt(
