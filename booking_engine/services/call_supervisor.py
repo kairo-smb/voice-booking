@@ -99,7 +99,14 @@ async def supervise(call_id: str, api_key: str, *, connect=_default_connect) -> 
     logger.warning(json.dumps({"call_id": call_id, "event": "supervisor.gave_up"}))
 
 
+# asyncio keeps only a weak reference to tasks, so an un-retained supervisor
+# could be garbage-collected mid-call. Hold a strong ref until it finishes.
+_running_tasks: set[asyncio.Task] = set()
+
+
 def maybe_supervise(call_id: str, settings) -> None:
     """Spawn the supervisor task when enabled and we have a call id. No-op otherwise."""
     if call_id and getattr(settings, "enable_call_supervisor", False):
-        asyncio.create_task(supervise(call_id, settings.openai_api_key))
+        task = asyncio.create_task(supervise(call_id, settings.openai_api_key))
+        _running_tasks.add(task)
+        task.add_done_callback(_running_tasks.discard)

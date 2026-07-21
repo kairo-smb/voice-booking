@@ -158,10 +158,14 @@ def test_maybe_supervise_spawns_when_enabled(monkeypatch):
     async def _fake_supervise(call_id, api_key, **kw):
         return None
 
+    class _FakeTask:
+        def add_done_callback(self, cb):
+            pass
+
     def _fake_create_task(coro):
         spawned.append(coro)
         coro.close()  # avoid "coroutine never awaited" warning
-        return None
+        return _FakeTask()
 
     monkeypatch.setattr(cs, "supervise", _fake_supervise)
     monkeypatch.setattr(cs.asyncio, "create_task", _fake_create_task)
@@ -181,3 +185,80 @@ def test_maybe_supervise_skips_without_call_id(monkeypatch):
     monkeypatch.setattr(cs.asyncio, "create_task", lambda coro: spawned.append(coro))
     cs.maybe_supervise("", _Settings(enabled=True))
     assert spawned == []
+
+
+class _DropWS:
+    """Fake WS that greets fine, then raises during iteration (simulated drop)."""
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, message):
+        self.sent.append(json.loads(message))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def __aiter__(self):
+        raise RuntimeError("dropped")
+        yield  # pragma: no cover - makes this an async generator
+
+
+class _RawWS:
+    """Fake WS that yields raw (possibly non-JSON) frames as-is."""
+    def __init__(self, raws):
+        self._raws = raws
+        self.sent = []
+
+    async def send(self, message):
+        self.sent.append(json.loads(message))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def __aiter__(self):
+        for raw in self._raws:
+            yield raw
+
+
+async def test_supervise_reconnects_once_and_does_not_regreet():
+    drop_ws = _DropWS()
+    good_ws = _FakeWS([
+        {"type": "response.done"},
+        {"type": "response.output_item.done",
+         "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}},
+    ])
+    seq = iter([drop_ws, good_ws])
+
+    def _connect(call_id, api_key):
+        return next(seq)
+
+    await supervise("call_A", "key", connect=_connect)
+    # Attempt 1 greeted then dropped; attempt 2 must NOT re-greet, only nudge.
+    assert drop_ws.sent == [{"type": "response.create"}]   # greeting on attempt 1
+    assert good_ws.sent == [{"type": "response.create"}]   # nudge only, no re-greet
+
+
+async def test_supervise_gives_up_after_two_connect_failures():
+    def _connect(call_id, api_key):
+        raise ConnectionError("nope")
+
+    # Must complete without raising (best-effort worker never crashes the call).
+    await supervise("call_A", "key", connect=_connect)
+
+
+async def test_supervise_skips_non_json_frame():
+    ws = _RawWS([
+        "not json at all",
+        json.dumps({"type": "response.done"}),
+        json.dumps({"type": "response.output_item.done",
+                    "item": {"type": "mcp_call", "id": "mcp_1", "name": "x", "output": "{}"}}),
+    ])
+    await supervise("call_A", "key", connect=_connect_returning(ws))
+    # Greeting + one nudge; the bad frame was skipped without crashing.
+    assert ws.sent.count({"type": "response.create"}) == 2
