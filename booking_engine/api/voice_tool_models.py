@@ -53,7 +53,7 @@ class ServiceOut(BaseModel):
     service_id: UUID
     name: str
     duration_min: int
-    price_cents: int
+    price_cents: int | None = None
 
 
 class StaffOut(BaseModel):
@@ -117,6 +117,7 @@ class EscalateIn(BaseModel):
 # Catalog (request models)
 class GetServicesIn(BaseModel):
     filter: str | None = None
+    include_price: bool = False
 
 
 class GetStaffForServiceIn(BaseModel):
