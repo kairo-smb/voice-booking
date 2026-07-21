@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from booking_engine.db.connection import execute, execute_one, execute_void
-from booking_engine.services.booking_constraints import gap_within_limit
+from booking_engine.services.booking_constraints import MAX_GAP_MINUTES, gap_within_limit
 
 _ROME = ZoneInfo("Europe/Rome")
 
@@ -314,24 +314,24 @@ async def _try_extend_chain(
     day = prev_end.date()
     for staff in remaining_eligible[0]:
         for w_start, w_end in await _staff_day_windows(staff["staff_id"], day):
-            leg_start = max(prev_end, w_start)
-            if not gap_within_limit(prev_end, leg_start):
-                continue
-            leg_end = leg_start + timedelta(minutes=duration)
-            if leg_end > w_end:
-                continue
-            if _overlaps_existing(leg_start, leg_end, staff["staff_id"], existing):
-                continue
-            candidate = legs + [{
-                "service_id": service["service_id"], "staff_id": staff["staff_id"],
-                "staff_name": staff["staff_name"], "slot_start": leg_start, "slot_end": leg_end,
-            }]
-            result = await _try_extend_chain(
-                candidate, remaining_services[1:], remaining_eligible[1:],
-                duration_by_id, existing,
-            )
-            if result is not None:
-                return result
+            earliest = max(prev_end, w_start)
+            latest = prev_end + timedelta(minutes=MAX_GAP_MINUTES)
+            leg_start = earliest
+            while leg_start <= latest:
+                if gap_within_limit(prev_end, leg_start):
+                    leg_end = leg_start + timedelta(minutes=duration)
+                    if leg_end <= w_end and not _overlaps_existing(leg_start, leg_end, staff["staff_id"], existing):
+                        candidate = legs + [{
+                            "service_id": service["service_id"], "staff_id": staff["staff_id"],
+                            "staff_name": staff["staff_name"], "slot_start": leg_start, "slot_end": leg_end,
+                        }]
+                        result = await _try_extend_chain(
+                            candidate, remaining_services[1:], remaining_eligible[1:],
+                            duration_by_id, existing,
+                        )
+                        if result is not None:
+                            return result
+                leg_start += timedelta(minutes=5)
     return None
 
 
@@ -358,7 +358,7 @@ async def get_available_slot_chains(
         svc_ids,
     )
     duration_by_id = {r["id"]: r["duration_minutes"] for r in svc_rows}
-    if len(duration_by_id) != len(svc_ids):
+    if len(duration_by_id) != len(set(svc_ids)):
         return []
 
     eligible_by_leg: list[list[dict]] = []
@@ -398,6 +398,7 @@ async def get_available_slot_chains(
             })
             if len(chains) >= max_results:
                 break
+    chains.sort(key=lambda c: c["slot_start"])
     return chains
 
 
