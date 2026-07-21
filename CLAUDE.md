@@ -82,6 +82,38 @@ a given order is correct.
   behavior; only multi-leg bookings still pay for the re-fetch (necessary,
   since `create_appointment_chain` only returns the parent `appointments`
   row, not a per-leg breakdown).
+- Found by a final whole-branch review (not per-task review — only visible
+  once the pieces were viewed together): `get_available_slot_chains`'s
+  search broke out the instant it collected `max_results` chains, but
+  candidate generation is staff-major within a day (exhausts one staff's
+  whole day before trying the next, no `ORDER BY` on eligible staff), so a
+  later slot from the first-iterated staff member could be returned instead
+  of a genuinely earlier slot from a staff member iterated later — the
+  earlier "add a final sort" fix above only reordered whatever had already
+  been collected, it couldn't fix a search that stopped too early. Reproduced
+  concretely (two eligible staff, first busy until 14:00, second free from
+  09:00 — search returned the 14:00 slot). Fixed so the search only stops at
+  a day boundary, never mid-day (since candidates within one day aren't
+  time-ordered across staff, but candidates across different days always
+  are) — this fully closes the "sorted by proximity" promise the earlier fix
+  only partially delivered on. Regression test added with 2+ eligible staff
+  for the first leg specifically, since none of the existing tests exercised
+  that case.
+
+**Flagged, not actioned:** `create_appointment_chain` validates each leg's
+staff against *existing* DB rows but never validates the legs in one request
+*against each other* — nothing stops a `create_booking` call (if the model
+sent a fabricated `legs` array instead of copying a real `check_availability`
+result verbatim) from assigning the same staff member to two overlapping
+legs in the same request, which would write two conflicting
+`appointment_services` rows. The single-leg path has an equivalent
+"trust what's given, no re-validation beyond one overlap check" limitation
+today; this just extends the same accepted risk shape to N legs. Not fixed
+here — same reasoning as `update_customer_from_call`'s missing shop check in
+the 2026-07-17 entry below (a policy/validation decision, not a narrow
+error-handling fix); worth a fast-follow (pairwise leg overlap + ordering +
+`gap_within_limit` check before the insert loop) given this codebase already
+treats voice-agent tool arguments as untrusted input elsewhere.
 
 **Still needed:** `tests/live_db/*` (the tests that exercise the real
 dispatch chain against a real Neon-shaped DB, no mocking) were updated for
