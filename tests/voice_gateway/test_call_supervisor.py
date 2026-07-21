@@ -49,3 +49,34 @@ def test_decide_ignores_mcp_call_completed_event():
     # Only output_item.done triggers; mcp_call.completed is log-only.
     state = SupervisorState(response_active=False)
     assert decide({"type": "response.mcp_call.completed"}, state) == []
+
+
+from booking_engine.services.call_supervisor import log_record
+
+
+def test_log_record_marks_tool_start():
+    state = SupervisorState()
+    ev = {"type": "response.output_item.added",
+          "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services"}}
+    rec = log_record("call_A", ev, state)
+    assert rec["call_id"] == "call_A"
+    assert rec["event"] == "response.output_item.added"
+    assert "mcp_1" in state.tool_started_at
+
+
+def test_log_record_computes_latency_on_done():
+    state = SupervisorState()
+    added = {"type": "response.output_item.added",
+             "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services"}}
+    done = {"type": "response.output_item.done",
+            "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}}
+    log_record("call_A", added, state)
+    rec = log_record("call_A", done, state)
+    assert rec["tool"] == "get_services"
+    assert isinstance(rec["latency_ms"], int) and rec["latency_ms"] >= 0
+    assert "mcp_1" not in state.tool_started_at  # popped
+
+
+def test_log_record_plain_event():
+    rec = log_record("call_A", {"type": "response.created"}, SupervisorState())
+    assert rec == {"call_id": "call_A", "event": "response.created"}

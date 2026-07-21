@@ -9,6 +9,7 @@ docs/superpowers/specs/2026-07-21-sip-call-supervisor-design.md.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 
@@ -35,3 +36,19 @@ def decide(event: dict, state: SupervisorState) -> list[dict]:
             state.nudge_pending = True
             return [{"type": "response.create"}]
     return []
+
+
+def log_record(call_id: str, event: dict, state: SupervisorState) -> dict:
+    """Build one structured log line; track/compute MCP tool latency as a side effect."""
+    etype = event.get("type")
+    item = event.get("item") or {}
+    rec: dict = {"call_id": call_id, "event": etype}
+    if etype == "response.output_item.added" and item.get("type") == "mcp_call":
+        if item.get("id"):
+            state.tool_started_at[item["id"]] = time.monotonic()
+    elif etype == "response.output_item.done" and item.get("type") == "mcp_call":
+        rec["tool"] = item.get("name")
+        started = state.tool_started_at.pop(item.get("id"), None)
+        if started is not None:
+            rec["latency_ms"] = round((time.monotonic() - started) * 1000)
+    return rec
