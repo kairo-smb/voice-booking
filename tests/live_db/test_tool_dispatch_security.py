@@ -241,8 +241,9 @@ async def test_create_booking_rejects_slot_in_past(
 
     resp = await execute_tool(
         "create_booking",
-        {"customer_id": str(customer["id"]), "service_id": str(SVC_TAGLIO_UOMO),
-         "slot_start": past.isoformat(), "staff_id": str(STAFF_MIRCO)},
+        {"customer_id": str(customer["id"]),
+         "legs": [{"service_id": str(SVC_TAGLIO_UOMO), "staff_id": str(STAFF_MIRCO),
+                   "slot_start": past.isoformat()}]},
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
@@ -260,8 +261,9 @@ async def test_create_booking_nonexistent_customer_returns_clean_error(
 
     resp = await execute_tool(
         "create_booking",
-        {"customer_id": str(nonexistent_customer_id), "service_id": str(SVC_TAGLIO_UOMO),
-         "slot_start": _slot(66).isoformat(), "staff_id": str(STAFF_MIRCO)},
+        {"customer_id": str(nonexistent_customer_id),
+         "legs": [{"service_id": str(SVC_TAGLIO_UOMO), "staff_id": str(STAFF_MIRCO),
+                   "slot_start": _slot(66).isoformat()}]},
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
@@ -285,8 +287,9 @@ async def test_create_booking_nonexistent_staff_returns_clean_error(
 
     resp = await execute_tool(
         "create_booking",
-        {"customer_id": str(customer["id"]), "service_id": str(SVC_TAGLIO_UOMO),
-         "slot_start": _slot(66).isoformat(), "staff_id": str(nonexistent_staff_id)},
+        {"customer_id": str(customer["id"]),
+         "legs": [{"service_id": str(SVC_TAGLIO_UOMO), "staff_id": str(nonexistent_staff_id),
+                   "slot_start": _slot(66).isoformat()}]},
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
@@ -303,7 +306,7 @@ async def test_create_booking_missing_required_field_returns_clean_error(
 
     resp = await execute_tool(
         "create_booking",
-        {"customer_id": "not-a-real-uuid", "service_id": str(SVC_TAGLIO_UOMO)},
+        {"customer_id": "not-a-real-uuid"},
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
