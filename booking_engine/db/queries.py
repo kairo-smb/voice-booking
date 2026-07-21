@@ -467,6 +467,8 @@ async def create_appointment_chain(
     )
     duration_by_id = {r["id"]: r["duration_minutes"] for r in svc_rows}
     price_by_id = {r["id"]: r["price_eur"] for r in svc_rows}
+    if len(duration_by_id) != len(set(svc_ids)):
+        raise RuntimeError("invalid_service")
 
     resolved = []
     for leg in legs:

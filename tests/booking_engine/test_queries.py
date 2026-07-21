@@ -319,3 +319,17 @@ class TestCreateAppointmentChain:
         ]
         with pytest.raises(SlotConflictError):
             await create_appointment_chain(SHOP, CUSTOMER, legs)
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_missing_service_raises_invalid_service(self, mock_exec):
+        leg1_start = datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
+        leg2_start = datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30, "price_eur": Decimal("35.00")}],  # only 1 of 2 services found
+        ]
+        legs = [
+            {"service_id": SVC, "staff_id": STAFF, "slot_start": leg1_start},
+            {"service_id": SVC2, "staff_id": STAFF2, "slot_start": leg2_start},
+        ]
+        with pytest.raises(RuntimeError, match="invalid_service"):
+            await create_appointment_chain(SHOP, CUSTOMER, legs)
