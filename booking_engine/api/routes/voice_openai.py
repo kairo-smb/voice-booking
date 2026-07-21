@@ -18,6 +18,7 @@ from booking_engine.clients.openai_realtime import accept_sip_call
 from booking_engine.config import Settings, get_settings
 from booking_engine.db.voice_calls_queries import insert_call
 from booking_engine.db.voice_config_queries import get_config, get_policy
+from booking_engine.services.call_supervisor import maybe_supervise
 from booking_engine.services.call_token import mint_call_token
 from booking_engine.services.identity_resolver import resolve_caller
 from booking_engine.services.realtime_session import (
@@ -82,4 +83,8 @@ async def incoming(
     ok = await accept_sip_call(
         call_id=call_id, payload=payload, api_key=settings.openai_api_key,
     )
+    if ok:
+        # Own the call's control channel: greet + voice tool results. Gated by
+        # ENABLE_CALL_SUPERVISOR; no-op when off. Fire-and-forget by design.
+        maybe_supervise(call_id, settings)
     return {"status": "accepted" if ok else "accept_failed"}

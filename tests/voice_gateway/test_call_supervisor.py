@@ -140,3 +140,44 @@ async def test_supervise_dedupes_parallel_tool_completions():
     await supervise("call_A", "key", connect=_connect_returning(ws))
     # greeting + exactly one nudge (second completion suppressed by nudge_pending)
     assert ws.sent.count({"type": "response.create"}) == 2
+
+
+import asyncio
+from booking_engine.services import call_supervisor as cs
+
+
+class _Settings:
+    def __init__(self, enabled):
+        self.enable_call_supervisor = enabled
+        self.openai_api_key = "key"
+
+
+def test_maybe_supervise_spawns_when_enabled(monkeypatch):
+    spawned = []
+
+    async def _fake_supervise(call_id, api_key, **kw):
+        return None
+
+    def _fake_create_task(coro):
+        spawned.append(coro)
+        coro.close()  # avoid "coroutine never awaited" warning
+        return None
+
+    monkeypatch.setattr(cs, "supervise", _fake_supervise)
+    monkeypatch.setattr(cs.asyncio, "create_task", _fake_create_task)
+    cs.maybe_supervise("call_A", _Settings(enabled=True))
+    assert len(spawned) == 1
+
+
+def test_maybe_supervise_skips_when_disabled(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(cs.asyncio, "create_task", lambda coro: spawned.append(coro))
+    cs.maybe_supervise("call_A", _Settings(enabled=False))
+    assert spawned == []
+
+
+def test_maybe_supervise_skips_without_call_id(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(cs.asyncio, "create_task", lambda coro: spawned.append(coro))
+    cs.maybe_supervise("", _Settings(enabled=True))
+    assert spawned == []

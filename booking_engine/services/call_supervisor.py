@@ -9,6 +9,7 @@ docs/superpowers/specs/2026-07-21-sip-call-supervisor-design.md.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -96,3 +97,9 @@ async def supervise(call_id: str, api_key: str, *, connect=_default_connect) -> 
         except Exception:
             logger.exception("call_supervisor error call_id=%s attempt=%s", call_id, attempt)
     logger.warning(json.dumps({"call_id": call_id, "event": "supervisor.gave_up"}))
+
+
+def maybe_supervise(call_id: str, settings) -> None:
+    """Spawn the supervisor task when enabled and we have a call id. No-op otherwise."""
+    if call_id and getattr(settings, "enable_call_supervisor", False):
+        asyncio.create_task(supervise(call_id, settings.openai_api_key))
