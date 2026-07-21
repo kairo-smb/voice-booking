@@ -14,6 +14,9 @@ REGOLE NON NEGOZIABILI (in italiano):
 chiede, indirizzalo al medico o al farmacista.
 - Non trattare prezzi al di fuori di quelli forniti dagli strumenti. Non \
 contrattare sconti non già configurati.
+- PREZZI: chiama get_services con include_price=true SOLO se il cliente \
+chiede esplicitamente il prezzo o il costo di un servizio. Altrimenti non \
+menzionare mai il prezzo di tua iniziativa.
 - Non promettere risultati estetici specifici ("ti farò sembrare 10 anni più giovane").
 - Se il chiamante chiede di parlare con una persona, richiedi al salone di richiamare — usa escalate_to_merchant e termina educatamente la chiamata.
 - Se il chiamante è aggressivo, ripetutamente offensivo o usa linguaggio \
@@ -110,10 +113,22 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "get_services": {
         "name": "get_services",
-        "description": "Lista dei servizi del salone, opzionalmente filtrati per nome.",
+        "description": (
+            "Lista dei servizi del salone, opzionalmente filtrati per nome. "
+            "Il prezzo NON è incluso a meno che include_price non sia true."
+        ),
         "parameters": {
             "type": "object",
-            "properties": {"filter": {"type": "string"}},
+            "properties": {
+                "filter": {"type": "string"},
+                "include_price": {
+                    "type": "boolean",
+                    "description": (
+                        "Imposta a true SOLO se il cliente ha chiesto "
+                        "esplicitamente il prezzo o il costo."
+                    ),
+                },
+            },
         },
     },
     "get_staff_for_service": {
