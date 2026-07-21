@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from booking_engine.db.connection import execute, execute_one, execute_void
+from booking_engine.services.booking_constraints import gap_within_limit
 
 _ROME = ZoneInfo("Europe/Rome")
 
@@ -216,6 +217,188 @@ async def get_available_slots(
 
     available.sort(key=lambda s: (s["slot_start"], s["staff_name"]))
     return available
+
+
+async def _eligible_staff_for_leg(
+    shop_id: UUID, service_id: UUID, staff_id: UUID | None,
+) -> list[dict]:
+    if staff_id:
+        return await execute(
+            "SELECT st.id AS staff_id, st.full_name AS staff_name "
+            "FROM business_app_core.staff st "
+            "JOIN business_app_core.staff_services ss ON ss.staff_id = st.id "
+            "WHERE st.shop_id = $1 AND st.is_active = true AND st.id = $2 AND ss.service_id = $3",
+            shop_id, staff_id, service_id,
+        )
+    return await execute(
+        "SELECT st.id AS staff_id, st.full_name AS staff_name "
+        "FROM business_app_core.staff st "
+        "JOIN business_app_core.staff_services ss ON ss.staff_id = st.id "
+        "WHERE st.shop_id = $1 AND st.is_active = true AND ss.service_id = $2",
+        shop_id, service_id,
+    )
+
+
+async def _staff_day_windows(staff_id: UUID, day: date) -> list[tuple[datetime, datetime]]:
+    scheds = await execute(
+        "SELECT start_time, end_time FROM business_app_core.staff_schedules "
+        "WHERE staff_id = $1 AND day_of_week = $2",
+        staff_id, day.weekday(),
+    )
+    windows = []
+    for sched in scheds:
+        st_parts = str(sched["start_time"]).split(":")
+        et_parts = str(sched["end_time"]).split(":")
+        windows.append((
+            datetime.combine(day, time(int(st_parts[0]), int(st_parts[1])), tzinfo=_ROME),
+            datetime.combine(day, time(int(et_parts[0]), int(et_parts[1])), tzinfo=_ROME),
+        ))
+    return windows
+
+
+def _overlaps_existing(
+    slot_start: datetime, slot_end: datetime, staff_id: UUID, existing: list[dict],
+) -> bool:
+    for appt in existing:
+        if appt["staff_id"] != staff_id:
+            continue
+        a_start = appt["start_time"] if isinstance(appt["start_time"], datetime) else datetime.fromisoformat(str(appt["start_time"]))
+        a_end = appt["end_time"] if isinstance(appt["end_time"], datetime) else datetime.fromisoformat(str(appt["end_time"]))
+        if a_start.tzinfo is None:
+            a_start = a_start.replace(tzinfo=_ROME)
+            a_end = a_end.replace(tzinfo=_ROME)
+        if slot_start < a_end and slot_end > a_start:
+            return True
+    return False
+
+
+async def _iter_leg0_candidates(
+    eligible: list[dict], duration: int, start_date: date, end_date: date, existing: list[dict],
+):
+    """Yield (staff, slot_start, slot_end) candidates for the first leg of a
+    chain, in the same day/staff/30-min-step order as get_available_slots."""
+    current = start_date
+    while current <= end_date:
+        for staff in eligible:
+            for w_start, w_end in await _staff_day_windows(staff["staff_id"], current):
+                slot_start = w_start
+                while slot_start + timedelta(minutes=duration) <= w_end:
+                    slot_end = slot_start + timedelta(minutes=duration)
+                    if not _overlaps_existing(slot_start, slot_end, staff["staff_id"], existing):
+                        yield staff, slot_start, slot_end
+                    slot_start += timedelta(minutes=30)
+        current += timedelta(days=1)
+
+
+async def _try_extend_chain(
+    legs: list[dict],
+    remaining_services: list[dict],
+    remaining_eligible: list[list[dict]],
+    duration_by_id: dict[UUID, int],
+    existing: list[dict],
+) -> list[dict] | None:
+    """Recursively append `remaining_services` to `legs`, first-fit: the
+    first staff+window combination that satisfies MAX_GAP_MINUTES and has no
+    conflict wins. Backtracks (tries the next staff/window) only if a later
+    leg can't be completed.
+
+    ponytail: only searches the same calendar day as the previous leg's end
+    for the next leg — a chain ending near midnight won't roll into the next
+    day. Salon hours don't reach midnight in practice, so not handled.
+    """
+    if not remaining_services:
+        return legs
+    prev_end = legs[-1]["slot_end"]
+    service = remaining_services[0]
+    duration = duration_by_id[service["service_id"]]
+    day = prev_end.date()
+    for staff in remaining_eligible[0]:
+        for w_start, w_end in await _staff_day_windows(staff["staff_id"], day):
+            leg_start = max(prev_end, w_start)
+            if not gap_within_limit(prev_end, leg_start):
+                continue
+            leg_end = leg_start + timedelta(minutes=duration)
+            if leg_end > w_end:
+                continue
+            if _overlaps_existing(leg_start, leg_end, staff["staff_id"], existing):
+                continue
+            candidate = legs + [{
+                "service_id": service["service_id"], "staff_id": staff["staff_id"],
+                "staff_name": staff["staff_name"], "slot_start": leg_start, "slot_end": leg_end,
+            }]
+            result = await _try_extend_chain(
+                candidate, remaining_services[1:], remaining_eligible[1:],
+                duration_by_id, existing,
+            )
+            if result is not None:
+                return result
+    return None
+
+
+async def get_available_slot_chains(
+    shop_id: UUID,
+    services: list[dict],
+    start_date: date,
+    end_date: date,
+    max_results: int = 5,
+) -> list[dict]:
+    """Find up to `max_results` chains of consecutive slots across ordered
+    `services` (each `{"service_id", "staff_id"}`, staff_id optional — None
+    means auto-assign). Legs run in the given order; the gap between one
+    leg's end and the next leg's start must satisfy gap_within_limit. Each
+    chain: {"slot_start", "slot_end", "legs": [...]}.
+    """
+    if not services:
+        return []
+
+    svc_ids = [s["service_id"] for s in services]
+    svc_rows = await execute(
+        "SELECT id, duration_minutes FROM business_app_core.services "
+        "WHERE id = ANY($1::uuid[]) AND is_active = true",
+        svc_ids,
+    )
+    duration_by_id = {r["id"]: r["duration_minutes"] for r in svc_rows}
+    if len(duration_by_id) != len(svc_ids):
+        return []
+
+    eligible_by_leg: list[list[dict]] = []
+    for leg in services:
+        staff = await _eligible_staff_for_leg(shop_id, leg["service_id"], leg.get("staff_id"))
+        if not staff:
+            return []
+        eligible_by_leg.append(staff)
+
+    all_staff_ids = list({s["staff_id"] for staff in eligible_by_leg for s in staff})
+    from_ts = datetime.combine(start_date, time(0, 0), tzinfo=_ROME)
+    to_ts = datetime.combine(end_date, time(23, 59), tzinfo=_ROME)
+    existing = await execute(
+        "SELECT staff_id, start_time, end_time FROM business_app_core.appointments "
+        "WHERE staff_id = ANY($1::uuid[]) AND status NOT IN ('cancelled', 'no_show') "
+        "AND start_time < $2 AND end_time > $3",
+        all_staff_ids, to_ts, from_ts,
+    )
+
+    first = services[0]
+    chains: list[dict] = []
+    async for staff0, leg0_start, leg0_end in _iter_leg0_candidates(
+        eligible_by_leg[0], duration_by_id[first["service_id"]], start_date, end_date, existing,
+    ):
+        legs = [{
+            "service_id": first["service_id"], "staff_id": staff0["staff_id"],
+            "staff_name": staff0["staff_name"], "slot_start": leg0_start, "slot_end": leg0_end,
+        }]
+        completed = await _try_extend_chain(
+            legs, services[1:], eligible_by_leg[1:], duration_by_id, existing,
+        )
+        if completed is not None:
+            chains.append({
+                "slot_start": completed[0]["slot_start"],
+                "slot_end": completed[-1]["slot_end"],
+                "legs": completed,
+            })
+            if len(chains) >= max_results:
+                break
+    return chains
 
 
 async def create_appointment(

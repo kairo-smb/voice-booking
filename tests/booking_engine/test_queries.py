@@ -1,7 +1,7 @@
 """Unit tests for query functions (mocked DB)."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -16,6 +16,7 @@ from booking_engine.db.queries import (
     create_customer,
     find_customers_by_name_and_phone,
     find_customers_by_phone,
+    get_available_slot_chains,
     get_shop,
     get_staff_services,
     list_appointments,
@@ -26,7 +27,9 @@ from booking_engine.db.queries import (
 
 SHOP = UUID("a0000000-0000-0000-0000-000000000001")
 STAFF = UUID("11111111-0000-0000-0000-000000000001")
+STAFF2 = UUID("11111111-0000-0000-0000-000000000002")
 SVC = UUID("aaaa0001-0000-0000-0000-000000000001")
+SVC2 = UUID("aaaa0001-0000-0000-0000-000000000002")
 CUSTOMER = UUID("cccc0001-0000-0000-0000-000000000001")
 APPT = UUID("dddddddd-0000-0000-0000-000000000001")
 _ROME = ZoneInfo("Europe/Rome")
@@ -170,3 +173,54 @@ class TestListAppointments:
         result = await list_appointments(SHOP)
         assert len(result) == 1
         assert "services" in result[0]
+
+
+class TestGetAvailableSlotChains:
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_single_day_two_legs_different_staff(self, mock_exec):
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30}, {"id": SVC2, "duration_minutes": 30}],  # durations
+            [{"staff_id": STAFF, "staff_name": "Ana"}],  # eligible leg0
+            [{"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg1
+            [],  # existing appointments
+            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff0 day windows
+            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff1 day windows
+        ]
+        day = date(2026, 5, 5)
+        result = await get_available_slot_chains(
+            SHOP, [{"service_id": SVC, "staff_id": None},
+                   {"service_id": SVC2, "staff_id": None}],
+            day, day, max_results=1,
+        )
+        assert len(result) == 1
+        legs = result[0]["legs"]
+        assert legs[0]["staff_id"] == STAFF and legs[1]["staff_id"] == STAFF2
+        assert legs[0]["slot_end"] == legs[1]["slot_start"]  # back-to-back, 0-minute gap
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_no_eligible_staff_for_second_leg_returns_empty(self, mock_exec):
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30}, {"id": SVC2, "duration_minutes": 30}],
+            [{"staff_id": STAFF, "staff_name": "Ana"}],
+            [],  # no one eligible for leg1
+        ]
+        day = date(2026, 5, 5)
+        result = await get_available_slot_chains(
+            SHOP, [{"service_id": SVC, "staff_id": None},
+                   {"service_id": SVC2, "staff_id": None}],
+            day, day,
+        )
+        assert result == []
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_unknown_service_in_chain_returns_empty(self, mock_exec):
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30}],  # only one of two services found/active
+        ]
+        day = date(2026, 5, 5)
+        result = await get_available_slot_chains(
+            SHOP, [{"service_id": SVC, "staff_id": None},
+                   {"service_id": SVC2, "staff_id": None}],
+            day, day,
+        )
+        assert result == []
