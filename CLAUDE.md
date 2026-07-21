@@ -8,6 +8,128 @@ stays as the record of what was true and decided at the time.
 
 ---
 
+## 2026-07-21 — Cost-gated pricing + multi-service/multi-staff bookings
+
+**Decision:** Two voice-tool refinements, built together (subagent-driven
+development, spec + code-quality review per task, 9 tasks): (1) `get_services`
+now only returns `price_cents` when the caller passes `include_price=true`
+(default omitted) — a `SAFETY_PROMPT` rule tells the model to set that flag
+only when the customer explicitly asks about cost, never to volunteer it.
+(2) `check_availability`/`create_booking` now take an ordered list of
+`services`/`legs` (`{service_id, staff_id?}`) instead of a single
+`service_id`/`staff_id`, so a visit can require multiple services performed
+by different staff in sequence (e.g. colore by one stylist, piega by
+another) — a plain single-service booking is just a one-element list, no
+separate code path.
+
+**Why additive, not a rewrite of the existing single-service functions:**
+`booking_engine/db/queries.py::get_available_slots`/`create_appointment`
+are shared ground-truth functions also used by
+`booking_engine/api/routes/availability.py`/`appointments.py`, outside the
+voice-agent's scope. Rather than change their signatures (which would have
+touched unrelated callers and their tests), added new, additive functions —
+`get_available_slot_chains` (multi-leg chain search, recursive first-fit
+backtracking across staff×time×legs) and `create_appointment_chain`
+(multi-leg write: one `appointments` row + one `appointment_services` row
+per leg, each with its own `staff_id`/`start_time`, matching what the schema
+already supports — `appointment_services.staff_id`/`start_time` existed
+before this work but nothing in the voice layer used them). The wrapper
+layer (`voice_tool_queries.py::find_availability`/`insert_booking_locked`)
+picks single-leg (reuses the untouched original functions, zero behavior
+change) vs. multi-leg (routes to the new chain functions) based on request
+size — confirmed byte-for-byte via MD5 hash that `get_available_slots` has
+zero diff from before this work.
+
+**Gap constant:** `MAX_GAP_MINUTES = 20` (`booking_engine/services/booking_constraints.py`)
+— the max idle time allowed between the end of one service and the start of
+the next in a chain. Fixed, not per-shop configurable; nothing has asked for
+it to vary.
+
+**Ordering is the model's own domain knowledge, not a stored rule:** no
+service-dependency/ordering table exists in the schema, and none was added.
+`SAFETY_PROMPT` instead tells the model to sequence multi-service requests
+by hairdressing convention (color/chemical treatments before cut/styling)
+unless the customer states a different order — the system enforces
+whatever order the `services`/`legs` list arrives in, it doesn't know *why*
+a given order is correct.
+
+**Bugs caught by review before merge, fixed same-session:**
+- `get_available_slot_chains` originally compared a deduplicated
+  services-found count against a non-deduplicated requested-id count,
+  misreporting a chain that legitimately repeats the same `service_id`
+  twice (different staff) as "unknown service."
+- Missing a final sort of returned chains by `slot_start` — the spec had
+  promised "sorted by proximity to preferred_when" but the first cut never
+  sorted before returning, so a later chain from one staff member could come
+  back ahead of an earlier one from another.
+- The chain-extension search only tried the single earliest candidate start
+  time per staff/window; if that exact instant conflicted with an existing
+  appointment, the search abandoned that staff/window entirely instead of
+  trying later starts still within `MAX_GAP_MINUTES` — could report "no
+  availability" when a valid slot existed. Fixed to step through the full
+  gap-allowed window in 5-minute increments.
+- `create_appointment_chain` had an unguarded dict lookup that would
+  `KeyError` (crashing the tool call) if a leg's service became
+  inactive/missing between the availability check and the write — same bug
+  class as the 2026-07-17 FK-crash entry below. Now raises a clean
+  `RuntimeError("invalid_service")` instead, propagating through to a
+  `{"ok": false, "error": "invalid_service"}` tool response.
+- `insert_booking_locked` initially added an unconditional extra DB
+  round-trip (re-fetching durations) for every booking, including the
+  dominant single-service case, which previously needed zero extra queries.
+  Fixed so single-leg bookings read `start_time`/`end_time` straight off
+  what `create_appointment` already returns, matching pre-existing
+  behavior; only multi-leg bookings still pay for the re-fetch (necessary,
+  since `create_appointment_chain` only returns the parent `appointments`
+  row, not a per-leg breakdown).
+- Found by a final whole-branch review (not per-task review — only visible
+  once the pieces were viewed together): `get_available_slot_chains`'s
+  search broke out the instant it collected `max_results` chains, but
+  candidate generation is staff-major within a day (exhausts one staff's
+  whole day before trying the next, no `ORDER BY` on eligible staff), so a
+  later slot from the first-iterated staff member could be returned instead
+  of a genuinely earlier slot from a staff member iterated later — the
+  earlier "add a final sort" fix above only reordered whatever had already
+  been collected, it couldn't fix a search that stopped too early. Reproduced
+  concretely (two eligible staff, first busy until 14:00, second free from
+  09:00 — search returned the 14:00 slot). Fixed so the search only stops at
+  a day boundary, never mid-day (since candidates within one day aren't
+  time-ordered across staff, but candidates across different days always
+  are) — this fully closes the "sorted by proximity" promise the earlier fix
+  only partially delivered on. Regression test added with 2+ eligible staff
+  for the first leg specifically, since none of the existing tests exercised
+  that case.
+
+**Flagged, not actioned:** `create_appointment_chain` validates each leg's
+staff against *existing* DB rows but never validates the legs in one request
+*against each other* — nothing stops a `create_booking` call (if the model
+sent a fabricated `legs` array instead of copying a real `check_availability`
+result verbatim) from assigning the same staff member to two overlapping
+legs in the same request, which would write two conflicting
+`appointment_services` rows. The single-leg path has an equivalent
+"trust what's given, no re-validation beyond one overlap check" limitation
+today; this just extends the same accepted risk shape to N legs. Not fixed
+here — same reasoning as `update_customer_from_call`'s missing shop check in
+the 2026-07-17 entry below (a policy/validation decision, not a narrow
+error-handling fix); worth a fast-follow (pairwise leg overlap + ordering +
+`gap_within_limit` check before the insert loop) given this codebase already
+treats voice-agent tool arguments as untrusted input elsewhere.
+
+**Still needed:** `tests/live_db/*` (the tests that exercise the real
+dispatch chain against a real Neon-shaped DB, no mocking) were updated for
+the new wire shape but — per this repo's existing convention — could not be
+run in this environment (`DATABASE_URL` not set here). The chain algorithm
+itself is currently only verified by mocked unit tests
+(`tests/booking_engine/test_queries.py`); run the `live_db` suite against
+the QA Neon branch to confirm `get_available_slot_chains`/
+`create_appointment_chain` behave correctly against real staff schedules
+and real overlapping-appointment data before treating this as fully proven
+end-to-end.
+- Spec: `docs/superpowers/specs/2026-07-21-cost-gating-multi-staff-booking-design.md`.
+  Plan: `docs/superpowers/plans/2026-07-21-cost-gating-multi-staff-booking.md`.
+- Built in worktree `.worktrees/cost-gating-multi-staff-booking`, branch
+  `feat/cost-gating-multi-staff-booking`.
+
 ## 2026-07-21 — Realtime + hosted MCP does NOT auto-speak tool results (prod blocker)
 
 **Finding (from a live harness event trace, not docs):** in the Realtime API

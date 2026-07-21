@@ -138,60 +138,122 @@ async def list_staff_for_service(*, shop_id: UUID, service_id: UUID) -> list[dic
 
 
 async def find_availability(
-    *, shop_id: UUID, service_id: UUID,
+    *, shop_id: UUID, services: list[dict],
     preferred_when: datetime | None,
-    staff_id: UUID | None,
     max_results: int,
 ) -> list[dict]:
-    """Open slots for the service — delegates to the ground-truth booking layer."""
+    """Open slots for the ordered `services` list — delegates to the
+    ground-truth booking layer. A single-service request reuses the
+    existing single-staff slot search unchanged; multiple services go
+    through the chain search (different staff per leg, ordered, gapped).
+    """
     from datetime import datetime, timedelta
 
     from booking_engine.db import queries
 
     start_date = (preferred_when or datetime.utcnow()).date()
     end_date = start_date + timedelta(days=14)
-    slots = await queries.get_available_slots(
-        shop_id=shop_id, service_ids=[service_id],
-        start_date=start_date, end_date=end_date, staff_id=staff_id,
+
+    if len(services) == 1:
+        leg = services[0]
+        slots = await queries.get_available_slots(
+            shop_id=shop_id, service_ids=[leg["service_id"]],
+            start_date=start_date, end_date=end_date, staff_id=leg.get("staff_id"),
+        )
+        return [
+            {
+                "slot_start": s["slot_start"], "slot_end": s["slot_end"],
+                "legs": [{
+                    "service_id": leg["service_id"], "staff_id": s["staff_id"],
+                    "staff_name": s["staff_name"],
+                    "slot_start": s["slot_start"], "slot_end": s["slot_end"],
+                }],
+            }
+            for s in slots[:max_results]
+        ]
+
+    return await queries.get_available_slot_chains(
+        shop_id=shop_id, services=services,
+        start_date=start_date, end_date=end_date, max_results=max_results,
     )
-    return slots[:max_results]
 
 
 async def insert_booking_locked(
-    *, shop_id: UUID, customer_id: UUID, service_id: UUID,
-    slot_start: datetime, staff_id: UUID,
+    *, shop_id: UUID, customer_id: UUID, legs: list[dict],
 ) -> dict:
     """Create the appointment via the ground-truth layer. Raises on conflict.
 
-    ponytail: relies on create_appointment's overlap check (no advisory lock).
-    Add a lock only if concurrent voice bookings for the same staff+slot become
-    a real problem.
+    `legs` is the ordered list of {"service_id", "staff_id", "slot_start"} —
+    exactly what create_booking receives, normally copied from a chosen
+    check_availability chain. A single leg reuses the existing single-staff
+    create_appointment path unchanged; multiple legs go through
+    create_appointment_chain.
+
+    ponytail: relies on the create_appointment*/_chain overlap check (no
+    advisory lock). Add one only if concurrent voice bookings for the same
+    staff+slot become a real problem.
     """
+    from datetime import timedelta
+
     from booking_engine.db import queries
 
     try:
-        row = await queries.create_appointment(
-            shop_id=shop_id, customer_id=customer_id, staff_id=staff_id,
-            service_ids=[service_id], start_time=slot_start,
-        )
+        if len(legs) == 1:
+            leg = legs[0]
+            row = await queries.create_appointment(
+                shop_id=shop_id, customer_id=customer_id, staff_id=leg["staff_id"],
+                service_ids=[leg["service_id"]], start_time=leg["slot_start"],
+            )
+        else:
+            row = await queries.create_appointment_chain(
+                shop_id=shop_id, customer_id=customer_id, legs=legs,
+            )
     except queries.SlotConflictError:
         raise RuntimeError("slot_taken")
     except asyncpg.exceptions.ForeignKeyViolationError as e:
-        # appointments has two independently-violable FKs on user-supplied
-        # ids: customer_id (unvalidated before this call) and staff_id
-        # (also unvalidated — service_id is the only one pre-checked, via
-        # service_belongs_to_shop in the route). Distinguish via
-        # constraint_name so a bad staff_id isn't misreported as a bad
-        # customer_id.
-        if e.constraint_name == "appointments_staff_id_fkey":
+        # Both appointments.staff_id and appointment_services.staff_id FKs
+        # are named *_staff_id_fkey; anything else user-supplied and
+        # unvalidated before this call is the customer_id FK.
+        if "staff" in (e.constraint_name or ""):
             raise RuntimeError("invalid_staff")
         raise RuntimeError("invalid_customer")
+
+    if len(legs) == 1:
+        leg = legs[0]
+        out_legs = [{
+            "service_id": leg["service_id"], "staff_id": row["staff_id"],
+            "slot_start": row["start_time"], "slot_end": row["end_time"],
+        }]
+    else:
+        svc_ids = [leg["service_id"] for leg in legs]
+        durations = await connection.execute(
+            "SELECT id, duration_minutes FROM business_app_core.services "
+            "WHERE id = ANY($1::uuid[])",
+            svc_ids,
+        )
+        duration_by_id = {d["id"]: d["duration_minutes"] for d in durations}
+        # .get(..., 0) rather than a crashing [] lookup: the booking itself
+        # already succeeded (create_appointment_chain resolved durations
+        # correctly before the insert) — a service deleted in the narrow
+        # window between that insert and this re-fetch should degrade the
+        # reported slot_end for that one leg, not crash a response for an
+        # appointment that was already created.
+        out_legs = [
+            {
+                "service_id": leg["service_id"], "staff_id": leg["staff_id"],
+                "slot_start": leg["slot_start"],
+                "slot_end": leg["slot_start"] + timedelta(
+                    minutes=duration_by_id.get(leg["service_id"], 0)),
+            }
+            for leg in legs
+        ]
     return {
         "id": row["id"],
-        "slot_start": row["start_time"],
-        "slot_end": row["end_time"],
+        "slot_start": out_legs[0]["slot_start"],
+        "slot_end": out_legs[-1]["slot_end"],
         "staff_id": row["staff_id"],
         "confirmation_status": row.get("confirmation_status") or "confirmed",
+        "legs": out_legs,
     }
 
 

@@ -53,7 +53,7 @@ class ServiceOut(BaseModel):
     service_id: UUID
     name: str
     duration_min: int
-    price_cents: int
+    price_cents: int | None = None
 
 
 class StaffOut(BaseModel):
@@ -62,18 +62,49 @@ class StaffOut(BaseModel):
 
 
 # Availability + booking
-class AvailabilitySlot(BaseModel):
-    slot_start: datetime
-    slot_end: datetime
+class BookingServiceIn(BaseModel):
+    """One requested leg of a (possibly multi-service) booking, in the
+    order the services should be performed."""
+    service_id: UUID
+    staff_id: UUID | None = None  # None = auto-assign an eligible, available staff member
+
+
+class CheckAvailabilityIn(BaseModel):
+    services: list[BookingServiceIn] = Field(..., min_length=1)
+    preferred_when: datetime | None = None
+    max_results: int = 5
+
+
+class AvailabilityLeg(BaseModel):
+    service_id: UUID
     staff_id: UUID
     staff_name: str
+    slot_start: datetime
+    slot_end: datetime
+
+
+class AvailabilityChain(BaseModel):
+    slot_start: datetime
+    slot_end: datetime
+    legs: list[AvailabilityLeg]
+
+
+class CreateBookingLeg(BaseModel):
+    service_id: UUID
+    staff_id: UUID
+    slot_start: datetime
 
 
 class CreateBookingIn(BaseModel):
     customer_id: UUID
+    legs: list[CreateBookingLeg] = Field(..., min_length=1)
+
+
+class BookingLegOut(BaseModel):
     service_id: UUID
-    slot_start: datetime
     staff_id: UUID
+    slot_start: datetime
+    slot_end: datetime
 
 
 class BookingOut(BaseModel):
@@ -83,7 +114,7 @@ class BookingOut(BaseModel):
     ]
     slot_start: datetime
     slot_end: datetime
-    staff_id: UUID
+    legs: list[BookingLegOut]
 
 
 class ModifyBookingIn(BaseModel):
@@ -117,6 +148,7 @@ class EscalateIn(BaseModel):
 # Catalog (request models)
 class GetServicesIn(BaseModel):
     filter: str | None = None
+    include_price: bool = False
 
 
 class GetStaffForServiceIn(BaseModel):

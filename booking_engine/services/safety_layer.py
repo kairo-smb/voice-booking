@@ -14,6 +14,15 @@ REGOLE NON NEGOZIABILI (in italiano):
 chiede, indirizzalo al medico o al farmacista.
 - Non trattare prezzi al di fuori di quelli forniti dagli strumenti. Non \
 contrattare sconti non già configurati.
+- PREZZI: chiama get_services con include_price=true SOLO se il cliente \
+chiede esplicitamente il prezzo o il costo di un servizio. Altrimenti non \
+menzionare mai il prezzo di tua iniziativa.
+- SERVIZI MULTIPLI: se il cliente prenota più servizi nella stessa visita \
+(es. colore e piega, con operatori anche diversi), passali a \
+check_availability nell'ordine corretto secondo la prassi comune del \
+settore acconciatura (es. colore e altri trattamenti chimici prima di \
+piega, taglio o styling), a meno che il cliente non specifichi un ordine \
+diverso.
 - Non promettere risultati estetici specifici ("ti farò sembrare 10 anni più giovane").
 - Se il chiamante chiede di parlare con una persona, richiedi al salone di richiamare — usa escalate_to_merchant e termina educatamente la chiamata.
 - Se il chiamante è aggressivo, ripetutamente offensivo o usa linguaggio \
@@ -110,10 +119,22 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "get_services": {
         "name": "get_services",
-        "description": "Lista dei servizi del salone, opzionalmente filtrati per nome.",
+        "description": (
+            "Lista dei servizi del salone, opzionalmente filtrati per nome. "
+            "Il prezzo NON è incluso a meno che include_price non sia true."
+        ),
         "parameters": {
             "type": "object",
-            "properties": {"filter": {"type": "string"}},
+            "properties": {
+                "filter": {"type": "string"},
+                "include_price": {
+                    "type": "boolean",
+                    "description": (
+                        "Imposta a true SOLO se il cliente ha chiesto "
+                        "esplicitamente il prezzo o il costo."
+                    ),
+                },
+            },
         },
     },
     "get_staff_for_service": {
@@ -127,30 +148,65 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "check_availability": {
         "name": "check_availability",
-        "description": "Slot disponibili per un servizio. Restituisce fino a 5 opzioni.",
+        "description": (
+            "Trova combinazioni di orari disponibili per uno o più servizi, "
+            "nell'ordine in cui vanno eseguiti (es. colore poi piega, con "
+            "operatori anche diversi). Restituisce fino a max_results "
+            "combinazioni complete."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "service_id": {"type": "string"},
+                "services": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "service_id": {"type": "string"},
+                            "staff_id": {
+                                "type": "string",
+                                "description": (
+                                    "Opzionale: solo se il cliente ha chiesto un "
+                                    "operatore specifico per questo servizio."
+                                ),
+                            },
+                        },
+                        "required": ["service_id"],
+                    },
+                },
                 "preferred_when": {"type": "string", "description": "ISO 8601"},
-                "staff_id": {"type": "string"},
                 "max_results": {"type": "integer", "default": 5},
             },
-            "required": ["service_id"],
+            "required": ["services"],
         },
     },
     "create_booking": {
         "name": "create_booking",
-        "description": "Crea una prenotazione confermata.",
+        "description": (
+            "Crea una prenotazione confermata con uno o più servizi, usando "
+            "esattamente gli orari e gli operatori restituiti da "
+            "check_availability."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "customer_id": {"type": "string"},
-                "service_id": {"type": "string"},
-                "slot_start": {"type": "string"},
-                "staff_id": {"type": "string"},
+                "legs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "service_id": {"type": "string"},
+                            "staff_id": {"type": "string"},
+                            "slot_start": {"type": "string", "description": "ISO 8601"},
+                        },
+                        "required": ["service_id", "staff_id", "slot_start"],
+                    },
+                },
             },
-            "required": ["customer_id", "service_id", "slot_start", "staff_id"],
+            "required": ["customer_id", "legs"],
         },
     },
     "get_booking": {

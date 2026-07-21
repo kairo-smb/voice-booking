@@ -10,8 +10,8 @@ from pydantic import BaseModel
 
 from booking_engine.api.deps import require_tool_token
 from booking_engine.api.voice_tool_models import (
-    AvailabilitySlot, BookingOut, CancelBookingIn, CreateBookingIn, Envelope,
-    ModifyBookingIn,
+    AvailabilityChain, BookingOut, CancelBookingIn, CheckAvailabilityIn,
+    CreateBookingIn, Envelope, ModifyBookingIn,
 )
 from booking_engine.config import Settings, get_settings
 from booking_engine.db.voice_tool_queries import (
@@ -25,26 +25,19 @@ from booking_engine.services.booking_constraints import (
 router = APIRouter(prefix="/voice/tools", tags=["voice-tools-booking"])
 
 
-class CheckAvailabilityIn(BaseModel):
-    service_id: UUID
-    preferred_when: datetime | None = None
-    staff_id: UUID | None = None
-    max_results: int = 5
-
-
 @router.post("/check_availability")
 async def check_availability(
     body: CheckAvailabilityIn,
     _auth: Annotated[bool, Depends(require_tool_token)],
     x_shop_id: Annotated[UUID, Header(alias="X-Shop-Id")],
-) -> Envelope[list[AvailabilitySlot]]:
+) -> Envelope[list[AvailabilityChain]]:
+    services = [{"service_id": s.service_id, "staff_id": s.staff_id} for s in body.services]
     rows = await find_availability(
-        shop_id=x_shop_id, service_id=body.service_id,
-        preferred_when=body.preferred_when, staff_id=body.staff_id,
-        max_results=body.max_results,
+        shop_id=x_shop_id, services=services,
+        preferred_when=body.preferred_when, max_results=body.max_results,
     )
-    out = [AvailabilitySlot(**r) for r in rows]
-    return Envelope[list[AvailabilitySlot]](ok=True, data=out)
+    out = [AvailabilityChain(**r) for r in rows]
+    return Envelope[list[AvailabilityChain]](ok=True, data=out)
 
 
 @router.post("/create_booking")
@@ -54,17 +47,17 @@ async def create_booking(
     x_shop_id: Annotated[UUID, Header(alias="X-Shop-Id")],
     x_call_id: Annotated[UUID, Header(alias="X-Call-Id")],
 ) -> Envelope[BookingOut]:
-    if not await service_belongs_to_shop(
-        shop_id=x_shop_id, service_id=body.service_id,
-    ):
-        return Envelope[BookingOut](ok=False, error="unknown_service")
-    if slot_in_past(body.slot_start, datetime.now(timezone.utc)):
+    for leg in body.legs:
+        if not await service_belongs_to_shop(shop_id=x_shop_id, service_id=leg.service_id):
+            return Envelope[BookingOut](ok=False, error="unknown_service")
+    now = datetime.now(timezone.utc)
+    if any(slot_in_past(leg.slot_start, now) for leg in body.legs):
         return Envelope[BookingOut](ok=False, error="slot_in_past")
     try:
         row = await insert_booking_locked(
             shop_id=x_shop_id, customer_id=body.customer_id,
-            service_id=body.service_id, slot_start=body.slot_start,
-            staff_id=body.staff_id,
+            legs=[{"service_id": l.service_id, "staff_id": l.staff_id,
+                   "slot_start": l.slot_start} for l in body.legs],
         )
     except RuntimeError as e:
         return Envelope[BookingOut](ok=False, error=str(e))
@@ -75,7 +68,7 @@ async def create_booking(
             appointment_id=row["id"],
             confirmation_status=row["confirmation_status"],
             slot_start=row["slot_start"], slot_end=row["slot_end"],
-            staff_id=row["staff_id"],
+            legs=row["legs"],
         ),
     )
 

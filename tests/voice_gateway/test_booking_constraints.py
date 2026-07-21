@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from booking_engine.services.booking_constraints import (
-    slot_in_past, within_lead_time,
+    MAX_GAP_MINUTES, gap_within_limit, slot_in_past, within_lead_time,
 )
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
@@ -29,3 +29,23 @@ def test_within_lead_time_false_when_appointment_is_far():
 def test_within_lead_time_true_for_past_appointment():
     # already past its start → definitely too close to self-serve
     assert within_lead_time(NOW - timedelta(hours=1), NOW, lead_hours=2) is True
+
+
+def test_gap_within_limit_true_for_back_to_back():
+    end = NOW
+    assert gap_within_limit(end, end) is True
+
+
+def test_gap_within_limit_true_at_exactly_max_gap():
+    end = NOW
+    assert gap_within_limit(end, end + timedelta(minutes=MAX_GAP_MINUTES)) is True
+
+
+def test_gap_within_limit_false_beyond_max_gap():
+    end = NOW
+    assert gap_within_limit(end, end + timedelta(minutes=MAX_GAP_MINUTES + 1)) is False
+
+
+def test_gap_within_limit_false_when_next_starts_before_prev_ends():
+    end = NOW
+    assert gap_within_limit(end, end - timedelta(minutes=1)) is False
