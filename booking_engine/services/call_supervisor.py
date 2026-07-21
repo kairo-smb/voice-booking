@@ -9,8 +9,12 @@ docs/superpowers/specs/2026-07-21-sip-call-supervisor-design.md.
 """
 from __future__ import annotations
 
+import json
+import logging
 import time
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,3 +56,43 @@ def log_record(call_id: str, event: dict, state: SupervisorState) -> dict:
         if started is not None:
             rec["latency_ms"] = round((time.monotonic() - started) * 1000)
     return rec
+
+
+_WS_URL = "wss://api.openai.com/v1/realtime?call_id={call_id}"
+
+
+def _default_connect(call_id: str, api_key: str):
+    import websockets  # local import: only needed when a real call runs
+    return websockets.connect(
+        _WS_URL.format(call_id=call_id),
+        additional_headers={"Authorization": f"Bearer {api_key}"},
+    )
+
+
+async def supervise(call_id: str, api_key: str, *, connect=_default_connect) -> None:
+    """Own one call's control WS: greet on connect, voice tool results, log events.
+
+    Best-effort and isolated: call audio flows OpenAI<->Twilio independently of
+    this WS, so any failure here degrades only this call (no greeting/nudge), it
+    never drops the call. Clean close = call ended. One reconnect on drop.
+    """
+    state = SupervisorState()
+    for attempt in (1, 2):
+        try:
+            async with connect(call_id, api_key) as ws:
+                if not state.greeted:
+                    await ws.send(json.dumps({"type": "response.create"}))
+                    state.greeted = True
+                    logger.info(json.dumps({"call_id": call_id, "event": "supervisor.greeted"}))
+                async for raw in ws:
+                    try:
+                        event = json.loads(raw)
+                    except (ValueError, TypeError):
+                        continue
+                    logger.info(json.dumps(log_record(call_id, event, state)))
+                    for client_ev in decide(event, state):
+                        await ws.send(json.dumps(client_ev))
+            return  # clean close: the call ended
+        except Exception:
+            logger.exception("call_supervisor error call_id=%s attempt=%s", call_id, attempt)
+    logger.warning(json.dumps({"call_id": call_id, "event": "supervisor.gave_up"}))

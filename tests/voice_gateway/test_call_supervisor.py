@@ -80,3 +80,63 @@ def test_log_record_computes_latency_on_done():
 def test_log_record_plain_event():
     rec = log_record("call_A", {"type": "response.created"}, SupervisorState())
     assert rec == {"call_id": "call_A", "event": "response.created"}
+
+
+import json
+import pytest
+from booking_engine.services.call_supervisor import supervise
+
+
+class _FakeWS:
+    """Fake control WS: yields scripted server events, records sent client events."""
+    def __init__(self, events):
+        self._events = [json.dumps(e) for e in events]
+        self.sent = []
+
+    async def send(self, message):
+        self.sent.append(json.loads(message))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def __aiter__(self):
+        for raw in self._events:
+            yield raw
+
+
+def _connect_returning(ws):
+    def _connect(call_id, api_key):
+        return ws
+    return _connect
+
+
+async def test_supervise_greets_then_nudges_after_tool():
+    ws = _FakeWS([
+        {"type": "response.created"},
+        {"type": "response.done"},
+        {"type": "response.output_item.added",
+         "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services"}},
+        {"type": "response.output_item.done",
+         "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}},
+    ])
+    await supervise("call_A", "key", connect=_connect_returning(ws))
+    # First sent event is the greeting; last is the post-tool nudge.
+    assert ws.sent[0] == {"type": "response.create"}
+    assert ws.sent[-1] == {"type": "response.create"}
+    assert ws.sent.count({"type": "response.create"}) == 2
+
+
+async def test_supervise_dedupes_parallel_tool_completions():
+    ws = _FakeWS([
+        {"type": "response.done"},
+        {"type": "response.output_item.done",
+         "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}},
+        {"type": "response.output_item.done",
+         "item": {"type": "mcp_call", "id": "mcp_2", "name": "check_availability", "output": "{}"}},
+    ])
+    await supervise("call_A", "key", connect=_connect_returning(ws))
+    # greeting + exactly one nudge (second completion suppressed by nudge_pending)
+    assert ws.sent.count({"type": "response.create"}) == 2
