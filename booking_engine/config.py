@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # Within this many hours of the slot, the agent can't self-serve a
     # reschedule/cancel — it must escalate to the salon.
     voice_cancellation_lead_time_hours: int = 2
+    # Spawn a per-call server-side Realtime control WebSocket (greeting + voice
+    # tool results). Off by default; enable per environment for live SIP calls.
+    enable_call_supervisor: bool = False
 
     model_config = {"env_prefix": ""}
 
