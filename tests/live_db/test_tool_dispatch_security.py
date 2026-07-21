@@ -310,9 +310,10 @@ async def test_create_booking_missing_required_field_returns_clean_error(
         token=token, secret=settings.openai_tool_secret, app=tool_app,
     )
 
-    # Missing slot_start/staff_id and a malformed customer_id trigger FastAPI's
-    # own pydantic validation (422) before any booking_engine code runs at
-    # all — a different failure mode than test_create_booking_nonexistent_*,
+    # Missing legs (required, min_length=1) and a malformed customer_id
+    # trigger FastAPI's own pydantic validation (422) before any
+    # booking_engine code runs at all — a different failure mode than
+    # test_create_booking_nonexistent_*,
     # which sends fully well-typed requests that fail deeper in the stack.
     # execute_tool() passes the 422 body through unchanged (r.json() succeeds
     # for a 422), so it won't match the ok/error envelope shape — what matters
