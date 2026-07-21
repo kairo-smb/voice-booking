@@ -34,7 +34,10 @@ from booking_engine.services.realtime_session import build_accept_payload
 
 logger = logging.getLogger(__name__)
 
-_QA_MCP_URL = "https://kairo-booking-engine-qa.fly.dev/mcp"
+# Trailing slash matters: /mcp 307-redirects to /mcp/ and OpenAI's Realtime MCP
+# client does not follow the redirect for tool calls (bare /mcp shows up in fly
+# logs as a 307 that never completes). Point straight at /mcp/.
+_QA_MCP_URL = "https://kairo-booking-engine-qa.fly.dev/mcp/"
 _STATIC_DIR = Path(__file__).parent / "voice_test_static"
 
 

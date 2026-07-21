@@ -8,6 +8,62 @@ stays as the record of what was true and decided at the time.
 
 ---
 
+## 2026-07-21 — Realtime + hosted MCP does NOT auto-speak tool results (prod blocker)
+
+**Finding (from a live harness event trace, not docs):** in the Realtime API
+with a hosted `mcp` tool, after the model emits a tool call its response
+**ends** (`response.done` fires *before* the tool even returns), the tool
+executes server-side, `response.mcp_call.completed` + `response.output_item.done`
+deliver the result — and then **nothing**. OpenAI does not open a new response
+to voice the result, so the agent goes silent after every fetch. This
+contradicts the Responses-API "hosted MCP auto-continues" behaviour and the
+assumption recorded in the 2026-07-21 trailing-slash entry's follow-up; the
+raw event log (`response.done` at output_index 0, then an orphaned
+`mcp_call.completed` at index 1 with no successor response) disproves it.
+
+**Harness fix (shipped):** `voice_test_static/index.html` now tracks
+`responseActive` (`response.created`→true, `response.done`→false) and, on
+`response.output_item.done` for an `mcp_call`, sends `{"type":"response.create"}`
+after a 100 ms guard when no response is active — nudging the model to speak
+the result (or chain the next tool). This is the standard Realtime tool-result
+pattern we were simply never sending.
+
+**Production is NOT fixed and is blocked by this:** the SIP path
+(`voice_openai.py` → `accept_sip_call`) is fire-and-forget — it POSTs the accept
+config to `/v1/realtime/calls/{id}/accept` and holds **no** websocket/event
+connection to the session, so there is no client to send `response.create`.
+Before real calls go live, production needs either (a) a server-side control
+WebSocket to each realtime call that injects `response.create` on tool
+completion, or (b) an OpenAI session/config mechanism that makes hosted-MCP
+tool results auto-continue (unverified one exists). Not built here — needs its
+own design. Not urgent only because Twilio is still unfunded (no live inbound
+calls yet).
+
+## 2026-07-21 — MCP server_url must carry a trailing slash (prod + harness)
+
+**Decision:** Point every OpenAI Realtime `mcp` tool `server_url` at `/mcp/`
+(trailing slash), not `/mcp`, in both the production SIP path
+(`voice_openai.py`) and the local test harness (`voice_test_server.py`).
+
+**Why:** `app.mount("/mcp", mcp_asgi)` makes Starlette 307-redirect `/mcp` →
+`/mcp/`. Root-caused from the QA Fly logs (`fly logs -a
+kairo-booking-engine-qa`): during a harness call, OpenAI's Realtime MCP client
+POSTed to bare `/mcp`, got `307`, and **never followed the redirect** — three
+tool attempts in one call all showed as `307` with no subsequent `/mcp/ 200`
+or `/voice/tools/*`. So the tool never executed; the model narrated "verifico
+subito le disponibilità…" and then hung waiting for data that never came
+(looked like "MCP idle + never returns to the customer"). Direct probes to
+`/mcp/` return `200 ok:true`, confirming the redirect — not auth, not the DB —
+was the sole failure. Note this contradicts an earlier assumption (recorded
+then disproven here) that OpenAI follows the 307; it does not for the tool-call
+POST body. Production had the identical bug on line 68 of `voice_openai.py`;
+fixed there too even though real SIP calls aren't live yet (Twilio unfunded).
+
+**Also:** hardened the harness event log (`voice_test_static/index.html`) to
+surface MCP handshake failures (`mcp_list_tools.failed`) and a catch-all
+firehose (`DEBUG_EVENTS`) of every unhandled Realtime event, so a silently
+non-firing tool is visible next time instead of looking like "idle".
+
 ## 2026-07-18 — CI/CD: ephemeral Neon branches, seed-data bug fix, Lambda removal
 
 **Decision:** Replace the local-Postgres-container + `pg_dump --schema-only`

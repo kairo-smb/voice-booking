@@ -233,9 +233,11 @@
   <div id="log"></div>
 
 <script>
+const DEBUG_EVENTS = true;  // log every unhandled Realtime event type (firehose) for debugging
 let pc = null;
 let agentLineEl = null;  // the <div> currently accumulating the agent's in-progress transcript
 let mcpCallStart = null;  // performance.now() when the current MCP call went in flight
+let responseActive = false;  // true while a Realtime response is generating
 
 function logLine(cls, text) {
   const el = document.getElementById('log');
@@ -295,16 +297,24 @@ document.getElementById('startBtn').onclick = async () => {
   pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
   document.body.appendChild(audioEl);
 
-  const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
-  pc.addTrack(mic.getTracks()[0]);
+  const mic = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  const micTrack = mic.getTracks()[0];
+  // Mute the mic while the agent delivers its opening greeting: on laptop speakers
+  // the mic hears the greeting, server-VAD treats it as caller speech and interrupts,
+  // and the agent loops re-greeting itself. Unmuted once the first response finishes.
+  // ponytail: greeting-only echo guard. Mid-call echo still needs headphones — add
+  // push-to-talk (turn_detection: null) if speaker testing during conversation matters.
+  micTrack.enabled = false;
+  pc.addTrack(micTrack);
 
   const dc = pc.createDataChannel('oai-events');
   dc.onopen = () => {
     // Make the agent greet first, like a real call. Bare response.create makes
     // the model speak immediately off its prompt, before the caller says anything.
-    // ponytail: refine later (custom greeting instructions) — a plain trigger is enough now.
     dc.send(JSON.stringify({ type: 'response.create' }));
-    logLine('system', 'Triggered agent to speak first');
+    logLine('system', 'Triggered agent to speak first (mic muted during greeting)');
   };
   dc.onmessage = (e) => {
     let ev;
@@ -312,6 +322,17 @@ document.getElementById('startBtn').onclick = async () => {
       ev = JSON.parse(e.data);
     } catch (err) {
       return;  // non-JSON, ignore
+    }
+
+    // Track whether a response is currently generating, so we don't ask for a
+    // second one while one is in flight ("conversation already has an active response").
+    if (ev.type === 'response.created') responseActive = true;
+    if (ev.type === 'response.done') responseActive = false;
+
+    if (ev.type === 'response.done' && !micTrack.enabled) {
+      // Greeting finished — open the mic so the caller can reply.
+      micTrack.enabled = true;
+      logLine('system', 'Mic live — go ahead and talk');
     }
 
     if ((ev.type === 'response.audio_transcript.delta' ||
@@ -336,14 +357,38 @@ document.getElementById('startBtn').onclick = async () => {
       setMcpIndicator('success', item.name + ' completed' + latency);
       logLine('mcp-ok', '[MCP call done: ' + item.server_label + '/' + item.name + latency +
               ' -> ' + JSON.stringify(item.output).slice(0, 200) + ']');
+      // Realtime + hosted MCP does NOT auto-speak the tool result: the response that
+      // emitted the call already ended (response.done fires before the tool returns).
+      // Nudge a fresh response so the agent voices the result (or calls the next tool).
+      // Small delay so any auto-response OpenAI *might* start registers first, avoiding
+      // a duplicate. ponytail: harness-only — the production SIP path has no client to
+      // send this; see note in the report.
+      setTimeout(() => {
+        if (!responseActive) {
+          dc.send(JSON.stringify({ type: 'response.create' }));
+          logLine('system', 'Nudged agent to voice the tool result');
+        }
+      }, 100);
     } else if (ev.type === 'response.mcp_call.failed') {
       const ms = mcpCallStart != null ? Math.round(performance.now() - mcpCallStart) : null;
       mcpCallStart = null;
       const latency = ms != null ? ' (' + ms + 'ms)' : '';
       setMcpIndicator('failed', (ev.name || 'tool') + ' failed' + latency);
       logLine('mcp-fail', '[MCP call FAILED' + latency + ': ' + JSON.stringify(ev).slice(0, 300) + ']');
+    } else if (ev.type === 'mcp_list_tools.failed' ||
+               ev.type === 'response.mcp_list_tools.failed') {
+      // The MCP handshake (initialize + tools/list) failed — the whole tool set is
+      // unusable for this session. This is what a wrong/redirecting server_url looks like.
+      setMcpIndicator('failed', 'tool list failed');
+      logLine('mcp-fail', '[MCP HANDSHAKE FAILED: ' + JSON.stringify(ev).slice(0, 400) + ']');
     } else if (ev.type === 'error') {
       logLine('error', 'ERROR: ' + JSON.stringify(ev.error || ev));
+    } else if (/mcp|tool|function_call/i.test(ev.type)) {
+      // Any other MCP/tool-related event we don't explicitly render — surface it
+      // verbatim so tool activity is never silently invisible again.
+      logLine('mcp', '[' + ev.type + '] ' + JSON.stringify(ev).slice(0, 300));
+    } else if (DEBUG_EVENTS) {
+      logLine('system', '· ' + ev.type);  // firehose of every other event type
     }
   };
 

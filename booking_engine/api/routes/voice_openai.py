@@ -65,7 +65,10 @@ async def incoming(
 
     # Remote MCP: OpenAI calls our tool server directly with a per-call bearer
     # carrying our internal call/shop ids (distinct from OpenAI's SIP call_id).
-    mcp_url = f"{settings.public_base_url}/mcp" if settings.public_base_url else None
+    # Trailing slash is required: /mcp 307-redirects to /mcp/, and OpenAI's
+    # Realtime MCP client does not re-POST the body on the redirect (verified in
+    # fly logs: bare /mcp calls 307 and never complete). Point straight at /mcp/.
+    mcp_url = f"{settings.public_base_url}/mcp/" if settings.public_base_url else None
     mcp_token = (
         mint_call_token(shop_id=shop_id, call_id=db_call_id,
                         secret=settings.openai_tool_secret)
