@@ -184,7 +184,11 @@ class TestGetAvailableSlotChains:
             [{"staff_id": STAFF, "staff_name": "Ana"}],  # eligible leg0
             [{"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg1
             [],  # existing appointments
-            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff0 day windows
+            # staff0 window narrowed to a single 30-min slot: since the fix
+            # fully explores every leg0 candidate within a day before
+            # capping results, a full-day window here would require one
+            # mocked extend-check per half-hour slot.
+            [{"start_time": "09:00:00", "end_time": "09:30:00"}],  # staff0 day windows
             [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff1 day windows
         ]
         day = date(2026, 5, 5)
@@ -208,7 +212,9 @@ class TestGetAvailableSlotChains:
             [{"staff_id": STAFF, "staff_name": "Ana"}],  # eligible leg0 (staff_id=STAFF pinned)
             [{"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg1 (staff_id=STAFF2 pinned)
             [],  # existing appointments
-            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff0 day windows
+            # staff0 window narrowed to a single 30-min slot (see comment in
+            # test_single_day_two_legs_different_staff above).
+            [{"start_time": "09:00:00", "end_time": "09:30:00"}],  # staff0 day windows
             [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff1 day windows
         ]
         day = date(2026, 5, 5)
@@ -252,7 +258,9 @@ class TestGetAvailableSlotChains:
             [{"staff_id": STAFF, "staff_name": "Ana"}],  # eligible leg0
             [{"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg1
             existing,  # existing appointments
-            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff0 day windows
+            # staff0 window narrowed to a single 30-min slot (see comment in
+            # test_single_day_two_legs_different_staff above).
+            [{"start_time": "09:00:00", "end_time": "09:30:00"}],  # staff0 day windows
             [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff1 day windows
         ]
         day = date(2026, 5, 5)
@@ -266,6 +274,47 @@ class TestGetAvailableSlotChains:
         assert legs[0]["slot_end"] == datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
         assert legs[1]["slot_start"] == datetime(2026, 5, 5, 9, 40, tzinfo=_ROME)
         assert legs[1]["slot_end"] == datetime(2026, 5, 5, 10, 10, tzinfo=_ROME)
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_returns_earliest_chain_even_when_later_staff_is_listed_first(self, mock_exec):
+        # Staff A/Ana (listed FIRST by the eligibility query) only has a slot
+        # starting at 14:00 that day. Staff B/Bob (listed SECOND) is free
+        # starting at 09:00 — genuinely earlier. `_iter_leg0_candidates`
+        # iterates staff-major (fully exhausts Ana before trying Bob), so a
+        # search that stops the instant it has `max_results` chains would
+        # settle for Ana's later slot without ever looking at Bob's earlier
+        # one. The fix must fully explore the day (both staff) before
+        # capping results, so the earliest chain (Bob's) wins.
+        #
+        # Note: this test intentionally narrows both staff's schedule
+        # windows to a single 30-min slot each (rather than modeling "Ana
+        # busy until 14:00" via an overlapping existing appointment across a
+        # full-day window) to keep the mocked call count small — the fix
+        # calls _staff_day_windows once per leg0 candidate it tries to
+        # extend, so a wide window with many half-hour candidates would
+        # require one mocked entry per candidate. The bug being tested
+        # (staff-major iteration order) is exercised identically either way.
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30}, {"id": SVC2, "duration_minutes": 30}],  # durations
+            [{"staff_id": STAFF, "staff_name": "Ana"},
+             {"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg0: Ana first, Bob second
+            [{"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg1 (only Bob does SVC2)
+            [],  # existing appointments (none needed; availability is modeled via schedule windows)
+            [{"start_time": "14:00:00", "end_time": "14:30:00"}],  # Ana's day window (leg0 candidate gen)
+            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # Bob's window (leg1 extend, for Ana's candidate)
+            [{"start_time": "09:00:00", "end_time": "09:30:00"}],  # Bob's day window (leg0 candidate gen)
+            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # Bob's window (leg1 extend, for Bob's own candidate)
+        ]
+        day = date(2026, 5, 5)
+        result = await get_available_slot_chains(
+            SHOP, [{"service_id": SVC, "staff_id": None},
+                   {"service_id": SVC2, "staff_id": None}],
+            day, day, max_results=1,
+        )
+        assert len(result) == 1
+        # Must be Bob's 09:00 slot, not Ana's 14:00 slot.
+        assert result[0]["legs"][0]["staff_id"] == STAFF2
+        assert result[0]["legs"][0]["slot_start"] == datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
 
     @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
     async def test_unknown_service_in_chain_returns_empty(self, mock_exec):

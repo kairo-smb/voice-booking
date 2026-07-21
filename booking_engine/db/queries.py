@@ -380,9 +380,14 @@ async def get_available_slot_chains(
 
     first = services[0]
     chains: list[dict] = []
+    prev_day = None
     async for staff0, leg0_start, leg0_end in _iter_leg0_candidates(
         eligible_by_leg[0], duration_by_id[first["service_id"]], start_date, end_date, existing,
     ):
+        day = leg0_start.date()
+        if prev_day is not None and day != prev_day and len(chains) >= max_results:
+            break
+        prev_day = day
         legs = [{
             "service_id": first["service_id"], "staff_id": staff0["staff_id"],
             "staff_name": staff0["staff_name"], "slot_start": leg0_start, "slot_end": leg0_end,
@@ -396,10 +401,9 @@ async def get_available_slot_chains(
                 "slot_end": completed[-1]["slot_end"],
                 "legs": completed,
             })
-            if len(chains) >= max_results:
-                break
+
     chains.sort(key=lambda c: c["slot_start"])
-    return chains
+    return chains[:max_results]
 
 
 async def create_appointment(
