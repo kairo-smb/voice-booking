@@ -5,8 +5,6 @@ import pytest
 from pydantic import ValidationError
 
 from booking_engine.api.voice_models import (
-    VoiceConfigResponse,
-    VoiceConfigUpdateRequest,
     CallSummary,
     CallDetail,
     TranscriptTurn,
@@ -14,30 +12,6 @@ from booking_engine.api.voice_models import (
     LinkCustomerRequest,
     VoiceAnalyticsResponse,
 )
-
-VALID_LANG = {"it", "en", "es"}
-VALID_VOICES = {"alloy", "echo", "shimmer", "ash", "ballad", "coral", "sage", "verse"}
-
-
-def test_voice_config_response_minimal():
-    m = VoiceConfigResponse(is_active=True, voice="alloy", language="it")
-    assert m.welcome_message is None and m.is_active is True
-
-
-def test_voice_config_update_all_optional():
-    m = VoiceConfigUpdateRequest()
-    assert m.model_dump(exclude_unset=True) == {}
-
-
-def test_voice_config_update_language_validated():
-    with pytest.raises(ValidationError):
-        VoiceConfigUpdateRequest(language="fr")
-
-
-def test_voice_config_update_voice_validated():
-    with pytest.raises(ValidationError):
-        VoiceConfigUpdateRequest(voice="not-a-voice")
-
 
 def test_call_summary_round_trip():
     payload = {

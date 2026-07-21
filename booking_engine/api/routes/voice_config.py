@@ -32,7 +32,7 @@ class ConfigPatch(BaseModel):
     display_name: str | None = None
     greeting_after_disclosure: str | None = None
     greeting_overflow: str | None = None
-    voice_preset: str | None = Field(default=None, pattern=r"^(warm_female|neutral_female|neutral_male)$")
+    voice_preset: str | None = Field(default=None, pattern=r"^(alloy|ash|ballad|coral|echo|sage|shimmer|verse)$")
     tone_id: UUID | None = None
     business_hours: dict | None = None
     answer_mode: str | None = Field(default=None, pattern=r"^(overflow|always_on)$")

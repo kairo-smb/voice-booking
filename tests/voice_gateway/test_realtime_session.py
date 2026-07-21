@@ -15,7 +15,7 @@ def _config(**kw):
         "greeting_after_disclosure": "Sono Aria.",
         "greeting_overflow": "",
         "tone_id": None,
-        "voice_preset": "warm_female",
+        "voice_preset": "verse",
         "answer_mode": "always_on",
     }
     base.update(kw)
@@ -68,10 +68,10 @@ async def test_accept_payload_has_model_instructions_and_tools():
 async def test_accept_payload_maps_voice_preset_to_openai_voice():
     resolution = ResolutionResult(is_anonymous=False, matches=[])
     payload = await build_accept_payload(
-        config=_config(voice_preset="neutral_male"), policy=_policy(),
+        config=_config(voice_preset="ash"), policy=_policy(),
         resolution=resolution, model="gpt-realtime",
     )
-    assert payload["voice"] == "ash"  # neutral_male -> ash
+    assert payload["voice"] == "ash"
 
 
 @pytest.mark.asyncio

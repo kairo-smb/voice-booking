@@ -20,7 +20,7 @@ def _config(**overrides):
         "display_name": "Salone Lucia",
         "greeting_after_disclosure": "Sono Aria, come posso aiutarla?",
         "tone_id": None,
-        "voice_preset": "warm_female",
+        "voice_preset": "verse",
         "answer_mode": "overflow",
         "services_to_mention": [],
     }
@@ -97,10 +97,10 @@ async def test_assemble_returns_tool_descriptions():
 async def test_assemble_returns_voice_preset():
     resolution = ResolutionResult(is_anonymous=False, matches=[])
     out = await assemble_session_prompt(
-        config=_config(voice_preset="neutral_male"), policy=_policy(),
+        config=_config(voice_preset="ash"), policy=_policy(),
         resolution=resolution,
     )
-    assert out.voice == "neutral_male"
+    assert out.voice == "ash"
 
 
 @pytest.mark.asyncio

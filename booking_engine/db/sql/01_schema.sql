@@ -9,10 +9,6 @@ CREATE TABLE IF NOT EXISTS shops (
   name                TEXT            NOT NULL,
   phone_number        TEXT,
   address             TEXT,
-  welcome_message     TEXT,
-  tone_instructions   TEXT,
-  personality         TEXT,
-  special_instructions TEXT,
   is_active           BOOLEAN         NOT NULL DEFAULT true,
   created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );

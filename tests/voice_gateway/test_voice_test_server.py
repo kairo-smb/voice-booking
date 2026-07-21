@@ -9,8 +9,8 @@ from booking_engine.services.identity_resolver import ResolutionResult
 
 
 def _config():
-    return {"welcome_message": "hi", "tone_instructions": "", "personality": "",
-            "special_instructions": ""}
+    return {"display_name": "Test Salon", "voice_preset": "verse",
+            "greeting_after_disclosure": "Ciao!"}
 
 
 @pytest.fixture

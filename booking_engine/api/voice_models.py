@@ -17,26 +17,6 @@ Voice = Literal["alloy", "echo", "shimmer", "ash", "ballad", "coral", "sage", "v
 Language = Literal["it", "en", "es"]
 
 
-class VoiceConfigResponse(BaseModel):
-    welcome_message: str | None = None
-    tone_instructions: str | None = None
-    personality: str | None = None
-    special_instructions: str | None = None
-    voice: Voice
-    language: Language
-    is_active: bool
-
-
-class VoiceConfigUpdateRequest(BaseModel):
-    welcome_message: str | None = None
-    tone_instructions: str | None = None
-    personality: str | None = None
-    special_instructions: str | None = None
-    voice: Voice | None = None
-    language: Language | None = None
-    is_active: bool | None = None
-
-
 class CallSummary(BaseModel):
     id: UUID
     caller_number: str

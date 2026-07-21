@@ -14,9 +14,14 @@ from booking_engine.services.prompt_assembler import assemble_session_prompt
 
 # Our display presets -> OpenAI Realtime voices.
 _VOICE_MAP = {
-    "warm_female": "coral",
-    "neutral_female": "alloy",
-    "neutral_male": "ash",
+    "alloy": "alloy",
+    "ash": "ash",
+    "ballad": "ballad",
+    "coral": "coral",
+    "echo": "echo",
+    "sage": "sage",
+    "shimmer": "shimmer",
+    "verse": "verse",
 }
 
 
@@ -89,6 +94,6 @@ async def build_accept_payload(
         "type": "realtime",
         "model": model,
         "instructions": assembled.prompt,
-        "voice": _VOICE_MAP.get(assembled.voice, "alloy"),
+        "voice": _VOICE_MAP.get(assembled.voice, "verse"),
         "tools": tools,
     }

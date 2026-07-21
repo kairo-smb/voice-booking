@@ -130,6 +130,6 @@ async def assemble_session_prompt(
 
     return AssembledPrompt(
         prompt="\n".join(parts),
-        tools=tool_descriptions(allowlist=allowlist),
-        voice=config.get("voice_preset", "warm_female"),
+       tools=tool_descriptions(allowlist=allowlist),
+        voice=config.get("voice_preset", "verse"),
     )

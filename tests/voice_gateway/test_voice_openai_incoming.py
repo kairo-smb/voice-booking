@@ -21,7 +21,7 @@ def env(monkeypatch):
 
 def _config():
     return {"display_name": "Salone Lucia", "greeting_after_disclosure": "Ciao.",
-            "greeting_overflow": "", "tone_id": None, "voice_preset": "warm_female",
+            "greeting_overflow": "", "tone_id": None, "voice_preset": "verse",
             "answer_mode": "always_on", "enabled": True}
 
 

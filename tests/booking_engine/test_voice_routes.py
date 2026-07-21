@@ -26,59 +26,6 @@ def _app(secret: str = "test-secret") -> FastAPI:
 HEADERS = {"Authorization": "Bearer test-secret"}
 
 
-def test_get_config_unauthorized():
-    client = TestClient(_app())
-    r = client.get(f"/api/v1/shops/{uuid4()}/voice/config")
-    assert r.status_code == 401
-
-
-def test_get_config_not_found():
-    with patch.object(voice.vq, "get_voice_config", AsyncMock(return_value=None)):
-        client = TestClient(_app())
-        r = client.get(f"/api/v1/shops/{uuid4()}/voice/config", headers=HEADERS)
-        assert r.status_code == 404
-
-
-def test_get_config_ok():
-    fake = {
-        "welcome_message": "Ciao",
-        "tone_instructions": None, "personality": None, "special_instructions": None,
-        "voice": "alloy", "language": "it", "is_active": True,
-    }
-    with patch.object(voice.vq, "get_voice_config", AsyncMock(return_value=fake)):
-        client = TestClient(_app())
-        r = client.get(f"/api/v1/shops/{uuid4()}/voice/config", headers=HEADERS)
-        assert r.status_code == 200
-        assert r.json()["data"]["voice"] == "alloy"
-
-
-def test_patch_config_validates_body():
-    client = TestClient(_app())
-    r = client.patch(
-        f"/api/v1/shops/{uuid4()}/voice/config",
-        headers=HEADERS, json={"language": "fr"},
-    )
-    assert r.status_code == 422
-
-
-def test_patch_config_updates_and_returns_config():
-    fake = {
-        "welcome_message": "Aggiornato",
-        "tone_instructions": None, "personality": None, "special_instructions": None,
-        "voice": "echo", "language": "it", "is_active": True,
-    }
-    with patch.object(voice.vq, "update_voice_config",
-                      AsyncMock(return_value=fake)) as upd:
-        client = TestClient(_app())
-        r = client.patch(
-            f"/api/v1/shops/{uuid4()}/voice/config",
-            headers=HEADERS, json={"welcome_message": "Aggiornato", "voice": "echo"},
-        )
-        assert r.status_code == 200
-        assert r.json()["data"]["voice"] == "echo"
-        upd.assert_awaited_once()
-
-
 def test_list_calls_filters_passed_through():
     fake = {"items": [], "next_cursor": None}
     with patch.object(voice.vq, "list_calls",
