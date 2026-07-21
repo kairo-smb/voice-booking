@@ -8,6 +8,73 @@ stays as the record of what was true and decided at the time.
 
 ---
 
+## 2026-07-21 — SIP call supervisor: production fix for the mute-after-MCP blocker (built)
+
+**Supersedes the status of the earlier 2026-07-21 "Realtime + hosted MCP does
+NOT auto-speak tool results" entry below**, which recorded production as
+blocked and the fix as "not built here — needs its own design." It is now
+built and merged to `QA` (flag-gated off). That entry stays as the record of
+the diagnosis; this one records the fix.
+
+**Decision:** Added `booking_engine/services/call_supervisor.py` — a per-call
+**server-side Realtime control WebSocket**. On SIP accept, `voice_openai.py`
+calls `maybe_supervise(call_id, settings)`, which spawns an `asyncio` task that
+opens `wss://api.openai.com/v1/realtime?call_id=...` (confirmed mechanism: after
+`/accept` you may connect a control WS keyed by `call_id` and send/receive
+events), sends `response.create` to greet, and sends another after each
+`mcp_call` completes so the agent voices tool results instead of going mute.
+This is the server-side equivalent of the harness data-channel loop. It also
+fixes a **second** prod gap the same way: nothing previously triggered the
+opening greeting on a real call either.
+
+**Why a WS worker and not a config flag:** OpenAI's Realtime hosted-MCP does
+not auto-continue after a tool result (proven from a live event trace —
+`response.done` fires before the tool returns, then the result item is orphaned
+with no successor response), and no session setting is known to change that.
+The SIP accept path is fire-and-forget with no connection to the session, so
+the only place to inject `response.create` is a control WS we open ourselves.
+
+**Design choices worth knowing:**
+- Pure `decide(event, state)` core (greet/nudge/dedup) is the unit-testable
+  heart; `supervise()` is thin async glue with an injectable `connect=` seam so
+  tests use a fake WS (no live OpenAI). A `nudge_pending` guard triggers exactly
+  one `response.create` per tool result — a single event type
+  (`response.output_item.done`, not also `mcp_call.completed`) plus the guard
+  removes both double-nudge sources (parallel tools, duplicate events).
+- Best-effort + isolated: call audio is OpenAI↔Twilio, independent of this WS,
+  so a worker crash degrades only that call (no greeting/nudge), never drops it.
+  One reconnect on drop; `greeted` prevents re-greeting on reconnect.
+- Per-call structured stdout logging (one JSON line/event, with tool
+  `latency_ms`) for `fly logs` debugging.
+- **Gated behind `ENABLE_CALL_SUPERVISOR` (default False)** — prod path
+  unchanged until flipped.
+
+**Caught by review before merge (subagent-driven development, final
+whole-branch review):** the fire-and-forget `asyncio.create_task` return value
+was originally un-retained — asyncio holds only a *weak* reference, so the
+supervisor task could be garbage-collected mid-call (intermittently
+reintroducing the exact mute/no-greeting bug it fixes). Fixed with a
+module-level `set()` + `add_done_callback(discard)`. Also added the
+reconnect / no-re-greet / give-up / non-JSON-frame tests that the first cut
+lacked (18 supervisor tests total).
+
+**Still needed before enabling the flag:** only observable with live
+telephony — do the manual QA SIP-call check (confirm a `supervisor.greeted`
+line in `fly logs`, a greeting, and post-tool speech with `latency_ms`), then
+enable in prod. Deferred non-goals: barge-in/turn handling, post-call outcome
+capture from the event stream, DB event persistence. The `QA` merge commit is
+local as of this writing (not pushed to `origin`). Still no live inbound calls
+(Twilio unfunded).
+
+**Also fixed in passing:** the earlier trailing-slash fix (commit `f7363c2`)
+had left `tests/voice_gateway/test_voice_test_server.py` asserting the old
+`/mcp` URL; updated to `/mcp/`.
+
+- Spec: `docs/superpowers/specs/2026-07-21-sip-call-supervisor-design.md`.
+  Plan: `docs/superpowers/plans/2026-07-21-sip-call-supervisor.md`.
+- Built in worktree `.worktrees/sip-call-supervisor`, branch
+  `feat/sip-call-supervisor`, merged to `QA` (`--no-ff`).
+
 ## 2026-07-21 — Cost-gated pricing + multi-service/multi-staff bookings
 
 **Decision:** Two voice-tool refinements, built together (subagent-driven
