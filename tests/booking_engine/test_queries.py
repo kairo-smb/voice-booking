@@ -13,6 +13,7 @@ from booking_engine.db.queries import (
     SlotConflictError,
     cancel_appointment,
     create_appointment,
+    create_appointment_chain,
     create_customer,
     find_customers_by_name_and_phone,
     find_customers_by_phone,
@@ -278,3 +279,43 @@ class TestGetAvailableSlotChains:
             day, day,
         )
         assert result == []
+
+
+class TestCreateAppointmentChain:
+    @patch("booking_engine.db.queries.execute_void", new_callable=AsyncMock)
+    @patch("booking_engine.db.queries.execute_one", new_callable=AsyncMock)
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_success(self, mock_exec, mock_one, mock_void):
+        leg1_start = datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
+        leg2_start = datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30, "price_eur": Decimal("35.00")},
+             {"id": SVC2, "duration_minutes": 30, "price_eur": Decimal("20.00")}],  # durations
+            [],  # leg1 overlap check
+            [],  # leg2 overlap check
+        ]
+        mock_one.return_value = {"id": APPT, "status": "scheduled"}
+        legs = [
+            {"service_id": SVC, "staff_id": STAFF, "slot_start": leg1_start},
+            {"service_id": SVC2, "staff_id": STAFF2, "slot_start": leg2_start},
+        ]
+        result = await create_appointment_chain(SHOP, CUSTOMER, legs)
+        assert result["status"] == "scheduled"
+        assert mock_void.await_count == 3  # 1 appointment insert + 2 appointment_services inserts
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_conflict_on_second_leg(self, mock_exec):
+        leg1_start = datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
+        leg2_start = datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30, "price_eur": Decimal("35.00")},
+             {"id": SVC2, "duration_minutes": 30, "price_eur": Decimal("20.00")}],
+            [],  # leg1 overlap check: clear
+            [{"id": "existing"}],  # leg2 overlap check: conflict
+        ]
+        legs = [
+            {"service_id": SVC, "staff_id": STAFF, "slot_start": leg1_start},
+            {"service_id": SVC2, "staff_id": STAFF2, "slot_start": leg2_start},
+        ]
+        with pytest.raises(SlotConflictError):
+            await create_appointment_chain(SHOP, CUSTOMER, legs)

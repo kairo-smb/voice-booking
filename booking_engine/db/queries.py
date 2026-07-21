@@ -446,6 +446,71 @@ async def create_appointment(
     return await execute_one("SELECT * FROM business_app_core.appointments WHERE id = $1", appt_id)
 
 
+async def create_appointment_chain(
+    shop_id: UUID,
+    customer_id: UUID,
+    legs: list[dict],
+    notes: str | None = None,
+) -> dict:
+    """Create one appointment spanning `legs` (ordered
+    `{"service_id", "staff_id", "slot_start"}`, normally copied verbatim
+    from a get_available_slot_chains result), plus one appointment_services
+    row per leg with its own staff_id/start_time/duration/price — matching
+    the schema's per-service staff assignment. Raises SlotConflictError if
+    any leg's staff is no longer free.
+    """
+    svc_ids = [leg["service_id"] for leg in legs]
+    svc_rows = await execute(
+        "SELECT id, duration_minutes, price_eur FROM business_app_core.services "
+        "WHERE id = ANY($1::uuid[]) AND is_active = true",
+        svc_ids,
+    )
+    duration_by_id = {r["id"]: r["duration_minutes"] for r in svc_rows}
+    price_by_id = {r["id"]: r["price_eur"] for r in svc_rows}
+
+    resolved = []
+    for leg in legs:
+        duration = duration_by_id[leg["service_id"]]
+        resolved.append({
+            **leg,
+            "slot_end": leg["slot_start"] + timedelta(minutes=duration),
+            "duration_minutes": duration,
+            "price_eur": price_by_id[leg["service_id"]],
+        })
+
+    for leg in resolved:
+        overlap = await execute(
+            "SELECT id FROM business_app_core.appointments "
+            "WHERE staff_id = $1 AND status NOT IN ('cancelled', 'no_show') "
+            "AND start_time < $2 AND end_time > $3",
+            leg["staff_id"], leg["slot_end"], leg["slot_start"],
+        )
+        if overlap:
+            raise SlotConflictError("Time slot conflicts with existing appointment")
+
+    appt_id = uuid4()
+    first, last = resolved[0], resolved[-1]
+    await execute_void(
+        "INSERT INTO business_app_core.appointments "
+        "(id, shop_id, customer_id, staff_id, start_time, end_time, status, notes, created_at) "
+        "VALUES ($1, $2, $3, $4, $5, $6, 'scheduled', $7, NOW())",
+        appt_id, shop_id, customer_id, first["staff_id"],
+        first["slot_start"], last["slot_end"], notes,
+    )
+    for leg in resolved:
+        await execute_void(
+            "INSERT INTO business_app_core.appointment_services "
+            "(appointment_id, service_id, staff_id, start_time, duration_minutes, price_eur) "
+            "VALUES ($1, $2, $3, $4, $5, $6)",
+            appt_id, leg["service_id"], leg["staff_id"], leg["slot_start"],
+            leg["duration_minutes"], float(leg["price_eur"]) if leg["price_eur"] else None,
+        )
+
+    return await execute_one(
+        "SELECT * FROM business_app_core.appointments WHERE id = $1", appt_id,
+    )
+
+
 async def list_appointments(
     shop_id: UUID,
     customer_id: UUID | None = None,
