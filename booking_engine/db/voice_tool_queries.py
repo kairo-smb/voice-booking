@@ -218,21 +218,35 @@ async def insert_booking_locked(
             raise RuntimeError("invalid_staff")
         raise RuntimeError("invalid_customer")
 
-    svc_ids = [leg["service_id"] for leg in legs]
-    durations = await connection.execute(
-        "SELECT id, duration_minutes FROM business_app_core.services "
-        "WHERE id = ANY($1::uuid[])",
-        svc_ids,
-    )
-    duration_by_id = {d["id"]: d["duration_minutes"] for d in durations}
-    out_legs = [
-        {
-            "service_id": leg["service_id"], "staff_id": leg["staff_id"],
-            "slot_start": leg["slot_start"],
-            "slot_end": leg["slot_start"] + timedelta(minutes=duration_by_id[leg["service_id"]]),
-        }
-        for leg in legs
-    ]
+    if len(legs) == 1:
+        leg = legs[0]
+        out_legs = [{
+            "service_id": leg["service_id"], "staff_id": row["staff_id"],
+            "slot_start": row["start_time"], "slot_end": row["end_time"],
+        }]
+    else:
+        svc_ids = [leg["service_id"] for leg in legs]
+        durations = await connection.execute(
+            "SELECT id, duration_minutes FROM business_app_core.services "
+            "WHERE id = ANY($1::uuid[])",
+            svc_ids,
+        )
+        duration_by_id = {d["id"]: d["duration_minutes"] for d in durations}
+        # .get(..., 0) rather than a crashing [] lookup: the booking itself
+        # already succeeded (create_appointment_chain resolved durations
+        # correctly before the insert) — a service deleted in the narrow
+        # window between that insert and this re-fetch should degrade the
+        # reported slot_end for that one leg, not crash a response for an
+        # appointment that was already created.
+        out_legs = [
+            {
+                "service_id": leg["service_id"], "staff_id": leg["staff_id"],
+                "slot_start": leg["slot_start"],
+                "slot_end": leg["slot_start"] + timedelta(
+                    minutes=duration_by_id.get(leg["service_id"], 0)),
+            }
+            for leg in legs
+        ]
     return {
         "id": row["id"],
         "slot_start": out_legs[0]["slot_start"],
