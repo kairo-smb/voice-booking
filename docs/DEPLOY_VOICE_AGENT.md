@@ -70,15 +70,15 @@ SHOP_ID='<existing shop UUID>'
 H="Authorization: Bearer $SECRET"
 
 # 1. Auth required
-curl -s -o /dev/null -w '%{http_code} (expect 401)\n' "$URL/api/v1/shops/$SHOP_ID/voice/config"
+curl -s -o /dev/null -w '%{http_code} (expect 401)\n' "$URL/api/v1/voice/config/$SHOP_ID"
 
-# 2. Read config (expect 200 with defaults: voice=alloy, language=it)
-curl -s -H "$H" "$URL/api/v1/shops/$SHOP_ID/voice/config" | jq
+# 2. Read config (expect 200 with shop_config row, voice_preset defaults to verse)
+curl -s -H "$H" "$URL/api/v1/voice/config/$SHOP_ID" | jq
 
 # 3. Update config
 curl -s -H "$H" -H 'Content-Type: application/json' \
-  -X PATCH "$URL/api/v1/shops/$SHOP_ID/voice/config" \
-  -d '{"welcome_message":"Smoke test"}' | jq
+  -X PATCH "$URL/api/v1/voice/config/$SHOP_ID" \
+  -d '{"greeting_after_disclosure":"Smoke test"}' | jq
 
 # 4. List calls (expect empty)
 curl -s -H "$H" "$URL/api/v1/shops/$SHOP_ID/voice/calls" | jq
@@ -89,7 +89,7 @@ curl -s -H "$H" "$URL/api/v1/shops/$SHOP_ID/voice/analytics" | jq
 
 Pass criteria:
 - Step 1 returns `401`.
-- Steps 2 and 3 return `{ "data": { ... } }` with the expected voice/language values.
+- Steps 2 and 3 return `{ "data": { ... } }` with the expected shop_config values.
 - Steps 4 and 5 return `{ "data": [...] | {...} }` with empty/zeroed shapes.
 
 ## 6. Hand off to the webapp deploy

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from booking_engine.api.deps import require_control_plane_token
 from booking_engine.db.voice_config_queries import get_config, upsert_config
 from booking_engine.db.voice_telephony_queries import get_telephony
-from booking_engine.db.voice_tone_queries import get_tone_by_id
+from booking_engine.db.voice_tone_queries import get_tone_by_id, list_preset_tones
 from booking_engine.services.phone_normalize import digits_only
 
 router = APIRouter(prefix="/voice/config", tags=["voice-config"])
@@ -43,6 +43,13 @@ class ConfigPatch(BaseModel):
     auto_topup_enabled: bool | None = None
     auto_topup_threshold_tokens: int | None = Field(default=None, ge=0)
     auto_topup_package_id: UUID | None = None
+
+
+@router.get("/tones")
+async def list_tones(
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict[str, Any]:
+    return {"data": await list_preset_tones()}
 
 
 @router.get("/{shop_id}")

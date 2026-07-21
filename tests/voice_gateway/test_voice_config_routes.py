@@ -18,6 +18,20 @@ def stub_secret(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_tones_returns_presets():
+    with patch("booking_engine.api.routes.voice_config.list_preset_tones",
+               new=AsyncMock(return_value=[
+                   {"id": str(uuid4()), "name": "warm", "is_preset": True},
+               ])):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get("/api/v1/voice/config/tones", headers=AUTH)
+            assert r.status_code == 200
+            assert r.json()["data"][0]["name"] == "warm"
+
+
+@pytest.mark.asyncio
 async def test_get_config_returns_existing():
     shop_id = uuid4()
     with patch("booking_engine.api.routes.voice_config.get_config",

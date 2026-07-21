@@ -8,6 +8,76 @@ stays as the record of what was true and decided at the time.
 
 ---
 
+## 2026-07-21 — Reviewed voice-config WIP commit; found and closed a missing-migration gap for tone_id
+
+**Context:** commit `1c45663` ("wip: remove voice preset/language fields from
+voice config") was committed earlier the same day marked "full review still
+pending" — removing the legacy `shops.welcome_message/tone_instructions/
+personality/special_instructions` columns and the old
+`/shops/{id}/voice/config` endpoints in favor of `voice_agent.shop_config` +
+`voice_agent.voice_tones`. This entry is that review.
+
+**The core removal was correct** — endpoints, field mapping, and
+`voice_preset` vocabulary (alloy/ash/ballad/coral/echo/sage/shimmer/verse)
+all matched the intended shape. Smaller issues fixed alongside: a stray
+indentation bug in `prompt_assembler.py`; `docs/DEPLOY_VOICE_AGENT.md`'s
+smoke test still curling the removed endpoint; added the missing
+`GET /voice/config/tones` route (the DB query `list_preset_tones()` existed,
+nothing routed to it — needed for the webapp tone picker).
+
+**The real finding: `tone_id` had no migration behind it and would have
+crashed on first use.** `voice_config.py`'s `ConfigPatch`/`_PATCHABLE_FIELDS`
+and `prompt_assembler.py` already assumed `shop_config.tone_id` (a UUID FK
+into `voice_agent.voice_tones`) existed. It didn't — migration 04 only ever
+created `shop_config.tone_preset text DEFAULT 'warm'`, and no `voice_tones`
+table was ever defined in any committed migration. `upsert_config` builds
+its SQL from whatever field names it's given, so any PATCH setting `tone_id`
+would fail with "column does not exist"; reads would always silently return
+`None` and fall back to the default tone. This was invisible because the
+only tests for it (`test_migration_06.py`, `test_voice_tones_db.py` — a
+fully-specified spec for exactly this gap, evidently written earlier and
+never acted on) require a live `DATABASE_URL` and had been skipping locally
+this whole time.
+
+**Fixed by writing the missing `06_voice_tones.sql`** to match those tests'
+exact expectations (8 seeded presets: professionale, amichevole, efficiente,
+luxury, tecnico, casual, empatico, conciso). Also added
+`10_shop_config_voice_preset_default.sql` (the `voice_preset` column default
+was still the pre-rename `'warm_female'`).
+
+**Before writing migration 06 against real Neon, checked the actual QA
+schema first — good thing, because it had already drifted.** Someone had
+previously added `voice_tones` + `shop_config.tone_id` directly against QA
+(presumably via Neon MCP, same as this session), seeded with the correct 8
+presets, but as a **plain full `UNIQUE(name)` index**, not the partial
+`UNIQUE(name) WHERE is_preset` index this migration file originally assumed.
+Running the file as originally written would have hit the exact
+"no unique or exclusion constraint matching the ON CONFLICT specification"
+bug class recorded in the 2026-07-18 entry below — caught before running
+anything by inspecting `information_schema`/`pg_indexes` on QA first, not by
+trial and error against production data. Rewrote the migration to match the
+already-live shape (full unique index, `description NOT NULL`, `is_preset
+DEFAULT true`) instead of imposing a redundant second index. Verified
+against a local Postgres both fresh and in a reconstructed copy of QA's
+exact drifted state (table pre-existing, `tone_preset` not yet dropped)
+before touching real data.
+
+**Applied to the real QA branch** (`br-damp-recipe-agnys6xk`): confirmed
+`tone_preset` dropped, `tone_id` intact on the one existing shop_config row
+(pointing at a real tone someone had already set manually), preset count
+still exactly 8 (no duplicates from re-seeding), `voice_preset` backfilled
+from `warm_female` to `verse`.
+
+**Companion webapp changes** (separate repo, own commit): swapped all
+callers off the removed endpoint, fixed `VoiceShopConfig`'s type (was still
+declaring the pre-rename `voice_preset` enum and a fictional `tone_preset`
+field — the Settings tab's voice dropdown and tone picker were both
+non-functional), added the tone picker UI, converged a second dead
+duplicate of the config UI (the Inbox "Configuration" tab, independently
+broken the same way) onto the same working component, and fixed the
+onboarding wizard writing its welcome-message step into the now-dead
+`shops` columns instead of `shop_config.greeting_after_disclosure`.
+
 ## 2026-07-21 — SIP call supervisor: production fix for the mute-after-MCP blocker (built)
 
 **Supersedes the status of the earlier 2026-07-21 "Realtime + hosted MCP does
