@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Spawn a per-call server-side Realtime control WebSocket (greeting + voice
     # tool results). Off by default; enable per environment for live SIP calls.
     enable_call_supervisor: bool = False
+    # Log full raw Realtime events (transcripts, MCP args/output) instead of
+    # just type/tool/latency. Debug-only — off by default so real call logs
+    # don't carry conversation content; flip on for a QA test session.
+    call_supervisor_verbose_logging: bool = False
 
     model_config = {"env_prefix": ""}
 

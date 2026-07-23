@@ -84,12 +84,6 @@ async def create_session(body: SessionRequest) -> JSONResponse:
         model=settings.openai_realtime_model,
         mcp_server_url=_QA_MCP_URL, mcp_token=mcp_token,
     )
-    # /v1/realtime/client_secrets rejects the flat "voice" field build_accept_payload
-    # produces for the SIP /accept endpoint — confirmed live: "Unknown parameter:
-    # 'session.voice'". Nest it under audio.output.voice instead.
-    voice = payload.pop("voice", None)
-    if voice:
-        payload["audio"] = {"output": {"voice": voice}}
     session = await create_ephemeral_session(
         session_config=payload, api_key=settings.openai_api_key,
     )

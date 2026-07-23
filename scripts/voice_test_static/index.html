@@ -238,6 +238,17 @@ let pc = null;
 let agentLineEl = null;  // the <div> currently accumulating the agent's in-progress transcript
 let mcpCallStart = null;  // performance.now() when the current MCP call went in flight
 let responseActive = false;  // true while a Realtime response is generating
+let nudgePending = false;  // true from when we send a nudge until response.created confirms it landed
+
+// A bare {"type": "response.create"} just says "your turn" — with no signal
+// about WHY, the model can produce an empty/non-committal turn instead of
+// voicing the tool result. response.create's optional `response.instructions`
+// overrides session instructions for just this one response, so the nudge
+// can say explicitly what it wants. Mirrors call_supervisor.py's server-side
+// nudge (the production equivalent of this harness-only loop).
+const NUDGE_INSTRUCTIONS = 'Lo strumento ha appena restituito un risultato. ' +
+  'Comunicalo subito al cliente a voce con una frase breve e naturale, oppure ' +
+  'prosegui con il prossimo passo della prenotazione. Non restare in silenzio.';
 
 function logLine(cls, text) {
   const el = document.getElementById('log');
@@ -326,7 +337,7 @@ document.getElementById('startBtn').onclick = async () => {
 
     // Track whether a response is currently generating, so we don't ask for a
     // second one while one is in flight ("conversation already has an active response").
-    if (ev.type === 'response.created') responseActive = true;
+    if (ev.type === 'response.created') { responseActive = true; nudgePending = false; }
     if (ev.type === 'response.done') responseActive = false;
 
     if (ev.type === 'response.done' && !micTrack.enabled) {
@@ -363,12 +374,24 @@ document.getElementById('startBtn').onclick = async () => {
       // Small delay so any auto-response OpenAI *might* start registers first, avoiding
       // a duplicate. ponytail: harness-only — the production SIP path has no client to
       // send this; see note in the report.
-      setTimeout(() => {
-        if (!responseActive) {
-          dc.send(JSON.stringify({ type: 'response.create' }));
-          logLine('system', 'Nudged agent to voice the tool result');
-        }
-      }, 100);
+      // nudgePending is set immediately (not inside the timeout) so two tool
+      // completions landing within the same 100ms window dedupe into one
+      // nudge instead of both scheduling a send — mirrors call_supervisor.py's
+      // nudge_pending guard, which the same class of race motivated there.
+      if (!responseActive && !nudgePending) {
+        nudgePending = true;
+        setTimeout(() => {
+          // If responseActive is true here, response.created already fired and
+          // reset nudgePending itself — nothing to do, no send needed.
+          if (!responseActive) {
+            dc.send(JSON.stringify({
+              type: 'response.create',
+              response: { instructions: NUDGE_INSTRUCTIONS },
+            }));
+            logLine('system', 'Nudged agent to voice the tool result');
+          }
+        }, 100);
+      }
     } else if (ev.type === 'response.mcp_call.failed') {
       const ms = mcpCallStart != null ? Math.round(performance.now() - mcpCallStart) : null;
       mcpCallStart = null;
@@ -382,6 +405,10 @@ document.getElementById('startBtn').onclick = async () => {
       setMcpIndicator('failed', 'tool list failed');
       logLine('mcp-fail', '[MCP HANDSHAKE FAILED: ' + JSON.stringify(ev).slice(0, 400) + ']');
     } else if (ev.type === 'error') {
+      // If our nudge itself was rejected (e.g. a response was already active),
+      // don't leave nudgePending stuck true for the rest of the call — that
+      // would silently suppress every future nudge after just one rejection.
+      nudgePending = false;
       logLine('error', 'ERROR: ' + JSON.stringify(ev.error || ev));
     } else if (/mcp|tool|function_call/i.test(ev.type)) {
       // Any other MCP/tool-related event we don't explicitly render — surface it

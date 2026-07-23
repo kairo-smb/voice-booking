@@ -1,15 +1,21 @@
-from booking_engine.services.call_supervisor import SupervisorState, decide
+from booking_engine.services.call_supervisor import (
+    SupervisorState, _NUDGE_INSTRUCTIONS, decide,
+)
 
 _TOOL_DONE = {
     "type": "response.output_item.done",
     "item": {"type": "mcp_call", "name": "get_services", "id": "mcp_1", "output": "{}"},
 }
 
+# The post-tool nudge carries explicit instructions (unlike the bare greeting
+# response.create) so the model doesn't have to infer why it was nudged.
+_NUDGE_EVENT = {"type": "response.create", "response": {"instructions": _NUDGE_INSTRUCTIONS}}
+
 
 def test_decide_nudges_after_tool_when_idle():
     state = SupervisorState(response_active=False)
     out = decide(_TOOL_DONE, state)
-    assert out == [{"type": "response.create"}]
+    assert out == [_NUDGE_EVENT]
     assert state.nudge_pending is True
 
 
@@ -22,7 +28,7 @@ def test_decide_dedupes_two_tool_completions_into_one_nudge():
     state = SupervisorState(response_active=False)
     first = decide(_TOOL_DONE, state)
     second = decide(_TOOL_DONE, state)  # before any response.created
-    assert first == [{"type": "response.create"}]
+    assert first == [_NUDGE_EVENT]
     assert second == []
 
 
@@ -37,6 +43,14 @@ def test_decide_response_done_marks_idle():
     state = SupervisorState(response_active=True)
     assert decide({"type": "response.done"}, state) == []
     assert state.response_active is False
+
+
+def test_decide_error_clears_stuck_nudge_pending():
+    # A rejected response.create (e.g. "already has an active response")
+    # must not permanently suppress every later nudge in the call.
+    state = SupervisorState(response_active=False, nudge_pending=True)
+    assert decide({"type": "error", "error": {"message": "..."}}, state) == []
+    assert state.nudge_pending is False
 
 
 def test_decide_ignores_non_mcp_output_item_done():
@@ -82,6 +96,27 @@ def test_log_record_plain_event():
     assert rec == {"call_id": "call_A", "event": "response.created"}
 
 
+def test_log_record_verbose_includes_full_raw_event():
+    ev = {"type": "response.output_audio_transcript.done", "transcript": "Ciao, come posso aiutarla?"}
+    rec = log_record("call_A", ev, SupervisorState(), verbose=True)
+    assert rec["transcript"] == "Ciao, come posso aiutarla?"
+    assert rec["call_id"] == "call_A"
+    assert rec["event"] == "response.output_audio_transcript.done"
+
+
+def test_log_record_verbose_keeps_computed_tool_latency():
+    state = SupervisorState()
+    added = {"type": "response.output_item.added",
+             "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services"}}
+    done = {"type": "response.output_item.done",
+            "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}}
+    log_record("call_A", added, state, verbose=True)
+    rec = log_record("call_A", done, state, verbose=True)
+    assert rec["tool"] == "get_services"
+    assert isinstance(rec["latency_ms"], int)
+    assert rec["item"]["output"] == "{}"  # raw event still present alongside computed fields
+
+
 import json
 import pytest
 from booking_engine.services.call_supervisor import supervise
@@ -123,10 +158,10 @@ async def test_supervise_greets_then_nudges_after_tool():
          "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}},
     ])
     await supervise("call_A", "key", connect=_connect_returning(ws))
-    # First sent event is the greeting; last is the post-tool nudge.
+    # First sent event is the bare greeting; last is the instructed nudge.
     assert ws.sent[0] == {"type": "response.create"}
-    assert ws.sent[-1] == {"type": "response.create"}
-    assert ws.sent.count({"type": "response.create"}) == 2
+    assert ws.sent[-1] == _NUDGE_EVENT
+    assert len(ws.sent) == 2
 
 
 async def test_supervise_dedupes_parallel_tool_completions():
@@ -139,7 +174,7 @@ async def test_supervise_dedupes_parallel_tool_completions():
     ])
     await supervise("call_A", "key", connect=_connect_returning(ws))
     # greeting + exactly one nudge (second completion suppressed by nudge_pending)
-    assert ws.sent.count({"type": "response.create"}) == 2
+    assert ws.sent == [{"type": "response.create"}, _NUDGE_EVENT]
 
 
 import asyncio
@@ -147,9 +182,10 @@ from booking_engine.services import call_supervisor as cs
 
 
 class _Settings:
-    def __init__(self, enabled):
+    def __init__(self, enabled, verbose=False):
         self.enable_call_supervisor = enabled
         self.openai_api_key = "key"
+        self.call_supervisor_verbose_logging = verbose
 
 
 def test_maybe_supervise_spawns_when_enabled(monkeypatch):
@@ -171,6 +207,24 @@ def test_maybe_supervise_spawns_when_enabled(monkeypatch):
     monkeypatch.setattr(cs.asyncio, "create_task", _fake_create_task)
     cs.maybe_supervise("call_A", _Settings(enabled=True))
     assert len(spawned) == 1
+
+
+def test_maybe_supervise_passes_verbose_flag_through(monkeypatch):
+    spawned = []
+
+    class _FakeTask:
+        def add_done_callback(self, cb):
+            pass
+
+    def _fake_create_task(coro):
+        spawned.append(coro)
+        return _FakeTask()
+
+    monkeypatch.setattr(cs.asyncio, "create_task", _fake_create_task)
+    cs.maybe_supervise("call_A", _Settings(enabled=True, verbose=True))
+    assert len(spawned) == 1
+    assert spawned[0].cr_frame.f_locals["verbose"] is True
+    spawned[0].close()  # never actually run, just bound — avoid a real connect attempt
 
 
 def test_maybe_supervise_skips_when_disabled(monkeypatch):
@@ -241,7 +295,7 @@ async def test_supervise_reconnects_once_and_does_not_regreet():
     await supervise("call_A", "key", connect=_connect)
     # Attempt 1 greeted then dropped; attempt 2 must NOT re-greet, only nudge.
     assert drop_ws.sent == [{"type": "response.create"}]   # greeting on attempt 1
-    assert good_ws.sent == [{"type": "response.create"}]   # nudge only, no re-greet
+    assert good_ws.sent == [_NUDGE_EVENT]   # nudge only, no re-greet
 
 
 async def test_supervise_gives_up_after_two_connect_failures():
@@ -261,4 +315,4 @@ async def test_supervise_skips_non_json_frame():
     ])
     await supervise("call_A", "key", connect=_connect_returning(ws))
     # Greeting + one nudge; the bad frame was skipped without crashing.
-    assert ws.sent.count({"type": "response.create"}) == 2
+    assert ws.sent == [{"type": "response.create"}, _NUDGE_EVENT]

@@ -26,6 +26,19 @@ class SupervisorState:
     tool_started_at: dict[str, float] = field(default_factory=dict)
 
 
+# A bare {"type": "response.create"} just says "your turn" — with no signal
+# about WHY, the model can produce an empty/non-committal turn instead of
+# voicing the tool result (suspected contributor to intermittent silence
+# after a tool call). response.create's optional `response.instructions`
+# overrides session instructions for just this one response, so the nudge
+# can say explicitly what it wants without touching the session prompt.
+_NUDGE_INSTRUCTIONS = (
+    "Lo strumento ha appena restituito un risultato. Comunicalo subito al "
+    "cliente a voce con una frase breve e naturale, oppure prosegui con il "
+    "prossimo passo della prenotazione. Non restare in silenzio."
+)
+
+
 def decide(event: dict, state: SupervisorState) -> list[dict]:
     """Pure decision core: mutate response/nudge state, return client events to send."""
     etype = event.get("type")
@@ -36,15 +49,28 @@ def decide(event: dict, state: SupervisorState) -> list[dict]:
     if etype == "response.done":
         state.response_active = False
         return []
+    if etype == "error":
+        # If our own nudge was rejected (e.g. a response was already active),
+        # don't leave nudge_pending stuck true for the rest of the call — that
+        # would silently suppress every future nudge after just one rejection.
+        state.nudge_pending = False
+        return []
     if etype == "response.output_item.done" and (event.get("item") or {}).get("type") == "mcp_call":
         if not state.response_active and not state.nudge_pending:
             state.nudge_pending = True
-            return [{"type": "response.create"}]
+            return [{"type": "response.create",
+                     "response": {"instructions": _NUDGE_INSTRUCTIONS}}]
     return []
 
 
-def log_record(call_id: str, event: dict, state: SupervisorState) -> dict:
-    """Build one structured log line; track/compute MCP tool latency as a side effect."""
+def log_record(call_id: str, event: dict, state: SupervisorState, *, verbose: bool = False) -> dict:
+    """Build one structured log line; track/compute MCP tool latency as a side effect.
+
+    verbose=True (debug/test only, see ``call_supervisor_verbose_logging``)
+    includes the full raw event — transcripts, MCP arguments/output, whatever
+    OpenAI sent — instead of just type/tool/latency. Off by default so real
+    call logs don't carry conversation content.
+    """
     etype = event.get("type")
     item = event.get("item") or {}
     rec: dict = {"call_id": call_id, "event": etype}
@@ -56,6 +82,8 @@ def log_record(call_id: str, event: dict, state: SupervisorState) -> dict:
         started = state.tool_started_at.pop(item.get("id"), None)
         if started is not None:
             rec["latency_ms"] = round((time.monotonic() - started) * 1000)
+    if verbose:
+        rec = {**event, **rec}
     return rec
 
 
@@ -70,7 +98,7 @@ def _default_connect(call_id: str, api_key: str):
     )
 
 
-async def supervise(call_id: str, api_key: str, *, connect=_default_connect) -> None:
+async def supervise(call_id: str, api_key: str, *, connect=_default_connect, verbose: bool = False) -> None:
     """Own one call's control WS: greet on connect, voice tool results, log events.
 
     Best-effort and isolated: call audio flows OpenAI<->Twilio independently of
@@ -90,7 +118,7 @@ async def supervise(call_id: str, api_key: str, *, connect=_default_connect) -> 
                         event = json.loads(raw)
                     except (ValueError, TypeError):
                         continue
-                    logger.info(json.dumps(log_record(call_id, event, state)))
+                    logger.info(json.dumps(log_record(call_id, event, state, verbose=verbose)))
                     for client_ev in decide(event, state):
                         await ws.send(json.dumps(client_ev))
             return  # clean close: the call ended
@@ -107,6 +135,7 @@ _running_tasks: set[asyncio.Task] = set()
 def maybe_supervise(call_id: str, settings) -> None:
     """Spawn the supervisor task when enabled and we have a call id. No-op otherwise."""
     if call_id and getattr(settings, "enable_call_supervisor", False):
-        task = asyncio.create_task(supervise(call_id, settings.openai_api_key))
+        verbose = getattr(settings, "call_supervisor_verbose_logging", False)
+        task = asyncio.create_task(supervise(call_id, settings.openai_api_key, verbose=verbose))
         _running_tasks.add(task)
         task.add_done_callback(_running_tasks.discard)

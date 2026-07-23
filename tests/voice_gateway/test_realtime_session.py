@@ -5,7 +5,7 @@ import pytest
 
 from booking_engine.services.identity_resolver import ResolutionResult
 from booking_engine.services.realtime_session import (
-    build_accept_payload, shop_id_from_sip_headers, to_realtime_tools,
+    build_accept_payload, build_sip_uri, shop_id_from_sip_headers, to_realtime_tools,
 )
 
 
@@ -49,6 +49,16 @@ def test_shop_id_from_sip_headers_none_when_absent():
     assert shop_id_from_sip_headers([{"name": "From", "value": "x"}]) is None
 
 
+def test_build_sip_uri_uses_twilio_custom_header_query_syntax():
+    # Twilio's documented <Dial><Sip> convention for custom SIP headers is a
+    # query string after the host, which Twilio translates into a real
+    # X-Shop-Id header on the INVITE it sends OpenAI. Params before "@" are
+    # neither valid bare SIP URI syntax nor what Twilio parses.
+    shop_id = "5e0b3ecf-c85f-478f-9369-859c419e7df0"
+    uri = build_sip_uri(shop_id, "proj_abc")
+    assert uri == "sip:proj_abc@sip.api.openai.com?X-Shop-Id=5e0b3ecf-c85f-478f-9369-859c419e7df0"
+
+
 @pytest.mark.asyncio
 async def test_accept_payload_has_model_instructions_and_tools():
     resolution = ResolutionResult(is_anonymous=False, matches=[])
@@ -71,7 +81,39 @@ async def test_accept_payload_maps_voice_preset_to_openai_voice():
         config=_config(voice_preset="ash"), policy=_policy(),
         resolution=resolution, model="gpt-realtime",
     )
-    assert payload["voice"] == "ash"
+    assert payload["audio"]["output"]["voice"] == "ash"
+
+
+@pytest.mark.asyncio
+async def test_accept_payload_sets_semantic_vad_with_interrupt_response():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    payload = await build_accept_payload(
+        config=_config(), policy=_policy(), resolution=resolution,
+        model="gpt-realtime",
+    )
+    turn_detection = payload["audio"]["input"]["turn_detection"]
+    assert turn_detection["type"] == "semantic_vad"
+    assert turn_detection["interrupt_response"] is True
+
+
+@pytest.mark.asyncio
+async def test_accept_payload_omits_input_transcription_by_default():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    payload = await build_accept_payload(
+        config=_config(), policy=_policy(), resolution=resolution,
+        model="gpt-realtime",
+    )
+    assert "transcription" not in payload["audio"]["input"]
+
+
+@pytest.mark.asyncio
+async def test_accept_payload_adds_input_transcription_when_enabled():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    payload = await build_accept_payload(
+        config=_config(), policy=_policy(), resolution=resolution,
+        model="gpt-realtime", enable_input_transcription=True,
+    )
+    assert payload["audio"]["input"]["transcription"]["model"]
 
 
 @pytest.mark.asyncio

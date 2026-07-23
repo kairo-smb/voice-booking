@@ -79,6 +79,7 @@ async def incoming(
         config=config, policy=policy, resolution=resolution,
         model=settings.openai_realtime_model,
         mcp_server_url=mcp_url, mcp_token=mcp_token,
+        enable_input_transcription=settings.call_supervisor_verbose_logging,
     )
     ok = await accept_sip_call(
         call_id=call_id, payload=payload, api_key=settings.openai_api_key,

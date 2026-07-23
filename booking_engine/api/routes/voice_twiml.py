@@ -20,6 +20,7 @@ from booking_engine.config import Settings, get_settings
 from booking_engine.db.voice_config_queries import get_config
 from booking_engine.db.voice_telephony_queries import get_telephony_by_kairo_number
 from booking_engine.services.phone_normalize import digits_only
+from booking_engine.services.realtime_session import build_sip_uri
 from booking_engine.services.token_meter import decide_session
 
 logger = logging.getLogger(__name__)
@@ -44,10 +45,7 @@ def _say_unavailable() -> Response:
 
 
 def _dial_sip(shop_id: UUID, settings: Settings) -> Response:
-    sip_uri = (
-        f"sip:{settings.openai_sip_project_id};X-Shop-Id={shop_id}"
-        f"@sip.api.openai.com"
-    )
+    sip_uri = build_sip_uri(shop_id, settings.openai_sip_project_id)
     return _wrap(f"<Dial><Sip>{sip_uri}</Sip></Dial>")
 
 

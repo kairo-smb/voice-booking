@@ -196,3 +196,44 @@ Tool endpoints under `{public_base_url}/voice/tools/*` with `Authorization: Bear
 ### No new migrations — uses tables from Plan A's migration 04
 
 All tables (`voice_agent.calls`, `voice_agent.auth_events`, `voice_agent.callback_memos`, `customers`, `appointments`, etc.) were created by the Plan A migration `04_voice_agent_v2.sql`.
+
+## Testing over real SIP, no Twilio required (2026-07-22)
+
+`scripts/voice_test_server.py`'s browser/WebRTC harness is convenient but is a
+different transport than production (real calls arrive over SIP). You don't
+need a working Twilio number to test the real SIP path — OpenAI's SIP gateway
+accepts a call from *any* SIP client dialed straight at the project's SIP URI,
+which fires the exact same `realtime.call.incoming` webhook
+(`booking_engine/api/routes/voice_openai.py`) a Twilio-forwarded call would.
+This is the QA webhook already registered in the OpenAI dashboard, so it's
+safe to test against freely (writes land on the QA Neon branch).
+
+1. Install any SIP softphone that supports TLS, e.g. [Linphone](https://www.linphone.org/en/) (GUI) or `pjsua` (CLI, ships with `pjproject`).
+2. Get the OpenAI SIP project ID from the OpenAI dashboard (Project → Settings → SIP) — it's the same value stored as the `OPENAI_SIP_PROJECT_ID` Fly secret on `kairo-booking-engine-qa`, not readable back out of Fly.
+3. Get a shop UUID from the QA Neon branch (any row in `voice_agent.shop_config`, or your local `DEMO_SHOP_ID`).
+4. Get the dial target and header:
+   ```bash
+   set -a; source .env; set +a
+   python scripts/print_sip_test_uri.py <shop_id>
+   ```
+   This prints two things — **they are not the same mechanism**:
+   - A bare dial URI: `sip:{OPENAI_SIP_PROJECT_ID}@sip.api.openai.com;transport=tls`
+   - A custom header to send alongside it: `X-Shop-Id: {shop_id}`
+
+   For a **real Twilio call**, `voice_twiml.py::_dial_sip` (via `realtime_session.py::build_sip_uri`) passes the shop id as `sip:{project}@host?X-Shop-Id={shop_id}` — Twilio's documented `<Dial><Sip>` convention for custom headers (query string *after* the host). Twilio itself translates that into a real `X-Shop-Id` SIP header on the INVITE it sends OpenAI, which `shop_id_from_sip_headers()` reads back out.
+
+   **A raw softphone/pjsua dial gets none of that translation** — there's no Twilio in the path to do it. Dialing the bare URI alone will reach OpenAI and exercise the prompt/tools/model config, but **without a real `X-Shop-Id` header attached, the call has no shop to route to** and will get rejected before ringing. To attach it yourself:
+   - Check if your pjsua build supports it: `pjsua --help | grep -i header`. If so, add it as a real header (e.g. `--add-header "X-Shop-Id: <uuid>"` — confirm exact flag syntax against your build, it's changed across PJSIP versions).
+   - If unsupported, a GUI softphone with a "custom headers" field per-account (some do) is the alternative.
+
+   (Historical note: this whole SIP-test-doc section originally had `X-Shop-Id` embedded *before* the `@` — `sip:{project};X-Shop-Id={shop_id}@host` — which is neither valid bare SIP URI syntax nor Twilio's actual convention. A live raw SIP test call caught it: OpenAI echoed back a `To` header built from it that pjsip couldn't even parse. Since Twilio has never been funded/tested live, this was a real, never-exercised bug in `_dial_sip` too, not just a doc error — fixed in `build_sip_uri` alongside this doc.)
+5. Watch `fly logs -a kairo-booking-engine-qa` for the call.
+
+**Note:** `ENABLE_CALL_SUPERVISOR` is currently off on QA (not in `fly secrets list`), so the agent will greet-and-go-mute-after-tools per the known gap (see CLAUDE.md, "Realtime + hosted MCP does NOT auto-speak tool results"). To also verify the supervisor fix (still pending its first live check per CLAUDE.md) and see full debug output — agent + caller transcripts, MCP tool arguments/output, every raw event — set both flags for the test session:
+```bash
+fly secrets set ENABLE_CALL_SUPERVISOR=true CALL_SUPERVISOR_VERBOSE_LOGGING=true --app kairo-booking-engine-qa
+# test call, then: fly logs -a kairo-booking-engine-qa
+# confirm a "supervisor.greeted" line, post-tool speech, and full event content in each log line
+fly secrets unset ENABLE_CALL_SUPERVISOR CALL_SUPERVISOR_VERBOSE_LOGGING --app kairo-booking-engine-qa
+```
+`CALL_SUPERVISOR_VERBOSE_LOGGING` does two things: logs the full raw event (not just type/tool/latency), and turns on `audio.input.transcription` so the caller's speech is transcribed too (normally off — nothing in production reads it). Keep this off outside a deliberate debug session: it puts full conversation content into `fly logs`.

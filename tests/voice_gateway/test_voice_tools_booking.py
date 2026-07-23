@@ -46,6 +46,46 @@ async def test_check_availability_returns_chains():
 
 
 @pytest.mark.asyncio
+async def test_check_availability_treats_blank_staff_id_as_no_preference():
+    """OpenAI's function-calling sometimes sends "" for an optional field
+    instead of omitting it. Root cause of a real 422 observed in QA logs:
+    Pydantic rejected UUID("") instead of treating it as "no preference"."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    sid = uuid4()
+    with patch("booking_engine.api.routes.voice_tools_booking.find_availability",
+               new=AsyncMock(return_value=[])) as find_mock:
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/check_availability",
+                headers=AUTH,
+                json={"services": [{"service_id": str(sid), "staff_id": ""}]},
+            )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    _, kwargs = find_mock.call_args
+    assert kwargs["services"][0]["staff_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_check_availability_treats_blank_preferred_when_as_none():
+    sid = uuid4()
+    with patch("booking_engine.api.routes.voice_tools_booking.find_availability",
+               new=AsyncMock(return_value=[])) as find_mock:
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/check_availability",
+                headers=AUTH,
+                json={"services": [{"service_id": str(sid)}], "preferred_when": ""},
+            )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    _, kwargs = find_mock.call_args
+    assert kwargs["preferred_when"] is None
+
+
+@pytest.mark.asyncio
 async def test_check_availability_multi_service_returns_chain_with_two_legs():
     now = datetime.now(timezone.utc).replace(microsecond=0)
     leg1_start = now + timedelta(days=1, hours=13)
@@ -407,6 +447,38 @@ async def test_create_booking_rejects_past_slot():
 def _owner_ok(shop, cust, start_at):
     return {"shop_id": shop, "customer_id": cust,
             "phones": ["+39 333 111 0000"], "start_at": start_at}
+
+
+@pytest.mark.asyncio
+async def test_modify_booking_treats_blank_new_service_id_as_no_change():
+    """Same "" -> optional-field footgun as check_availability's staff_id."""
+    call_id, shop, cust, appt = uuid4(), uuid4(), uuid4(), uuid4()
+    far = datetime.now(timezone.utc) + timedelta(days=5)
+    modify = AsyncMock(return_value=True)
+    with patch("booking_engine.api.routes.voice_tools_booking.get_call",
+               new=AsyncMock(return_value={
+                   "id": call_id, "shop_id": shop,
+                   "caller_number": "+39 333 111 0000", "customer_id": cust})), \
+         patch("booking_engine.api.routes.voice_tools_booking.get_appointment_owner",
+               new=AsyncMock(return_value=_owner_ok(shop, cust, far))), \
+         patch("booking_engine.api.routes.voice_tools_booking.modify_appointment",
+               new=modify), \
+         patch("booking_engine.api.routes.voice_tools_booking.log_auth_event",
+               new=AsyncMock()):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/modify_booking",
+                headers=_booking_auth_headers(call_id),
+                json={"appointment_id": str(appt),
+                      "new_slot_start": (datetime.now(timezone.utc)
+                                         + timedelta(days=4)).isoformat(),
+                      "new_service_id": ""},
+            )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    _, kwargs = modify.call_args
+    assert kwargs["new_service_id"] is None
 
 
 @pytest.mark.asyncio
