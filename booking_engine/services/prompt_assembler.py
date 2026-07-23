@@ -40,10 +40,7 @@ DEFAULT_TONE_INSTRUCTION = (
 
 def _default_overflow_greeting(display_name: str) -> str:
     who = display_name or "il salone"
-    return (
-        f"Salve, sono l'assistente di {who}. In questo momento non possiamo "
-        "rispondere di persona, ma posso aiutarla io con la prenotazione."
-    )
+    return f"Salve, sono l'assistente di {who}. Come posso aiutarla?"
 
 
 def _greeting(config: dict[str, Any]) -> str:

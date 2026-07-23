@@ -168,8 +168,9 @@ async def test_overflow_mode_defaults_when_greeting_overflow_empty():
         config=_config(answer_mode="overflow", greeting_overflow=""),
         policy=_policy(), resolution=resolution,
     )
-    # default overflow greeting acknowledges the salon can't pick up right now
-    assert "non possiamo rispondere" in out.prompt.lower()
+    # default overflow greeting is short, names the shop, and asks how it can help
+    assert 'FRASE DI BENVENUTO: "Salve, sono l\'assistente di Salone Lucia. ' \
+           'Come posso aiutarla?"' in out.prompt
 
 
 @pytest.mark.asyncio
