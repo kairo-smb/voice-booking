@@ -80,6 +80,13 @@ DEFAULT_TOOL_ALLOWLIST = [
 ]
 
 
+# The tools the ATTESA rule above requires a spoken waiting phrase before.
+# execute_tool() enforces a minimum response latency for exactly these, so
+# the filler phrase is never immediately followed by a suspiciously instant
+# answer.
+ATTESA_TOOLS = {"check_availability", "get_services", "lookup_customer", "get_booking"}
+
+
 _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "lookup_customer": {
         "name": "lookup_customer",
