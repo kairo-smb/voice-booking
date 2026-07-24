@@ -13,7 +13,7 @@ Caller (phone) → Twilio (TwiML) → OpenAI Realtime API (native SIP, STT/LLM/T
 ```
 
 **Booking Engine** (`booking_engine/`) — the only deployed service. A FastAPI app that:
-- serves the plain REST API (shops, staff, services, customers, availability, appointments) against the shared `business_app_core` Neon schema — read/write boundaries are documented in `docs/INTEGRATION_GUIDE.md`;
+- serves the plain REST API (shops, staff, services, customers, availability, appointments) against the shared `business_app_core` Neon schema — read/write boundaries are documented in `docs/knowledge/database.md`;
 - accepts inbound Twilio calls (`voice_twiml.py`), dials them via `<Dial><Sip>` straight into OpenAI's native SIP gateway, and handles the `realtime.call.incoming` webhook (`voice_openai.py`) to accept the call with the assembled session prompt + tool config;
 - exposes 12 authz'd voice tools (`/voice/tools/*`) that OpenAI calls over MCP, mounted in-process at `/mcp` — tool dispatch never leaves the process (see `booking_engine/mcp_server.py`, `booking_engine/services/mcp_tools.py`);
 - persists calls, transcripts, and voice-specific config in its own `voice_agent` schema (DDL in `booking_engine/db/sql/`), while treating `business_app_core` as ground truth it never alters.
@@ -35,9 +35,8 @@ booking_engine/
 scripts/                # local dev/test harnesses — see each script's docstring
 tests/                  # pytest suite; tests/live_db/* needs a real DATABASE_URL
 fly.toml / fly.qa.toml  # Fly.io app configuration (prod / QA)
-docs/
-├── DEPLOY_VOICE_AGENT.md   # deploy steps, env vars, live-SIP test walkthrough
-└── INTEGRATION_GUIDE.md    # DB ownership contract with the separate webapp (Control Plane) repo
+docs/knowledge/         # human-oriented docs site (Docsify) — architecture, database,
+                        # voice-agent logic, providers, operations, API reference
 ```
 
 ## Quickstart
@@ -63,7 +62,7 @@ uvicorn booking_engine.api.app:create_app --factory --port 8000
 
 ### 4. Test a call without a phone
 
-See `docs/DEPLOY_VOICE_AGENT.md` ("Testing over real SIP, no Twilio required") for dialing the real OpenAI SIP path with a softphone, or use one of the local harnesses:
+See `docs/knowledge/operations.md` ("Testing a real call without a phone") for dialing the real OpenAI SIP path with a softphone, or use one of the local harnesses:
 
 ```bash
 # Browser/WebRTC harness (mic + speakers, mints a real session)
@@ -96,12 +95,12 @@ flyctl deploy --config fly.toml      # production
 flyctl deploy --config fly.qa.toml   # QA
 ```
 
-See `docs/DEPLOY_VOICE_AGENT.md` for env vars, secrets, and the post-deploy smoke test.
+See `docs/knowledge/operations.md` for env vars, secrets, and the post-deploy smoke test.
 
 ### Cost
 
 $0 idle: Fly.io free tier (auto-stop machines) + Neon free tier. Usage-based costs: Twilio (per-minute + number rental), OpenAI Realtime (per-minute).
 
-## History and decisions
+## Documentation
 
-`CLAUDE.md` is the running log of architectural decisions, incidents, and what's still open — read it before making non-trivial changes.
+`docs/knowledge/` is a [Docsify](https://docsify.js.org/) site covering architecture, the database ownership contract, voice-agent domain logic, providers, operations, and the full API reference — `npx --yes serve docs/knowledge` to browse it. `CLAUDE.md` is the running log of architectural decisions, incidents, and what's still open — read it before making non-trivial changes.
