@@ -15,6 +15,26 @@ Two schemas in one Neon Postgres database:
 
 **Do not hand-copy `business_app_core`'s schema into a doc.** That has already gone stale and caused real bugs at least twice (`CLAUDE.md` §2026-07-24 "Repo cleanup..." and the schema-mismatch history it references). The accurate, current mapping is `booking_engine/db/queries.py`, exercised against real Neon-shaped data by `tests/live_db/*`. Read that file for column names, not this one.
 
+### `business_app_core` write contract, by table
+
+This isn't schema (column names) — it's the write-boundary contract, which is far more stable and doesn't share the drift risk above. Verified directly against `booking_engine/db/queries.py`'s actual queries, not carried over from an old doc:
+
+| Table | This repo's access |
+|---|---|
+| `shops`, `staff`, `services`, `staff_services`, `staff_schedules` | Read-only (all filtered `is_active = true`) |
+| `customers` | Read + Create |
+| `phone_contacts` | Read + Create/Upsert |
+| `appointments` | Read + Create + Cancel (reschedule = atomic cancel-old + create-new) |
+| `appointment_services` | Read + Create (via appointment) |
+
+The Control Plane (`webapp`) has full CRUD on all of the above except `appointments`, where it additionally owns every status transition this repo doesn't make (see below) — full detail on Control Plane's own side lives in that repo, not here.
+
+**`appointments.status` lifecycle:** `scheduled → confirmed → completed`, with `cancelled`/`no_show` reachable from `scheduled`/`confirmed` (confirmed via `queries.py`'s `status IN ('scheduled', 'confirmed')` checks before cancel, and `status NOT IN ('cancelled', 'no_show')` when computing availability). **This repo only ever writes `scheduled` (on create) or `cancelled` (on cancel/reschedule)** — `confirmed`, `completed`, and `no_show` are Control Plane-only transitions.
+
+**Never insert an appointment without an overlap check on `(staff_id, time range)`, excluding `cancelled`/`no_show` rows** — `create_appointment`/`create_appointment_chain` in `queries.py` do this inside the same transaction as the insert (`_overlaps_existing`). Any new write path into `appointments` must replicate this or risk double-booking a staff member.
+
+**Other stable conventions:** soft deletes via `is_active = false` (never hard-delete a row with dependent appointments); timezone is hardcoded `Europe/Rome` for all slot calculations (`ZoneInfo("Europe/Rome")` in `queries.py`); IDs are Postgres-generated (`gen_random_uuid()`), never assigned by application code.
+
 ## `voice_agent` schema — authoritative here
 
 DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `10_shop_config_voice_preset_default.sql`, applied in filename order. `01_schema.sql`/`02_seed_data.sql` are a **separate, local-only bootstrap pair** with fake data and unqualified table names — `scripts/migrate.sh` explicitly skips both; never run them against real Neon.
