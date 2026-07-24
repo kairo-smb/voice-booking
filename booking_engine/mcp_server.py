@@ -21,6 +21,18 @@ from booking_engine.services.mcp_tools import TOOL_DEFS, execute_tool
 
 _server: Server = Server("kairo")
 
+# Set by create_app() once /mcp and /voice/tools are both mounted on it. Lets
+# _call_tool dispatch to /voice/tools/{name} in-process (ASGITransport) instead
+# of a real outbound HTTPS call to the app's own public URL — that self-hop was
+# root-caused (real QA logs + call graph trace) as a fresh TCP+TLS handshake on
+# every single tool call, a major contributor to the dead air during tool use.
+_app_ref = None
+
+
+def set_app(app) -> None:
+    global _app_ref
+    _app_ref = app
+
 
 @_server.list_tools()
 async def _list_tools() -> list[types.Tool]:
@@ -42,7 +54,7 @@ async def _call_tool(name: str, arguments: dict) -> list[types.ContentBlock]:
     result = await execute_tool(
         name, arguments, token=token,
         secret=settings.openai_tool_secret,
-        base_url=settings.public_base_url,
+        app=_app_ref,
     )
     return [types.TextContent(type="text", text=json.dumps(result))]
 

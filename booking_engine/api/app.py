@@ -57,8 +57,9 @@ def create_app() -> FastAPI:
 
     # Remote MCP server for OpenAI Realtime tool calls (session manager is run
     # by the production entrypoint's lifespan, see booking_engine/asgi.py).
-    from booking_engine.mcp_server import mcp_asgi
+    from booking_engine.mcp_server import mcp_asgi, set_app
     app.mount("/mcp", mcp_asgi)
+    set_app(app)
 
     @app.get("/health")
     async def health():

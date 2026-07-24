@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 
@@ -42,6 +43,11 @@ async def incoming(
     call_id = data.get("call_id")
     headers = data.get("sip_headers", [])
     shop_id = shop_id_from_sip_headers(headers)
+    if not shop_id and settings.sip_test_fallback_shop_id:
+        # Raw SIP test call (e.g. a softphone dialing OpenAI directly, no
+        # Twilio in the path to translate a header in) — only ever set on QA.
+        shop_id = UUID(settings.sip_test_fallback_shop_id)
+        logger.info("openai.incoming: no X-Shop-Id header, using test fallback shop %s", shop_id)
     if not call_id or not shop_id:
         logger.warning("openai.incoming: missing call_id/shop_id headers=%s", headers)
         return {"status": "unroutable"}

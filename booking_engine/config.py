@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # just type/tool/latency. Debug-only — off by default so real call logs
     # don't carry conversation content; flip on for a QA test session.
     call_supervisor_verbose_logging: bool = False
+    # Fallback shop for a raw SIP test call with no X-Shop-Id header (Twilio
+    # normally adds that header for us; a bare softphone dial has no such
+    # translation). Empty by default — production calls without a shop id
+    # are still rejected as unroutable; only set this on QA for manual testing.
+    sip_test_fallback_shop_id: str = ""
 
     model_config = {"env_prefix": ""}
 

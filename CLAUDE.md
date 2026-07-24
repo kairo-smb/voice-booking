@@ -8,6 +8,53 @@ stays as the record of what was true and decided at the time.
 
 ---
 
+## 2026-07-24 — Root-caused session "dead air": tool calls were self-proxying over real HTTPS
+
+**Finding (from real QA Fly logs + a call-graph trace, not a guess):** a live
+SIP test call's access log showed every `/voice/tools/{name}` route
+responding in under a second on its own, yet 20-36s gaps between successive
+tool invocations across the session — pointing at per-call overhead rather
+than DB query time. Traced the call graph from `mcp_server.py::_call_tool`
+down: `execute_tool()` was invoked with `base_url=settings.public_base_url`,
+meaning that on **every single tool call** (all 12 tools, not just the
+ATTESA-gated ones), the app made a real outbound HTTPS request to its own
+public Fly URL to reach a route defined in the exact same running process —
+`/mcp` and `/voice/tools/*` are mounted on the same `FastAPI` app
+(`booking_engine/api/app.py`). Worse, `execute_tool` opens a fresh
+`httpx.AsyncClient` per call (no connection pooling across calls), so this
+paid a full TCP+TLS handshake, every time, on top of whatever Fly's
+edge/proxy hairpin routing added to reach "itself." This is architecture-wide
+dead air, not a one-tool problem — it explains why the whole session felt
+uniformly sluggish rather than one specific tool being slow.
+
+**Fix:** `execute_tool()` already had an in-process fast path
+(`ASGITransport(app=app)`) — every existing test already used it, production
+never did. `booking_engine/mcp_server.py` now holds a module-level reference
+to the live app (`set_app()`, called once from `create_app()` right after
+`app.mount("/mcp", mcp_asgi)`), and `_call_tool` passes `app=_app_ref`
+instead of `base_url=`. Tool dispatch is now a direct in-process ASGI call —
+same code path tests already exercised, zero new dependency, no behavior
+change to auth/constraint logic (still the same `/voice/tools/{name}`
+handlers). `settings.public_base_url` is untouched elsewhere (still used to
+build the URL OpenAI dials for `/mcp/` itself).
+
+**Not chased further (no evidence either way):** the same log trace showed
+`get_services` called twice, 2s apart, in one session. Access logs have no
+request bodies, so there's no way to tell from this evidence alone whether
+that's a legitimate filter-refinement follow-up call or a duplicate — flagged
+for awareness, not treated as a bug.
+
+**Bundled into the same commit** (per-owner instruction, matching the
+established pattern this session of committing verified parallel work
+together): an unrelated, already-complete, already-tested change from a
+separate concurrent effort — `SIP_TEST_FALLBACK_SHOP_ID` (`booking_engine/config.py`,
+`voice_openai.py`) lets a raw softphone SIP test call route to a fixed shop
+when there's no `X-Shop-Id` header (Twilio normally adds that header when
+proxying; a bare SIP client dialing OpenAI directly has no such translation
+layer). QA-only (empty by default; production calls with no shop id are
+still rejected as unroutable). Pairs with the already-committed
+`scripts/run_sip_test.sh` / `scripts/print_sip_test_uri.py`.
+
 ## 2026-07-21 — Reviewed voice-config WIP commit; found and closed a missing-migration gap for tone_id
 
 **Context:** commit `1c45663` ("wip: remove voice preset/language fields from
