@@ -26,7 +26,7 @@ One deployed service — `booking_engine`, a FastAPI app (`booking_engine/api/ap
 
 ## Auth boundaries
 
-Three distinct secrets gate three distinct callers — see [API overview](api/README.md) for the full breakdown:
+Four distinct auth schemes across the surface — see [API overview](api/README.md) for the full breakdown:
 - `CONTROL_PLANE_SECRET` — the separate `webapp` Control Plane repo, reading/writing voice config, calls, analytics, telephony provisioning.
 - `OPENAI_TOOL_SECRET` — OpenAI's Realtime tool/event calls (`/voice/tools/*`, `/voice/events/*`), and the MCP mount.
 - Twilio request-signature verification (`TWILIO_AUTH_TOKEN`) — the TwiML webhook only.
