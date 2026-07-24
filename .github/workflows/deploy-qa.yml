@@ -119,69 +119,30 @@ jobs:
           neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" \
             || echo "::warning::Failed to delete ephemeral branch $CI_BRANCH — manual cleanup needed"
 
-  promote-qa:
-    name: Refresh and migrate real QA branch
+  migrate-via-webapp:
+    # The webapp repo is the PARENT that owns migration application for the
+    # shared Neon DB. This repo no longer restores/migrates the shared QA branch
+    # itself; it asks webapp's migrate-qa workflow to reset + apply ALL schemas
+    # (business_app_core → voice_agent → market_intel) and waits for it, so the
+    # QA app below never deploys ahead of its schema.
+    name: Apply DB migrations via webapp (parent)
     needs: [unit, validate-on-tmp-branch]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
-      NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
-      NEON_PROD_BRANCH: ${{ vars.NEON_PROD_BRANCH || 'production' }}
-      NEON_QA_BRANCH: ${{ vars.NEON_QA_BRANCH || 'QA' }}
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Guard - Neon settings must be set
-        run: |
-          missing=0
-          for name in NEON_API_KEY NEON_PROJECT_ID NEON_PROD_BRANCH NEON_QA_BRANCH; do
-            if [ -z "${!name}" ]; then
-              echo "::error::${name} is not set."
-              missing=1
-            fi
-          done
-          exit "${missing}"
-
-      - name: Install Neon CLI
-        run: |
-          curl -fsSL https://github.com/neondatabase/neon-pkgs/releases/latest/download/neonctl-linux-x64 -o /tmp/neonctl
-          chmod +x /tmp/neonctl
-          sudo mv /tmp/neonctl /usr/local/bin/neonctl
-          neonctl --version
-
-      - name: Restore QA branch from production
-        run: |
-          neonctl branches restore "${NEON_QA_BRANCH}" "${NEON_PROD_BRANCH}" \
-            --project-id "${NEON_PROJECT_ID}"
-
-      - name: Guard - QA database URL must be set
-        run: |
-          if [ -z "${DATABASE_URL}" ]; then
-            echo "::error::QA_DATABASE_URL secret is not set."
-            exit 1
-          fi
-        env:
-          DATABASE_URL: ${{ secrets.QA_DATABASE_URL }}
-
-      - name: Install PostgreSQL 17 client
-        run: |
-          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client-17
-
-      - name: Apply migrations to QA
-        run: |
-          export PATH="/usr/lib/postgresql/17/bin:$PATH"
-          chmod +x scripts/migrate.sh
-          ./scripts/migrate.sh
-        env:
-          DATABASE_URL: ${{ secrets.QA_DATABASE_URL }}
+      - name: Dispatch webapp QA migration and wait
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: migrate-qa.yml
+          repo: kairo-smb/webapp
+          ref: QA
+          token: ${{ secrets.WEBAPP_MIGRATE_DISPATCH_TOKEN }}
+          wait-for-completion: true
+          wait-for-completion-timeout: 20m
 
   deploy-qa:
     name: Deploy QA
-    needs: promote-qa
+    needs: migrate-via-webapp
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
