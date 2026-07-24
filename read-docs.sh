@@ -1,0 +1,1 @@
+npx --yes serve docs/knowledge
