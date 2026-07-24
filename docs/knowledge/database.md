@@ -36,7 +36,7 @@ The Control Plane (`webapp`) has full CRUD on all of the above except `appointme
 
 **IDs are generated in Python** (`uuid4()`, `booking_engine/db/queries.py`), passed explicitly into every INSERT — not `gen_random_uuid()` at the database level (that convention is what the *bootstrap-only* `01_schema.sql` uses for its own tables, and does not describe how this repo's code actually writes to real `business_app_core`).
 
-**Other stable conventions:** soft deletes via `is_active = false` (never hard-delete a row with dependent appointments); timezone is hardcoded `Europe/Rome` for all slot calculations (`ZoneInfo("Europe/Rome")` in `queries.py`); IDs are Postgres-generated (`gen_random_uuid()`), never assigned by application code.
+**Other stable conventions:** soft deletes via `is_active = false` (never hard-delete a row with dependent appointments); timezone is hardcoded `Europe/Rome` for all slot calculations (`ZoneInfo("Europe/Rome")` in `queries.py`).
 
 ## `voice_agent` schema — authoritative here
 
