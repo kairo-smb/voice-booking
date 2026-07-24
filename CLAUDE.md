@@ -44,6 +44,34 @@ request bodies, so there's no way to tell from this evidence alone whether
 that's a legitimate filter-refinement follow-up call or a duplicate — flagged
 for awareness, not treated as a bug.
 
+**Follow-up caught by asking "will this hold up under real concurrency?"
+before shipping:** `ASGITransport` has no built-in timeout, unlike the real
+HTTP transport it replaced — `httpx.AsyncClient`'s default 5s timeout had
+been an *incidental* safety net for a stuck downstream call, and removing
+the HTTP hop silently removed it too. Under real concurrent load (many
+phone calls competing for the DB pool at once — see watch-item below) a
+genuinely stuck call would previously abort after ~5s; after this fix, as
+first written, it would have hung that tool call — and that phone call —
+forever, with nothing to recover it. Closed by wrapping the dispatch in
+`asyncio.wait_for(..., timeout=TOOL_CALL_TIMEOUT_SECONDS)` (10s,
+`booking_engine/services/mcp_tools.py`), returning a clean
+`{"ok": false, "error": "tool_timeout"}` instead. Test forces a stuck
+downstream call and asserts the clean timeout rather than a hang.
+
+**Flagged, not actioned — next scaling knob to check:** `pool_max_size=10`
+on the asyncpg pool (`booking_engine/db/connection.py`) and the QA Fly
+machine's `concurrency.hard_limit=250` requests are unrelated to this fix
+and unchanged by it, but worth knowing about together: `pool.acquire()` has
+no timeout configured anywhere in this codebase, so if concurrent call
+volume ever exceeds ~10 phone calls simultaneously mid-tool-call, the 11th+
+would queue for a connection with no bound — the same
+`TOOL_CALL_TIMEOUT_SECONDS` wait_for above would still catch that particular
+hang, but the pool itself would still be a real contention point worth
+sizing deliberately once there's real traffic data to size it against. Not
+urgent now — Twilio is still unfunded, no live call volume yet — but the
+first thing to look at if "many calls in parallel" ever stops being
+hypothetical.
+
 **Bundled into the same commit** (per-owner instruction, matching the
 established pattern this session of committing verified parallel work
 together): an unrelated, already-complete, already-tested change from a

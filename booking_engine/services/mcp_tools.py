@@ -23,6 +23,13 @@ from booking_engine.services.safety_layer import (
 # "un attimo che controllo…" would sound fake.
 MIN_CHECK_LATENCY_SECONDS = 0.8
 
+# The in-process ASGI dispatch below has no built-in timeout (unlike the real
+# HTTP transport it replaced, which had an incidental ~5s httpx default) — a
+# stuck downstream call (e.g. DB pool exhaustion under concurrent load) would
+# otherwise hang this tool call, and the phone call, forever. Generous margin
+# over any real DB round trip, but bounded so a stuck call fails cleanly.
+TOOL_CALL_TIMEOUT_SECONDS = 10.0
+
 # Tool metadata for MCP tools/list (name, description, inputSchema).
 TOOL_DEFS: list[dict[str, Any]] = [
     {
@@ -60,16 +67,22 @@ async def execute_tool(
     else:
         client_kwargs = {"base_url": base_url or ""}
     start = time.monotonic()
-    async with AsyncClient(**client_kwargs) as c:
-        r = await c.post(
-            f"/voice/tools/{name}",
-            headers={
-                "Authorization": f"Bearer {secret}",
-                "X-Shop-Id": claims["shop_id"],
-                "X-Call-Id": claims["call_id"],
-            },
-            json=arguments or {},
-        )
+    try:
+        async with AsyncClient(**client_kwargs) as c:
+            r = await asyncio.wait_for(
+                c.post(
+                    f"/voice/tools/{name}",
+                    headers={
+                        "Authorization": f"Bearer {secret}",
+                        "X-Shop-Id": claims["shop_id"],
+                        "X-Call-Id": claims["call_id"],
+                    },
+                    json=arguments or {},
+                ),
+                timeout=TOOL_CALL_TIMEOUT_SECONDS,
+            )
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "tool_timeout"}
     if name in ATTESA_TOOLS:
         remaining = MIN_CHECK_LATENCY_SECONDS - (time.monotonic() - start)
         if remaining > 0:

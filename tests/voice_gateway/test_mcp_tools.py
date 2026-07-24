@@ -1,6 +1,7 @@
 """MCP tool executor: token-gated proxy to the /voice/tools endpoints."""
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -65,6 +66,28 @@ async def test_execute_tool_pads_fast_check_tool_to_min_latency():
     sleep_mock.assert_awaited_once()
     (delay,), _ = sleep_mock.call_args
     assert 0 < delay <= MIN_CHECK_LATENCY_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_times_out_cleanly_on_stuck_downstream_call(monkeypatch):
+    """In-process dispatch (ASGITransport) has no built-in timeout, unlike the
+    real-HTTP path it replaced — a hung downstream call (e.g. DB pool
+    exhaustion under concurrent load) must fail cleanly, not hang the tool
+    call, and the phone call, forever."""
+    monkeypatch.setattr(
+        "booking_engine.services.mcp_tools.TOOL_CALL_TIMEOUT_SECONDS", 0.05)
+    shop, call = uuid4(), uuid4()
+    token = mint_call_token(shop_id=shop, call_id=call, secret=SECRET)
+
+    async def _hang(*args, **kwargs):
+        await asyncio.sleep(10)
+        return []
+
+    with patch("booking_engine.api.routes.voice_tools_catalog.list_services",
+               new=AsyncMock(side_effect=_hang)):
+        res = await execute_tool(
+            "get_services", {}, token=token, secret=SECRET, app=create_app())
+    assert res == {"ok": False, "error": "tool_timeout"}
 
 
 @pytest.mark.asyncio
