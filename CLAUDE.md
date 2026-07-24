@@ -6,6 +6,19 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## Documentation
+
+Human-oriented docs (architecture, database, voice-agent logic, providers,
+operations, API reference) live in `docs/knowledge/` — a Docsify site, `npx
+--yes serve docs/knowledge` to browse. This file stays what it already is:
+the append-only decision/incident history. `docs/knowledge/decisions.md` is
+a short index into it, kept in sync by hand.
+
+**Any change that adds, removes, or changes a REST/voice-tool endpoint, a
+database table, a provider integration, or a safety/authz/booking-constraint
+rule updates the matching `docs/knowledge/*.md` file in the same change** —
+not as a follow-up. See `docs/knowledge/README.md` for the full rule.
+
 ---
 
 ## 2026-07-24 — Repo cleanup: deleted dead docs/scripts, rewrote two stale docs, closed a dependency drift
