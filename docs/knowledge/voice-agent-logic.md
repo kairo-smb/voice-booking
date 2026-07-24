@@ -38,9 +38,9 @@ Pure functions, no DB access, shared by create/modify/cancel:
 
 **Known gap, not fixed:** legs within one `create_booking` request are validated against existing DB rows individually, but never against *each other* — nothing stops two legs in the same request assigning the same staff member to overlapping times if the model sent a fabricated (not copied-from-`check_availability`) `legs` array (`CLAUDE.md` §2026-07-21, "Cost-gated pricing...").
 
-## Prompt assembly (`prompt_assembler.py`)
+## Prompt assembly
 
-Four layers composed in order into the session prompt sent on `session.started`:
+Source: `prompt_assembler.py`. Four layers composed in order into the session prompt sent on `session.started`:
 1. **Layer 3 — `SAFETY_PROMPT`** (above), immutable.
 2. **Caller context** — built from `identity_resolver.py`'s `ResolutionResult`: anonymous caller ID → greet neutrally, ask for name + spoken phone number; unique phone match → greet by name, mention last visit / notes; multiple customers share this number → ask who the booking is for before proceeding; no match → treat as a new caller, only create a customer record once a name is confirmed.
 3. **Layer 1 — shop identity** — `display_name`, and a greeting: `answer_mode == "overflow"` shops use `greeting_overflow` (falling back to a generated default `"Salve, sono l'assistente di {name}. Come posso aiutarla?"` if the shop hasn't written one) since they're standing in for busy staff; other shops use `greeting_after_disclosure` with no code fallback (shop-authored, via the webapp).
