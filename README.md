@@ -1,52 +1,43 @@
-# Virtual Assistant — Voice Booking System
+# Kairo Voice Booking — Booking Engine
 
-AI-powered real-time voice assistant for appointment booking, built with FastAPI, Neon PostgreSQL, and OpenAI Realtime API.
+AI-powered real-time voice assistant for appointment booking, built with FastAPI, Neon PostgreSQL, and the OpenAI Realtime API. Single Fly.io service; no separate gateway.
 
 ## Architecture
 
 ```
-Customer (browser/WebRTC) ←→ OpenAI Realtime API (voice + LLM)
-                                    ↕ function calls
-                              Voice Gateway (Fly.io)
-                                    ↕ HTTPS
-                              Booking Engine (Fly.io)
-                                    ↕ SQL
-                              Neon PostgreSQL (serverless)
+Caller (phone) → Twilio (TwiML) → OpenAI Realtime API (native SIP, STT/LLM/TTS)
+                                          ↕ MCP tool calls (in-process ASGI, /mcp)
+                                    Booking Engine (Fly.io)
+                                          ↕ SQL (asyncpg)
+                                    Neon PostgreSQL (serverless)
 ```
 
-**Booking Engine** — Stateless REST API for shops, staff, services, customers, availability, and appointments. Backed by Neon PostgreSQL via asyncpg. Deployed on Fly.io with auto-stop machines ($0 idle).
+**Booking Engine** (`booking_engine/`) — the only deployed service. A FastAPI app that:
+- serves the plain REST API (shops, staff, services, customers, availability, appointments) against the shared `business_app_core` Neon schema — read/write boundaries are documented in `docs/INTEGRATION_GUIDE.md`;
+- accepts inbound Twilio calls (`voice_twiml.py`), dials them via `<Dial><Sip>` straight into OpenAI's native SIP gateway, and handles the `realtime.call.incoming` webhook (`voice_openai.py`) to accept the call with the assembled session prompt + tool config;
+- exposes 12 authz'd voice tools (`/voice/tools/*`) that OpenAI calls over MCP, mounted in-process at `/mcp` — tool dispatch never leaves the process (see `booking_engine/mcp_server.py`, `booking_engine/services/mcp_tools.py`);
+- persists calls, transcripts, and voice-specific config in its own `voice_agent` schema (DDL in `booking_engine/db/sql/`), while treating `business_app_core` as ground truth it never alters.
 
-**Voice Gateway** — Generates ephemeral OpenAI Realtime API tokens with session config (tools, voice, VAD) and proxies function calls from the browser to the Booking Engine. Deployed on Fly.io with auto-stop machines ($0 idle).
+Deployed on Fly.io with auto-stop machines ($0 idle). QA and production are separate Fly apps (`fly.toml` / `fly.qa.toml`), both built from the same `booking_engine/Dockerfile.fly`.
 
-**OpenAI Realtime API** — Handles STT, LLM reasoning, TTS, and voice activity detection natively via WebRTC. The browser connects directly to OpenAI for audio streaming.
-
-## Project Structure
+## Project structure
 
 ```
-booking_engine/          # REST API (FastAPI + Neon PostgreSQL)
-├── api/routes/          # Shops, customers, services, availability, appointments
-├── db/                  # asyncpg connection pool + queries
-│   └── sql/             # Schema DDL + seed data
-├── config.py            # Settings (DATABASE_URL, pool sizes)
-├── requirements.txt     # Service dependencies
-└── Dockerfile.fly       # Fly.io container image
+booking_engine/
+├── api/routes/       # REST + voice webhook + voice tool endpoints
+├── services/         # safety_layer, prompt_assembler, booking_authz, call_supervisor, ...
+├── db/                # asyncpg pool + queries
+│   └── sql/           # voice_agent schema migrations (03+; 01/02 are a local-only bootstrap pair)
+├── clients/           # OpenAI Realtime, Twilio numbers, push notifications
+├── config.py          # Settings (env vars)
+└── Dockerfile.fly      # Fly.io image
 
-voice_gateway/           # Realtime API gateway (FastAPI)
-├── api/routes/
-│   └── realtime.py      # Token generation + function call proxy
-├── clients/
-│   └── booking_client.py # Booking Engine HTTP client
-├── static/
-│   └── index.html       # WebRTC phone-call UI
-├── config.py            # Settings (BOOKING_ENGINE_URL, OPENAI_KEY)
-├── requirements.txt     # Service dependencies
-└── Dockerfile           # Fly.io container image
-
-fly.toml                 # Fly.io app configuration
-scripts/
-├── setup_neon.sh        # Initialize Neon database (schema + seed)
-├── migrate.sh           # Apply booking_engine/db/sql migrations to a Neon branch
-└── deploy-voice.sh      # Deploy Voice Gateway to Fly.io
+scripts/                # local dev/test harnesses — see each script's docstring
+tests/                  # pytest suite; tests/live_db/* needs a real DATABASE_URL
+fly.toml / fly.qa.toml  # Fly.io app configuration (prod / QA)
+docs/
+├── DEPLOY_VOICE_AGENT.md   # deploy steps, env vars, live-SIP test walkthrough
+└── INTEGRATION_GUIDE.md    # DB ownership contract with the separate webapp (Control Plane) repo
 ```
 
 ## Quickstart
@@ -67,52 +58,50 @@ export DATABASE_URL="postgresql://user:pass@host/db?sslmode=require"
 ### 3. Run locally
 
 ```bash
-# Booking Engine
 uvicorn booking_engine.api.app:create_app --factory --port 8000
-
-# Voice Gateway (in a separate terminal)
-BOOKING_ENGINE_URL=http://localhost:8000 OPENAI_KEY=sk-... \
-  uvicorn voice_gateway.api.app:create_app --factory --port 8001
 ```
 
-Open http://localhost:8001 to access the phone-call UI.
+### 4. Test a call without a phone
 
-### 4. Run tests
+See `docs/DEPLOY_VOICE_AGENT.md` ("Testing over real SIP, no Twilio required") for dialing the real OpenAI SIP path with a softphone, or use one of the local harnesses:
+
+```bash
+# Browser/WebRTC harness (mic + speakers, mints a real session)
+./scripts/run_webrtc_harness.sh
+
+# Text-only local simulation, no audio (writes stubbed unless --live)
+python scripts/chat_agent.py <shop_id> <caller> "message one" "message two"
+
+# Data-only: shows what the assembled prompt + tools would return for a caller
+python scripts/simulate_call.py <shop_id> <caller_number>
+```
+
+### 5. Run tests
 
 ```bash
 # Unit + integration tests (no database needed)
 pytest tests/ --ignore=tests/live_db -v
 
-# Live database tests (requires DATABASE_URL)
+# Live database tests (requires DATABASE_URL, ideally an ephemeral Neon branch)
 DATABASE_URL=postgresql://... pytest tests/live_db/ -v
 ```
 
 ## Deployment
 
-Booking Engine deploys automatically to Fly.io via GitHub Actions on push
-to `main` (production) or `QA` (`.github/workflows/deploy-fly-prod.yml` /
-`deploy-qa.yml`) — `flyctl deploy` with `fly.toml` / `fly.qa.toml`. Voice
-Gateway deploys manually only. Manual deploys:
+Deploys automatically to Fly.io via GitHub Actions on push to `main` (production, `deploy-fly-prod.yml`) or `QA` (`deploy-qa.yml`) — both run tests and migration checks against a throwaway Neon branch before touching the real one. Manual deploy:
 
 ```bash
 fly auth login
-flyctl deploy --config fly.toml       # Booking Engine (production)
-./scripts/deploy-voice.sh             # Voice Gateway
+flyctl deploy --config fly.toml      # production
+flyctl deploy --config fly.qa.toml   # QA
 ```
+
+See `docs/DEPLOY_VOICE_AGENT.md` for env vars, secrets, and the post-deploy smoke test.
 
 ### Cost
 
-| Component | Idle | Active |
-|-----------|------|--------|
-| Fly.io (Booking Engine) | $0 | $0 (free tier) |
-| Fly.io (Voice Gateway) | $0 | $0 (free tier) |
-| Neon PostgreSQL | $0 | $0 (free tier) |
-| **Total infrastructure** | **$0** | **$0** |
+$0 idle: Fly.io free tier (auto-stop machines) + Neon free tier. Usage-based costs: Twilio (per-minute + number rental), OpenAI Realtime (per-minute).
 
-Plus usage-based: Twilio (per-minute), OpenAI Realtime (per-minute).
+## History and decisions
 
-## Design Docs
-
-- [Design Spec](docs/superpowers/specs/2026-03-25-hair-salon-voice-assistant-design.md)
-- [Cloud Deployment Plan](docs/superpowers/plans/2026-04-01-cloud-deployment.md)
-- [Neon Migration Plan](docs/superpowers/plans/2026-04-01-neon-migration.md)
+`CLAUDE.md` is the running log of architectural decisions, incidents, and what's still open — read it before making non-trivial changes.

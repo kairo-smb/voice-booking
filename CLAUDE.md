@@ -8,6 +8,61 @@ stays as the record of what was true and decided at the time.
 
 ---
 
+## 2026-07-24 — Repo cleanup: deleted dead docs/scripts, rewrote two stale docs, closed a dependency drift
+
+**What was removed (confirmed dead first, not guessed):** `docs/DEPLOY_VOICE_GATEWAY_LIFECYCLE.md`
+and `scripts/deploy-voice.sh` both described/deployed a standalone `voice_gateway/` Fly
+service — confirmed via `find`/`grep` that no such package exists anywhere in this repo
+(only a same-named `tests/voice_gateway/` directory survives, testing today's
+`booking_engine/services/*`, a naming holdover from before that package was folded in).
+`CODE_REVIEW_VOICE_AGENT_TOOLS_AND_IDENTITY.md` (a frozen 2026-06-07 review snapshot) and
+`docs/DEPLOY_READINESS_BRIEF.md` (called the architecture-divergence issue "open" — it was
+resolved months ago — and recommended the since-removed AWS Lambda deploy path) were both
+fully superseded by this file. `docs/voice/tone-validation-report.md` was a QA checklist
+template that was never filled in (no reviewer, no date, every box unchecked). Also deleted,
+per owner decision: all 24 files under `docs/superpowers/specs/` and `docs/superpowers/plans/`
+— one design-doc/plan pair per already-shipped feature back to 2026-03-25, every outcome of
+which already has a definitive account in this file; owner confirmed this file is meant to be
+the durable history, those were disposable working documents from the planning process.
+
+**What was rewritten, not deleted, because it's still load-bearing:** `README.md` described
+`voice_gateway/` as a live separate service with its own `Dockerfile`/`config.py` and gave run
+commands (`uvicorn voice_gateway.api.app:create_app`) that fail outright — rewritten to
+describe the actual single-service `booking_engine` + Fly + Twilio + OpenAI-native-SIP shape.
+`docs/INTEGRATION_GUIDE.md`'s "Shared Database Schema" section hand-copied `business_app_core`
+table definitions that had already gone stale and wrong at least twice before this (the
+2026-07-16 and 2026-07-21 entries below each root-caused a real bug back to exactly this
+pattern — a doc's copied schema silently diverging from live Neon). Rather than re-copy a
+"corrected" schema I can't fully verify without live DB access (same mistake, just newer),
+replaced that section with a pointer to the actual sources of truth
+(`information_schema` on the live branch, or `booking_engine/db/queries.py`, which is
+exercised by `tests/live_db/*`) and an explicit note of why hand-copying schema into docs
+is the anti-pattern to avoid here. Also fixed its deployment-topology diagram (was still AWS
+Lambda + a "Control Plane (TBD)" — the webapp Control Plane has existed and shipped features
+for months per multiple entries below) and its voice-config endpoint table (paths didn't match
+what's actually mounted in `booking_engine/api/app.py`).
+
+**Also fixed:** root `requirements.txt` (used for local dev/test) was missing `mcp` — present
+only in `booking_engine/requirements.txt` (what Docker actually installs) — meaning a fresh
+local `pip install -r requirements.txt` would fail to import `booking_engine.mcp_server`
+(mounted at app startup, not conditionally). Added it. Left three source comments
+(`booking_engine/config.py`, `booking_engine/db/sql/09_shop_telephony_twilio_provider.sql`,
+`booking_engine/services/call_supervisor.py`) that pointed at now-deleted spec files —
+repointed each at the relevant entry in this file instead of leaving a dead path.
+
+**Verification:** full non-`live_db` suite still green after all changes (306 passed, same
+5 pre-existing `test_voice_twiml_webhook.py` failures confirmed present on a clean checkout
+via `git stash` — a `TWILIO_AUTH_TOKEN`/signature environment issue unrelated to this cleanup,
+left alone as out of scope). Confirmed nothing else in tracked files still referenced any
+deleted path (`git grep` for each deleted filename came back clean).
+
+**Not touched, flagged only:** `tests/voice_gateway/` keeps its pre-rename directory name
+even though the `voice_gateway/` source package is long gone — cosmetic, low-value rename,
+left alone. Root vs `booking_engine/requirements.txt` remain two separate files with
+overlapping-but-different contents (root is dev/test superset, `booking_engine/`'s is what
+actually ships) — drift-prone by construction, but consolidating them wasn't asked for and
+touches the Docker build; left as a known seam, not a cleanup target this pass.
+
 ## 2026-07-24 — Root-caused session "dead air": tool calls were self-proxying over real HTTPS
 
 **Finding (from real QA Fly logs + a call-graph trace, not a guess):** a live
