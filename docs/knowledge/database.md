@@ -21,17 +21,20 @@ This isn't schema (column names) — it's the write-boundary contract, which is 
 
 | Table | This repo's access |
 |---|---|
-| `shops`, `staff`, `services`, `staff_services`, `staff_schedules` | Read-only (all filtered `is_active = true`) |
+| `shops`, `staff`, `services` | Read-only, filtered `is_active = true` |
+| `staff_services`, `staff_schedules` | Read-only (junction/schedule reads, no `is_active` column of their own — the join partner's `is_active` filter is what gates them) |
 | `customers` | Read + Create |
 | `phone_contacts` | Read + Create/Upsert |
-| `appointments` | Read + Create + Cancel (reschedule = atomic cancel-old + create-new) |
+| `appointments` | Read + Create + Cancel (reschedule = cancel-old + create-new, two separate statements — see the race note below) |
 | `appointment_services` | Read + Create (via appointment) |
 
 The Control Plane (`webapp`) has full CRUD on all of the above except `appointments`, where it additionally owns every status transition this repo doesn't make (see below) — full detail on Control Plane's own side lives in that repo, not here.
 
 **`appointments.status` lifecycle:** `scheduled → confirmed → completed`, with `cancelled`/`no_show` reachable from `scheduled`/`confirmed` (confirmed via `queries.py`'s `status IN ('scheduled', 'confirmed')` checks before cancel, and `status NOT IN ('cancelled', 'no_show')` when computing availability). **This repo only ever writes `scheduled` (on create) or `cancelled` (on cancel/reschedule)** — `confirmed`, `completed`, and `no_show` are Control Plane-only transitions.
 
-**Never insert an appointment without an overlap check on `(staff_id, time range)`, excluding `cancelled`/`no_show` rows** — `create_appointment`/`create_appointment_chain` in `queries.py` do this inside the same transaction as the insert (`_overlaps_existing`). Any new write path into `appointments` must replicate this or risk double-booking a staff member.
+**The overlap check before an insert is a plain check-then-insert, not a transaction — a known, accepted race.** `create_appointment`/`create_appointment_chain` in `queries.py` run a `SELECT` for conflicting appointments (`staff_id`, `status NOT IN ('cancelled', 'no_show')`, overlapping time range) and then a separate `INSERT`, each its own `pool.acquire()` (`db/connection.py::execute`/`execute_void` don't share a connection or transaction across calls). `voice_tool_queries.py` says so explicitly: `ponytail: relies on the create_appointment*/_chain overlap check (no advisory lock). Add one only if concurrent voice bookings for the same staff+slot become a real problem.` Any new write path into `appointments` should at minimum replicate the same check-then-insert (to catch the common case), and should add real locking if it can't accept this race.
+
+**IDs are generated in Python** (`uuid4()`, `booking_engine/db/queries.py`), passed explicitly into every INSERT — not `gen_random_uuid()` at the database level (that convention is what the *bootstrap-only* `01_schema.sql` uses for its own tables, and does not describe how this repo's code actually writes to real `business_app_core`).
 
 **Other stable conventions:** soft deletes via `is_active = false` (never hard-delete a row with dependent appointments); timezone is hardcoded `Europe/Rome` for all slot calculations (`ZoneInfo("Europe/Rome")` in `queries.py`); IDs are Postgres-generated (`gen_random_uuid()`), never assigned by application code.
 
