@@ -39,8 +39,11 @@ async def test_mark_outcome_updates_call_row():
 @pytest.mark.asyncio
 async def test_escalate_creates_memo_and_pushes():
     memo_id = uuid4()
+    customer_id = uuid4()
+    insert = AsyncMock(return_value=memo_id)
+    # get_call does SELECT * -> real columns are caller_number / customer_id
     with patch("booking_engine.api.routes.voice_tools_lifecycle.insert_callback_memo",
-               new=AsyncMock(return_value=memo_id)), \
+               new=insert), \
          patch("booking_engine.api.routes.voice_tools_lifecycle.send_push",
                new=AsyncMock(return_value=None)) as push, \
          patch("booking_engine.api.routes.voice_tools_lifecycle.set_call_outcome",
@@ -48,8 +51,8 @@ async def test_escalate_creates_memo_and_pushes():
          patch("booking_engine.api.routes.voice_tools_lifecycle.get_call",
                new=AsyncMock(return_value={
                    "shop_id": uuid4(),
-                   "matched_customer_id": uuid4(),
-                   "caller_phone": "+393201234567",
+                   "customer_id": customer_id,
+                   "caller_number": "+393201234567",
                })):
         transport = ASGITransport(app=_app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
@@ -65,3 +68,7 @@ async def test_escalate_creates_memo_and_pushes():
     assert body["data"]["memo_id"] == str(memo_id)
     push.assert_awaited_once()
     assert push.await_args.kwargs["event"] == "voice_new_memo"
+    # the memo must carry the real caller number + customer link (not null)
+    assert insert.await_args.kwargs["caller_phone"] == "+393201234567"
+    assert insert.await_args.kwargs["customer_id"] == customer_id
+    assert push.await_args.kwargs["payload"]["caller_phone"] == "+393201234567"

@@ -26,3 +26,15 @@ def test_control_plane_secret_default_empty(monkeypatch):
     monkeypatch.delenv("CONTROL_PLANE_SECRET", raising=False)
     s = Settings()
     assert s.control_plane_secret == ""
+
+
+def test_enable_call_supervisor_defaults_false(monkeypatch):
+    monkeypatch.delenv("ENABLE_CALL_SUPERVISOR", raising=False)
+    from booking_engine.config import Settings
+    assert Settings().enable_call_supervisor is False
+
+
+def test_enable_call_supervisor_reads_env(monkeypatch):
+    monkeypatch.setenv("ENABLE_CALL_SUPERVISOR", "true")
+    from booking_engine.config import Settings
+    assert Settings().enable_call_supervisor is True

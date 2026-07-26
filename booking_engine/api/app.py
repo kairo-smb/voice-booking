@@ -32,16 +32,16 @@ def create_app() -> FastAPI:
     app.include_router(voice.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_telephony
     app.include_router(voice_telephony.router, prefix="/api/v1")
-    from booking_engine.api.routes import voice_texml
-    app.include_router(voice_texml.router, prefix="/api/v1")
+    from booking_engine.api.routes import voice_twiml
+    app.include_router(voice_twiml.router, prefix="/api/v1")
+    from booking_engine.api.routes import voice_openai
+    app.include_router(voice_openai.router)
     from booking_engine.api.routes import voice_config
     app.include_router(voice_config.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_balance
     app.include_router(voice_balance.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_heartbeat
     app.include_router(voice_heartbeat.router, prefix="/api/v1")
-    from booking_engine.api.routes import voice_telnyx_webhooks
-    app.include_router(voice_telnyx_webhooks.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_tools_catalog
     app.include_router(voice_tools_catalog.router)
     from booking_engine.api.routes import voice_tools_booking
@@ -54,6 +54,12 @@ def create_app() -> FastAPI:
     app.include_router(voice_memos.router)
     from booking_engine.api.routes import voice_tools_identity
     app.include_router(voice_tools_identity.router)
+
+    # Remote MCP server for OpenAI Realtime tool calls (session manager is run
+    # by the production entrypoint's lifespan, see booking_engine/asgi.py).
+    from booking_engine.mcp_server import mcp_asgi, set_app
+    app.mount("/mcp", mcp_asgi)
+    set_app(app)
 
     @app.get("/health")
     async def health():

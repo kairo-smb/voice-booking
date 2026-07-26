@@ -7,19 +7,43 @@ class Settings(BaseSettings):
     pool_min_size: int = 2
     pool_max_size: int = 10
     control_plane_secret: str = ""
-    # Public base URL used for constructing Telnyx webhook URLs
+    # Public base URL used for constructing Twilio webhook URLs
     public_base_url: str = ""
-    # Telnyx
-    telnyx_api_key: str = ""
-    telnyx_public_key: str = ""
-    telnyx_default_country: str = "IT"
+    # Twilio
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_default_country: str = "EE"
+    # One-time regulatory Bundle (KYC) for the shared Kairo entity, reused
+    # across every provisioned DID — see CLAUDE.md, "Telephony provider:
+    # Telnyx -> Twilio"
+    twilio_bundle_sid: str = ""
+    twilio_address_sid: str = ""
     # OpenAI SIP routing
     openai_sip_project_id: str = ""
+    openai_api_key: str = ""
+    openai_realtime_model: str = "gpt-realtime"
+    # OpenAI webhook signing secret (verify realtime.call.incoming when set)
+    openai_webhook_secret: str = ""
     # Voice agent — OpenAI tool + event webhook bearer token
     openai_tool_secret: str = ""
     # Token meter
     voice_kairo_tokens_per_second: int = 18
     voice_min_session_reserve_tokens: int = 1500
+    # Within this many hours of the slot, the agent can't self-serve a
+    # reschedule/cancel — it must escalate to the salon.
+    voice_cancellation_lead_time_hours: int = 2
+    # Spawn a per-call server-side Realtime control WebSocket (greeting + voice
+    # tool results). Off by default; enable per environment for live SIP calls.
+    enable_call_supervisor: bool = False
+    # Log full raw Realtime events (transcripts, MCP args/output) instead of
+    # just type/tool/latency. Debug-only — off by default so real call logs
+    # don't carry conversation content; flip on for a QA test session.
+    call_supervisor_verbose_logging: bool = False
+    # Fallback shop for a raw SIP test call with no X-Shop-Id header (Twilio
+    # normally adds that header for us; a bare softphone dial has no such
+    # translation). Empty by default — production calls without a shop id
+    # are still rejected as unroutable; only set this on QA for manual testing.
+    sip_test_fallback_shop_id: str = ""
 
     model_config = {"env_prefix": ""}
 

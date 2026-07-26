@@ -26,3 +26,23 @@ async def test_finds_shops_with_no_inbound_in_5_days():
                new=AsyncMock(return_value=fake_rows[:1])):
         results = await find_silent_forwarded_shops(threshold_days=5)
         assert len(results) == 1
+
+
+@pytest.mark.asyncio
+async def test_only_alerts_always_on_shops_not_overflow():
+    # Overflow shops are legitimately silent for days; they must be excluded so
+    # the heartbeat doesn't false-alarm. The query filters answer_mode='always_on'.
+    captured = {}
+
+    async def fake_execute(sql, *args):
+        captured["sql"] = sql
+        return []
+
+    with patch("booking_engine.services.forwarding_heartbeat.execute",
+               new=fake_execute):
+        await find_silent_forwarded_shops(threshold_days=5)
+
+    sql = captured["sql"].lower()
+    assert "shop_config" in sql
+    assert "answer_mode" in sql
+    assert "always_on" in sql

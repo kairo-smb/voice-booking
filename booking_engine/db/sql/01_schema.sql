@@ -9,10 +9,6 @@ CREATE TABLE IF NOT EXISTS shops (
   name                TEXT            NOT NULL,
   phone_number        TEXT,
   address             TEXT,
-  welcome_message     TEXT,
-  tone_instructions   TEXT,
-  personality         TEXT,
-  special_instructions TEXT,
   is_active           BOOLEAN         NOT NULL DEFAULT true,
   created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
@@ -22,6 +18,7 @@ CREATE TABLE IF NOT EXISTS staff (
   shop_id       UUID            NOT NULL REFERENCES shops(id),
   full_name     TEXT            NOT NULL,
   role          TEXT,
+  job_title     TEXT,
   phone_number  TEXT,
   email         TEXT,
   bio           TEXT,

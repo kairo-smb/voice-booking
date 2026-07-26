@@ -25,7 +25,8 @@ async def get_services(
 ) -> Envelope[list[ServiceOut]]:
     rows = await list_services(shop_id=x_shop_id, filter_q=body.filter)
     out = [ServiceOut(service_id=r["id"], name=r["name"],
-                      duration_min=r["duration_min"], price_cents=r["price_cents"])
+                      duration_min=r["duration_min"],
+                      price_cents=r["price_cents"] if body.include_price else None)
            for r in rows]
     return Envelope[list[ServiceOut]](ok=True, data=out)
 

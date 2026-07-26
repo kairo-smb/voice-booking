@@ -1,0 +1,166 @@
+name: Deploy Fly Production
+
+# Production Fly release pipeline for the voice-webhook/MCP surface
+# (kairo-booking-engine). Pushes to main provision a throwaway Neon branch
+# from production, apply migrations + seed fixtures to it, and run the
+# live_db suite against it. Only if that passes are migrations applied for
+# real to production, then the app deployed. A regression or failing
+# migration stops the release before prod is touched.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: booking-engine-prod-release
+  cancel-in-progress: false
+
+jobs:
+  unit:
+    name: Unit tests (no DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio
+      - name: Run unit tests
+        run: pytest tests/voice_gateway/ tests/booking_engine/ -q
+
+  validate-on-tmp-branch:
+    name: Validate migrations on ephemeral Neon branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+      NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+      NEON_PROD_BRANCH: ${{ vars.NEON_PROD_BRANCH || 'production' }}
+      QA_DATABASE_URL: ${{ secrets.QA_DATABASE_URL }}
+      CI_BRANCH: booking-prod-release-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Guard - required secrets/vars must be set
+        run: |
+          missing=0
+          for name in NEON_API_KEY NEON_PROJECT_ID NEON_PROD_BRANCH QA_DATABASE_URL; do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name} is not set."
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      - name: Install Neon CLI
+        run: |
+          curl -fsSL https://github.com/neondatabase/neon-pkgs/releases/latest/download/neonctl-linux-x64 -o /tmp/neonctl
+          chmod +x /tmp/neonctl
+          sudo mv /tmp/neonctl /usr/local/bin/neonctl
+          neonctl --version
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Provision ephemeral Neon branch from production
+        run: |
+          set -euo pipefail
+          neonctl branches create \
+            --project-id "$NEON_PROJECT_ID" \
+            --parent "$NEON_PROD_BRANCH" \
+            --name "$CI_BRANCH" >/dev/null
+          role=$(python3 -c "import os,urllib.parse as up; print(up.urlparse(os.environ['QA_DATABASE_URL']).username)")
+          db=$(python3 -c "import os,urllib.parse as up; print(up.urlparse(os.environ['QA_DATABASE_URL']).path.lstrip('/').split('?')[0])")
+          conn=$(neonctl connection-string "$CI_BRANCH" \
+            --project-id "$NEON_PROJECT_ID" \
+            --role-name "$role" \
+            --database-name "$db")
+          if [ -z "$conn" ]; then
+            echo "::error::Empty connection string for branch $CI_BRANCH"
+            exit 1
+          fi
+          echo "::add-mask::$conn"
+          echo "CI_DB_URL=$conn" >> "$GITHUB_ENV"
+
+      - name: Apply migrations to the ephemeral branch
+        run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          chmod +x scripts/migrate.sh
+          ./scripts/migrate.sh
+        env:
+          DATABASE_URL: ${{ env.CI_DB_URL }}
+
+      - name: Load seed fixtures onto the ephemeral branch
+        run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          PGOPTIONS="-c search_path=business_app_core,public" \
+            psql -v ON_ERROR_STOP=1 "$CI_DB_URL" -f booking_engine/db/sql/02_seed_data.sql
+
+      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio
+
+      - name: Run live_db tests
+        run: pytest tests/live_db/ -q
+        env:
+          TEST_DATABASE_URL: ${{ env.CI_DB_URL }}
+
+      - name: Delete ephemeral Neon branch
+        if: always()
+        run: |
+          neonctl branches delete "$CI_BRANCH" --project-id "$NEON_PROJECT_ID" \
+            || echo "::warning::Failed to delete ephemeral branch $CI_BRANCH — manual cleanup needed"
+
+  migrate-via-webapp:
+    # The webapp repo is the PARENT that owns migration application for the
+    # shared Neon DB. This repo no longer migrates production itself; it asks
+    # webapp's migrate-prod workflow to apply ALL schemas
+    # (business_app_core → voice_agent → market_intel) and waits for it, so the
+    # production app below never deploys ahead of its schema.
+    name: Apply DB migrations via webapp (parent)
+    needs: [unit, validate-on-tmp-branch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Dispatch webapp production migration and wait
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: migrate-prod.yml
+          repo: kairo-smb/webapp
+          ref: main
+          token: ${{ secrets.WEBAPP_MIGRATE_DISPATCH_TOKEN }}
+          wait-for-completion: true
+          wait-for-completion-timeout: 20m
+
+  deploy-prod:
+    name: Deploy production Fly app
+    needs: migrate-via-webapp
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to production Fly app
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only --config fly.toml
+      - name: Smoke check production health
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error https://kairo-booking-engine.fly.dev/health; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Production health check did not pass within 150 seconds" >&2
+          exit 1

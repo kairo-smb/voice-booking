@@ -25,8 +25,7 @@ class FakeDB:
     def __init__(self):
         self.shop = {
             "id": str(SHOP_ID), "name": "Salone Test", "phone_number": "+39000",
-            "address": "Via Test", "welcome_message": "Ciao!", "tone_instructions": "",
-            "personality": "", "special_instructions": None, "is_active": True,
+            "address": "Via Test", "is_active": True,
         }
         self.staff = [
             {"id": str(STAFF_ID), "full_name": "Maria Rossi", "role": "stylist", "bio": ""},

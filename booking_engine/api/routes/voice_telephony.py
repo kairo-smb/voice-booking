@@ -6,14 +6,17 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from twilio.base.exceptions import TwilioRestException
 
 from booking_engine.api.deps import require_control_plane_token
-from booking_engine.clients.telnyx_numbers import (
+from booking_engine.clients.twilio_numbers import (
     purchase_number,
     search_available_numbers,
 )
 from booking_engine.config import Settings, get_settings
 from booking_engine.db import voice_telephony_queries as q
+from booking_engine.db.voice_config_queries import get_config
+from booking_engine.services.setup_instructions import build_instructions
 
 router = APIRouter(prefix="/voice/numbers", tags=["voice-telephony"])
 
@@ -49,9 +52,10 @@ async def search(
 ) -> dict:
     results = search_available_numbers(
         area_code=area_code,
-        country=settings.telnyx_default_country,
+        country=settings.twilio_default_country,
         limit=limit,
-        api_key=settings.telnyx_api_key,
+        account_sid=settings.twilio_account_sid,
+        auth_token=settings.twilio_auth_token,
     )
     return {"data": [AvailableNumberOut(**r.__dict__).model_dump() for r in results]}
 
@@ -65,23 +69,28 @@ async def provision(
     if body.setup_path == "forward" and not body.salon_existing_number:
         raise HTTPException(400, "salon_existing_number required for forward setup")
 
-    voice_url = f"{settings.public_base_url}/voice/texml/incoming"
-    purchased = purchase_number(
-        phone_number=body.phone_number,
-        voice_url=voice_url,
-        api_key=settings.telnyx_api_key,
-    )
-    # Path 2 (new IT number) starts as pending_review; transitions to active/rejected
-    # via the /voice/telnyx/number-status webhook once Telnyx completes the review.
-    activation_status = "pending_review" if body.setup_path == "new" else "active"
+    voice_url = f"{settings.public_base_url}/api/v1/voice/twiml/incoming"
+    try:
+        purchased = purchase_number(
+            phone_number=body.phone_number,
+            voice_url=voice_url,
+            account_sid=settings.twilio_account_sid,
+            auth_token=settings.twilio_auth_token,
+            bundle_sid=settings.twilio_bundle_sid or None,
+            address_sid=settings.twilio_address_sid or None,
+        )
+    except TwilioRestException as exc:
+        raise HTTPException(502, f"Twilio number purchase failed: {exc.msg}") from exc
+    # The one Kairo-entity regulatory Bundle is approved once, out-of-band,
+    # before any shop onboards (see the migration spec) — every purchase
+    # after that is synchronous: it succeeds now (active) or raises outright.
     row = await q.upsert_telephony(
         shop_id=body.shop_id,
-        provider="telnyx",
+        provider="twilio",
         kairo_number=purchased.phone_number,
         kairo_number_sid=purchased.sid,
         salon_existing_number=body.salon_existing_number,
         setup_path=body.setup_path,
-        activation_status=activation_status,
     )
     return {"data": TelephonyOut(
         shop_id=row["shop_id"],
@@ -90,6 +99,23 @@ async def provision(
         setup_path=row["setup_path"],
         salon_existing_number=row["salon_existing_number"],
     ).model_dump()}
+
+
+@router.get("/{shop_id}/setup-instructions")
+async def setup_instructions(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    telephony = await q.get_telephony(shop_id)
+    if not telephony:
+        raise HTTPException(404, "No telephony provisioned for this shop")
+    config = await get_config(shop_id) or {}
+    return {"data": build_instructions(
+        kairo_number=telephony["kairo_number"],
+        salon_existing_number=telephony.get("salon_existing_number"),
+        answer_mode=config.get("answer_mode", "overflow"),
+        overflow_ring_count=config.get("overflow_ring_count", 4),
+    )}
 
 
 @router.get("/{shop_id}")

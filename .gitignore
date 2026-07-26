@@ -30,3 +30,9 @@ build/
 # Fly.io
 .fly/
 .worktrees/
+
+
+# Skills
+.claude/skills/impeccable/
+.github/skills/impeccable/
+.github/hooks/impeccable.json

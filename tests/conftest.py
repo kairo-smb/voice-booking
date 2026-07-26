@@ -27,10 +27,6 @@ def fake_shop() -> dict:
         "name": "Salone Bella",
         "phone_number": "+39 012 345 6789",
         "address": "Via Roma 1, Milano",
-        "welcome_message": "Ciao! Benvenuto al Salone Bella!",
-        "tone_instructions": "Sii gentile e professionale",
-        "personality": "Assistente del salone",
-        "special_instructions": None,
         "is_active": True,
     }
 

@@ -5,13 +5,25 @@ Every tool returns Envelope[T]; OpenAI sees ok/data/error and routes accordingly
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Generic, Literal, TypeVar
+from typing import Annotated, Generic, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 
 T = TypeVar("T")
+
+
+def _blank_to_none(v: object) -> object:
+    """OpenAI's function-calling sometimes sends "" for an optional field
+    instead of omitting it — treat that as not provided rather than failing
+    UUID/datetime parsing with a 422 the model can't act on (root-caused
+    from a real check_availability 422 in QA logs)."""
+    return None if v == "" else v
+
+
+OptionalUUID = Annotated[UUID | None, BeforeValidator(_blank_to_none)]
+OptionalDatetime = Annotated[datetime | None, BeforeValidator(_blank_to_none)]
 
 
 class Envelope(BaseModel, Generic[T]):
@@ -53,7 +65,7 @@ class ServiceOut(BaseModel):
     service_id: UUID
     name: str
     duration_min: int
-    price_cents: int
+    price_cents: int | None = None
 
 
 class StaffOut(BaseModel):
@@ -62,18 +74,49 @@ class StaffOut(BaseModel):
 
 
 # Availability + booking
-class AvailabilitySlot(BaseModel):
-    slot_start: datetime
-    slot_end: datetime
+class BookingServiceIn(BaseModel):
+    """One requested leg of a (possibly multi-service) booking, in the
+    order the services should be performed."""
+    service_id: UUID
+    staff_id: OptionalUUID = None  # None = auto-assign an eligible, available staff member
+
+
+class CheckAvailabilityIn(BaseModel):
+    services: list[BookingServiceIn] = Field(..., min_length=1)
+    preferred_when: OptionalDatetime = None
+    max_results: int = 5
+
+
+class AvailabilityLeg(BaseModel):
+    service_id: UUID
     staff_id: UUID
     staff_name: str
+    slot_start: datetime
+    slot_end: datetime
+
+
+class AvailabilityChain(BaseModel):
+    slot_start: datetime
+    slot_end: datetime
+    legs: list[AvailabilityLeg]
+
+
+class CreateBookingLeg(BaseModel):
+    service_id: UUID
+    staff_id: UUID
+    slot_start: datetime
 
 
 class CreateBookingIn(BaseModel):
     customer_id: UUID
+    legs: list[CreateBookingLeg] = Field(..., min_length=1)
+
+
+class BookingLegOut(BaseModel):
     service_id: UUID
-    slot_start: datetime
     staff_id: UUID
+    slot_start: datetime
+    slot_end: datetime
 
 
 class BookingOut(BaseModel):
@@ -83,19 +126,19 @@ class BookingOut(BaseModel):
     ]
     slot_start: datetime
     slot_end: datetime
-    staff_id: UUID
+    legs: list[BookingLegOut]
 
 
 class ModifyBookingIn(BaseModel):
     appointment_id: UUID
-    new_slot_start: datetime | None = None
-    new_service_id: UUID | None = None
-    verification_passed: bool
+    new_slot_start: OptionalDatetime = None
+    new_service_id: OptionalUUID = None
+    verification_passed: bool | None = None  # ignored; server authorizes by caller phone
 
 
 class CancelBookingIn(BaseModel):
     appointment_id: UUID
-    verification_passed: bool
+    verification_passed: bool | None = None  # ignored; server authorizes by caller phone
 
 
 # Lifecycle
@@ -117,6 +160,7 @@ class EscalateIn(BaseModel):
 # Catalog (request models)
 class GetServicesIn(BaseModel):
     filter: str | None = None
+    include_price: bool = False
 
 
 class GetStaffForServiceIn(BaseModel):

@@ -6,15 +6,17 @@ pydantic-settings>=2.0.0
 
 # HTTP client
 httpx>=0.27.0
+# WebSocket client (server-side Realtime call control); already present via uvicorn[standard]
+websockets>=15.0
 
 # PostgreSQL (Neon)
 asyncpg>=0.29.0
-mangum>=0.17
 
 # Utilities
 python-multipart>=0.0.9
 phonenumbers>=8.13
 twilio>=9.0
+mcp>=1.26.0
 
 # Testing
 pytest>=8.0.0

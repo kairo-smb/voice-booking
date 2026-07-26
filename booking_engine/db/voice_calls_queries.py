@@ -14,11 +14,12 @@ async def insert_call(
     row = await connection.execute_one(
         """
         INSERT INTO voice_agent.calls
-            (shop_id, caller_phone, matched_customer_id, started_at)
-        VALUES ($1, $2, $3, now())
+            (shop_id, caller_number, matched_customer_id, customer_match, started_at)
+        VALUES ($1, $2, $3, $4, now())
         RETURNING id
         """,
-        shop_id, caller_phone, matched_customer_id,
+        shop_id, caller_phone or "anonymous", matched_customer_id,
+        "existing" if matched_customer_id else "unmatched",
     )
     return row["id"]
 
@@ -90,20 +91,34 @@ async def list_memos(
     if status:
         return await connection.execute(
             """
-            SELECT * FROM voice_agent.callback_memos
-            WHERE shop_id = $1 AND status = $2
-            ORDER BY created_at DESC LIMIT $3
+            SELECT m.*, c.service_brief, c.summary AS call_summary, c.outcome
+            FROM voice_agent.callback_memos m
+            LEFT JOIN voice_agent.calls c ON c.id = m.call_id
+            WHERE m.shop_id = $1 AND m.status = $2
+            ORDER BY m.created_at DESC LIMIT $3
             """,
             shop_id, status, limit,
         )
     return await connection.execute(
         """
-        SELECT * FROM voice_agent.callback_memos
-        WHERE shop_id = $1
-        ORDER BY created_at DESC LIMIT $2
+        SELECT m.*, c.service_brief, c.summary AS call_summary, c.outcome
+        FROM voice_agent.callback_memos m
+        LEFT JOIN voice_agent.calls c ON c.id = m.call_id
+        WHERE m.shop_id = $1
+        ORDER BY m.created_at DESC LIMIT $2
         """,
         shop_id, limit,
     )
+
+
+async def count_pending_memos(*, shop_id: UUID) -> int:
+    """Open-escalation count for the Action Center tile."""
+    row = await connection.execute_one(
+        "SELECT count(*) AS n FROM voice_agent.callback_memos "
+        "WHERE shop_id = $1 AND status = 'pending'",
+        shop_id,
+    )
+    return int(row["n"]) if row else 0
 
 
 async def update_memo_status(

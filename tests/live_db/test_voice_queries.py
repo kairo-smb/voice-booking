@@ -37,33 +37,6 @@ async def seeded_shop():
     await execute_void("DELETE FROM business_app_core.shops WHERE id = $1", shop_id)
 
 
-async def test_get_voice_config_returns_defaults(seeded_shop):
-    cfg = await vq.get_voice_config(seeded_shop)
-    assert cfg["voice"] == "alloy"
-    assert cfg["language"] == "it"
-    assert cfg["is_active"] is True
-
-
-async def test_get_voice_config_missing_shop_returns_none():
-    cfg = await vq.get_voice_config(uuid4())
-    assert cfg is None
-
-
-async def test_update_voice_config_partial(seeded_shop):
-    updated = await vq.update_voice_config(
-        seeded_shop, {"welcome_message": "Ciao!", "voice": "echo"}
-    )
-    assert updated["welcome_message"] == "Ciao!"
-    assert updated["voice"] == "echo"
-    assert updated["language"] == "it"  # untouched
-
-
-async def test_update_voice_config_empty_payload_is_noop(seeded_shop):
-    before = await vq.get_voice_config(seeded_shop)
-    after = await vq.update_voice_config(seeded_shop, {})
-    assert before == after
-
-
 async def test_list_calls_empty(seeded_shop):
     result = await vq.list_calls(seeded_shop, filters={}, cursor=None, limit=20)
     assert result == {"items": [], "next_cursor": None}

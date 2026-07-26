@@ -51,3 +51,41 @@ async def test_action_memo_updates_status():
                 json={"status": "actioned", "actioned_by": str(staff_id)},
             )
     assert r.json()["data"]["updated"] is True
+
+@pytest.mark.asyncio
+async def test_action_center_tile_returns_pending_escalation_count():
+    shop_id = uuid4()
+    with patch("booking_engine.api.routes.voice_memos.count_pending_memos",
+               new=AsyncMock(return_value=3)):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get(f"/voice/memos/{shop_id}/count", headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["data"]["pending_escalations"] == 3
+
+
+@pytest.mark.asyncio
+async def test_memo_list_enriches_service_brief_with_catalog_match():
+    import json as _json
+    shop_id, colore_id = uuid4(), uuid4()
+    memo = {
+        "id": uuid4(), "call_id": uuid4(), "shop_id": shop_id,
+        "status": "pending", "caller_phone": "+3933300",
+        "summary": "vuole schiarire",
+        # jsonb comes back from asyncpg as a string
+        "service_brief": _json.dumps({
+            "services_requested": [{"servizio": "vorrei il colore", "note": "freddo"}],
+            "desired_result": "biondo freddo",
+        }),
+    }
+    with patch("booking_engine.api.routes.voice_memos.list_memos",
+               new=AsyncMock(return_value=[memo])), \
+         patch("booking_engine.api.routes.voice_memos.list_services",
+               new=AsyncMock(return_value=[{"id": colore_id, "name": "Colore"}])):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get(f"/voice/memos/{shop_id}", headers=AUTH)
+    sr = r.json()["data"][0]["service_brief"]["services_requested"][0]
+    assert sr["matched_name"] == "Colore"
+    assert sr["matched_service_id"] == str(colore_id)
+    assert sr["note"] == "freddo"

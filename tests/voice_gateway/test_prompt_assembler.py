@@ -20,7 +20,7 @@ def _config(**overrides):
         "display_name": "Salone Lucia",
         "greeting_after_disclosure": "Sono Aria, come posso aiutarla?",
         "tone_id": None,
-        "voice_preset": "warm_female",
+        "voice_preset": "verse",
         "answer_mode": "overflow",
         "services_to_mention": [],
     }
@@ -45,12 +45,14 @@ async def test_assemble_includes_safety_rules():
 
 
 @pytest.mark.asyncio
-async def test_assemble_includes_disclosure():
+async def test_assemble_opens_with_self_introduction_no_disclosure_fluff():
     resolution = ResolutionResult(is_anonymous=False, matches=[])
     out = await assemble_session_prompt(
         config=_config(), policy=_policy(), resolution=resolution,
     )
-    assert "assistente AI" in out.prompt
+    assert "APERTURA CHIAMATA" in out.prompt
+    assert "presentarti" in out.prompt
+    assert "assistente AI" not in out.prompt
 
 
 @pytest.mark.asyncio
@@ -95,10 +97,10 @@ async def test_assemble_returns_tool_descriptions():
 async def test_assemble_returns_voice_preset():
     resolution = ResolutionResult(is_anonymous=False, matches=[])
     out = await assemble_session_prompt(
-        config=_config(voice_preset="neutral_male"), policy=_policy(),
+        config=_config(voice_preset="ash"), policy=_policy(),
         resolution=resolution,
     )
-    assert out.voice == "neutral_male"
+    assert out.voice == "ash"
 
 
 @pytest.mark.asyncio
@@ -147,3 +149,36 @@ async def test_assemble_falls_back_to_default_on_db_error(monkeypatch):
         config=_config(tone_id=uuid4()), policy=_policy(), resolution=resolution,
     )
     assert DEFAULT_TONE_INSTRUCTION in out.prompt
+
+
+@pytest.mark.asyncio
+async def test_overflow_mode_uses_custom_greeting_overflow():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    out = await assemble_session_prompt(
+        config=_config(answer_mode="overflow", greeting_overflow="CIAO_OVERFLOW"),
+        policy=_policy(), resolution=resolution,
+    )
+    assert 'FRASE DI BENVENUTO: "CIAO_OVERFLOW"' in out.prompt
+
+
+@pytest.mark.asyncio
+async def test_overflow_mode_defaults_when_greeting_overflow_empty():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    out = await assemble_session_prompt(
+        config=_config(answer_mode="overflow", greeting_overflow=""),
+        policy=_policy(), resolution=resolution,
+    )
+    # default overflow greeting is short, names the shop, and asks how it can help
+    assert 'FRASE DI BENVENUTO: "Salve, sono l\'assistente di Salone Lucia. ' \
+           'Come posso aiutarla?"' in out.prompt
+
+
+@pytest.mark.asyncio
+async def test_always_on_mode_uses_greeting_after_disclosure():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    out = await assemble_session_prompt(
+        config=_config(answer_mode="always_on",
+                       greeting_after_disclosure="BENV_FULL"),
+        policy=_policy(), resolution=resolution,
+    )
+    assert 'FRASE DI BENVENUTO: "BENV_FULL"' in out.prompt

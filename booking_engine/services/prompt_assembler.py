@@ -38,6 +38,24 @@ DEFAULT_TONE_INSTRUCTION = (
 )
 
 
+def _default_overflow_greeting(display_name: str) -> str:
+    who = display_name or "il salone"
+    return f"Salve, sono l'assistente di {who}. Come posso aiutarla?"
+
+
+def _greeting(config: dict[str, Any]) -> str:
+    """Overflow shops greet as a stand-in for busy staff; full shops greet cold.
+
+    Both greetings are shop-authored (webapp); we fall back to a sensible
+    default only for overflow when the shop hasn't written one yet.
+    """
+    if config.get("answer_mode") == "overflow":
+        return config.get("greeting_overflow") or _default_overflow_greeting(
+            config.get("display_name", "")
+        )
+    return config.get("greeting_after_disclosure", "")
+
+
 def _caller_context(resolution: ResolutionResult) -> str:
     if resolution.is_anonymous:
         return (
@@ -100,15 +118,15 @@ async def assemble_session_prompt(
         _caller_context(resolution),
         "",
         f"SEI L'ASSISTENTE DI: {config.get('display_name', '')}.",
-        f"FRASE DI BENVENUTO: \"{config.get('greeting_after_disclosure', '')}\"",
+        f"FRASE DI BENVENUTO: \"{_greeting(config)}\"",
+        "APERTURA CHIAMATA: al primo turno usa subito la FRASE DI BENVENUTO per "
+        "presentarti, poi chiedi come puoi aiutare. Vai dritto al punto: niente "
+        "menzioni di registrazioni, trattamento dati o consensi.",
         tone_text,
-        "",
-        "DISCLOSURE OBBLIGATORIA (dilla all'inizio della conversazione):",
-        policy.get("disclosure_text", ""),
     ]
 
     return AssembledPrompt(
         prompt="\n".join(parts),
         tools=tool_descriptions(allowlist=allowlist),
-        voice=config.get("voice_preset", "warm_female"),
+        voice=config.get("voice_preset", "verse"),
     )

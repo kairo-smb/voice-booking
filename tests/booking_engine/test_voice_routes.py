@@ -26,59 +26,6 @@ def _app(secret: str = "test-secret") -> FastAPI:
 HEADERS = {"Authorization": "Bearer test-secret"}
 
 
-def test_get_config_unauthorized():
-    client = TestClient(_app())
-    r = client.get(f"/api/v1/shops/{uuid4()}/voice/config")
-    assert r.status_code == 401
-
-
-def test_get_config_not_found():
-    with patch.object(voice.vq, "get_voice_config", AsyncMock(return_value=None)):
-        client = TestClient(_app())
-        r = client.get(f"/api/v1/shops/{uuid4()}/voice/config", headers=HEADERS)
-        assert r.status_code == 404
-
-
-def test_get_config_ok():
-    fake = {
-        "welcome_message": "Ciao",
-        "tone_instructions": None, "personality": None, "special_instructions": None,
-        "voice": "alloy", "language": "it", "is_active": True,
-    }
-    with patch.object(voice.vq, "get_voice_config", AsyncMock(return_value=fake)):
-        client = TestClient(_app())
-        r = client.get(f"/api/v1/shops/{uuid4()}/voice/config", headers=HEADERS)
-        assert r.status_code == 200
-        assert r.json()["data"]["voice"] == "alloy"
-
-
-def test_patch_config_validates_body():
-    client = TestClient(_app())
-    r = client.patch(
-        f"/api/v1/shops/{uuid4()}/voice/config",
-        headers=HEADERS, json={"language": "fr"},
-    )
-    assert r.status_code == 422
-
-
-def test_patch_config_updates_and_returns_config():
-    fake = {
-        "welcome_message": "Aggiornato",
-        "tone_instructions": None, "personality": None, "special_instructions": None,
-        "voice": "echo", "language": "it", "is_active": True,
-    }
-    with patch.object(voice.vq, "update_voice_config",
-                      AsyncMock(return_value=fake)) as upd:
-        client = TestClient(_app())
-        r = client.patch(
-            f"/api/v1/shops/{uuid4()}/voice/config",
-            headers=HEADERS, json={"welcome_message": "Aggiornato", "voice": "echo"},
-        )
-        assert r.status_code == 200
-        assert r.json()["data"]["voice"] == "echo"
-        upd.assert_awaited_once()
-
-
 def test_list_calls_filters_passed_through():
     fake = {"items": [], "next_cursor": None}
     with patch.object(voice.vq, "list_calls",
@@ -212,3 +159,33 @@ def test_get_analytics_ok():
         assert body["volume"]["total"] == 3
         assert body["outcomes"]["booked"] == 2
         ga.assert_awaited_once()
+
+
+def test_get_call_detail_includes_matched_service_brief():
+    import json as _json
+    colore_id = uuid4()
+    call = {
+        "id": uuid4(), "caller_number": "+39", "customer_id": None,
+        "customer_match": "existing",
+        "started_at": datetime.now(timezone.utc),
+        "ended_at": None, "duration_seconds": None,
+        "outcome": "escalated", "summary": "ok", "appointment_id": None,
+    }
+    detail = {
+        "call": call, "transcript": [], "events": [],
+        "service_brief": _json.dumps({
+            "services_requested": [{"servizio": "vorrei il colore", "note": "freddo"}],
+        }),
+    }
+    with patch.object(voice.vq, "get_call_detail", AsyncMock(return_value=detail)), \
+         patch("booking_engine.api.routes.voice.list_services",
+               AsyncMock(return_value=[{"id": colore_id, "name": "Colore"}])):
+        client = TestClient(_app())
+        r = client.get(
+            f"/api/v1/shops/{uuid4()}/voice/calls/{uuid4()}",
+            headers=HEADERS,
+        )
+        assert r.status_code == 200
+        sb = r.json()["data"]["service_brief"]["services_requested"][0]
+        assert sb["matched_name"] == "Colore"
+        assert sb["matched_service_id"] == str(colore_id)

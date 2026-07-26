@@ -37,7 +37,6 @@ class TestGetShopLive:
         assert shop is not None
         assert shop["name"] == "Salon Bella"
         assert shop["is_active"] is True
-        assert "benvenuto" in shop["welcome_message"].lower()
 
     async def test_returns_studio_hair(self, db_connection):
         shop = await get_shop(SHOP_ID_2)

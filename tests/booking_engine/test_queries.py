@@ -1,7 +1,7 @@
 """Unit tests for query functions (mocked DB)."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -13,9 +13,11 @@ from booking_engine.db.queries import (
     SlotConflictError,
     cancel_appointment,
     create_appointment,
+    create_appointment_chain,
     create_customer,
     find_customers_by_name_and_phone,
     find_customers_by_phone,
+    get_available_slot_chains,
     get_shop,
     get_staff_services,
     list_appointments,
@@ -26,7 +28,9 @@ from booking_engine.db.queries import (
 
 SHOP = UUID("a0000000-0000-0000-0000-000000000001")
 STAFF = UUID("11111111-0000-0000-0000-000000000001")
+STAFF2 = UUID("11111111-0000-0000-0000-000000000002")
 SVC = UUID("aaaa0001-0000-0000-0000-000000000001")
+SVC2 = UUID("aaaa0001-0000-0000-0000-000000000002")
 CUSTOMER = UUID("cccc0001-0000-0000-0000-000000000001")
 APPT = UUID("dddddddd-0000-0000-0000-000000000001")
 _ROME = ZoneInfo("Europe/Rome")
@@ -170,3 +174,211 @@ class TestListAppointments:
         result = await list_appointments(SHOP)
         assert len(result) == 1
         assert "services" in result[0]
+
+
+class TestGetAvailableSlotChains:
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_single_day_two_legs_different_staff(self, mock_exec):
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30}, {"id": SVC2, "duration_minutes": 30}],  # durations
+            [{"staff_id": STAFF, "staff_name": "Ana"}],  # eligible leg0
+            [{"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg1
+            [],  # existing appointments
+            # staff0 window narrowed to a single 30-min slot: since the fix
+            # fully explores every leg0 candidate within a day before
+            # capping results, a full-day window here would require one
+            # mocked extend-check per half-hour slot.
+            [{"start_time": "09:00:00", "end_time": "09:30:00"}],  # staff0 day windows
+            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff1 day windows
+        ]
+        day = date(2026, 5, 5)
+        result = await get_available_slot_chains(
+            SHOP, [{"service_id": SVC, "staff_id": None},
+                   {"service_id": SVC2, "staff_id": None}],
+            day, day, max_results=1,
+        )
+        assert len(result) == 1
+        legs = result[0]["legs"]
+        assert legs[0]["staff_id"] == STAFF and legs[1]["staff_id"] == STAFF2
+        assert legs[0]["slot_end"] == legs[1]["slot_start"]  # back-to-back, 0-minute gap
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_duplicate_service_id_in_chain_is_not_misreported_as_unknown(self, mock_exec):
+        # Same service booked twice (two different staff) in one chain: the
+        # services list has 2 entries for SVC, but the DB returns only 1
+        # distinct row for it. Must not be treated as "unknown service".
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30}],  # durations: 1 distinct row for a duplicated id
+            [{"staff_id": STAFF, "staff_name": "Ana"}],  # eligible leg0 (staff_id=STAFF pinned)
+            [{"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg1 (staff_id=STAFF2 pinned)
+            [],  # existing appointments
+            # staff0 window narrowed to a single 30-min slot (see comment in
+            # test_single_day_two_legs_different_staff above).
+            [{"start_time": "09:00:00", "end_time": "09:30:00"}],  # staff0 day windows
+            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff1 day windows
+        ]
+        day = date(2026, 5, 5)
+        result = await get_available_slot_chains(
+            SHOP, [{"service_id": SVC, "staff_id": STAFF},
+                   {"service_id": SVC, "staff_id": STAFF2}],
+            day, day, max_results=1,
+        )
+        assert len(result) == 1
+        legs = result[0]["legs"]
+        assert legs[0]["service_id"] == SVC and legs[1]["service_id"] == SVC
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_no_eligible_staff_for_second_leg_returns_empty(self, mock_exec):
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30}, {"id": SVC2, "duration_minutes": 30}],
+            [{"staff_id": STAFF, "staff_name": "Ana"}],
+            [],  # no one eligible for leg1
+        ]
+        day = date(2026, 5, 5)
+        result = await get_available_slot_chains(
+            SHOP, [{"service_id": SVC, "staff_id": None},
+                   {"service_id": SVC2, "staff_id": None}],
+            day, day,
+        )
+        assert result == []
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_leg1_skips_conflicting_start_and_finds_later_one_within_gap(self, mock_exec):
+        # STAFF2 has an existing 09:30-09:40 appointment. The naive
+        # earliest-only candidate (09:30, right at prev_end) would conflict;
+        # the search must step forward in 5-min increments and land on
+        # 09:40 (still within MAX_GAP_MINUTES of prev_end=09:30).
+        existing = [{
+            "staff_id": STAFF2,
+            "start_time": datetime(2026, 5, 5, 9, 30, tzinfo=_ROME),
+            "end_time": datetime(2026, 5, 5, 9, 40, tzinfo=_ROME),
+        }]
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30}, {"id": SVC2, "duration_minutes": 30}],  # durations
+            [{"staff_id": STAFF, "staff_name": "Ana"}],  # eligible leg0
+            [{"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg1
+            existing,  # existing appointments
+            # staff0 window narrowed to a single 30-min slot (see comment in
+            # test_single_day_two_legs_different_staff above).
+            [{"start_time": "09:00:00", "end_time": "09:30:00"}],  # staff0 day windows
+            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # staff1 day windows
+        ]
+        day = date(2026, 5, 5)
+        result = await get_available_slot_chains(
+            SHOP, [{"service_id": SVC, "staff_id": None},
+                   {"service_id": SVC2, "staff_id": None}],
+            day, day, max_results=1,
+        )
+        assert len(result) == 1
+        legs = result[0]["legs"]
+        assert legs[0]["slot_end"] == datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
+        assert legs[1]["slot_start"] == datetime(2026, 5, 5, 9, 40, tzinfo=_ROME)
+        assert legs[1]["slot_end"] == datetime(2026, 5, 5, 10, 10, tzinfo=_ROME)
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_returns_earliest_chain_even_when_later_staff_is_listed_first(self, mock_exec):
+        # Staff A/Ana (listed FIRST by the eligibility query) only has a slot
+        # starting at 14:00 that day. Staff B/Bob (listed SECOND) is free
+        # starting at 09:00 — genuinely earlier. `_iter_leg0_candidates`
+        # iterates staff-major (fully exhausts Ana before trying Bob), so a
+        # search that stops the instant it has `max_results` chains would
+        # settle for Ana's later slot without ever looking at Bob's earlier
+        # one. The fix must fully explore the day (both staff) before
+        # capping results, so the earliest chain (Bob's) wins.
+        #
+        # Note: this test intentionally narrows both staff's schedule
+        # windows to a single 30-min slot each (rather than modeling "Ana
+        # busy until 14:00" via an overlapping existing appointment across a
+        # full-day window) to keep the mocked call count small — the fix
+        # calls _staff_day_windows once per leg0 candidate it tries to
+        # extend, so a wide window with many half-hour candidates would
+        # require one mocked entry per candidate. The bug being tested
+        # (staff-major iteration order) is exercised identically either way.
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30}, {"id": SVC2, "duration_minutes": 30}],  # durations
+            [{"staff_id": STAFF, "staff_name": "Ana"},
+             {"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg0: Ana first, Bob second
+            [{"staff_id": STAFF2, "staff_name": "Bob"}],  # eligible leg1 (only Bob does SVC2)
+            [],  # existing appointments (none needed; availability is modeled via schedule windows)
+            [{"start_time": "14:00:00", "end_time": "14:30:00"}],  # Ana's day window (leg0 candidate gen)
+            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # Bob's window (leg1 extend, for Ana's candidate)
+            [{"start_time": "09:00:00", "end_time": "09:30:00"}],  # Bob's day window (leg0 candidate gen)
+            [{"start_time": "09:00:00", "end_time": "17:00:00"}],  # Bob's window (leg1 extend, for Bob's own candidate)
+        ]
+        day = date(2026, 5, 5)
+        result = await get_available_slot_chains(
+            SHOP, [{"service_id": SVC, "staff_id": None},
+                   {"service_id": SVC2, "staff_id": None}],
+            day, day, max_results=1,
+        )
+        assert len(result) == 1
+        # Must be Bob's 09:00 slot, not Ana's 14:00 slot.
+        assert result[0]["legs"][0]["staff_id"] == STAFF2
+        assert result[0]["legs"][0]["slot_start"] == datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_unknown_service_in_chain_returns_empty(self, mock_exec):
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30}],  # only one of two services found/active
+        ]
+        day = date(2026, 5, 5)
+        result = await get_available_slot_chains(
+            SHOP, [{"service_id": SVC, "staff_id": None},
+                   {"service_id": SVC2, "staff_id": None}],
+            day, day,
+        )
+        assert result == []
+
+
+class TestCreateAppointmentChain:
+    @patch("booking_engine.db.queries.execute_void", new_callable=AsyncMock)
+    @patch("booking_engine.db.queries.execute_one", new_callable=AsyncMock)
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_success(self, mock_exec, mock_one, mock_void):
+        leg1_start = datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
+        leg2_start = datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30, "price_eur": Decimal("35.00")},
+             {"id": SVC2, "duration_minutes": 30, "price_eur": Decimal("20.00")}],  # durations
+            [],  # leg1 overlap check
+            [],  # leg2 overlap check
+        ]
+        mock_one.return_value = {"id": APPT, "status": "scheduled"}
+        legs = [
+            {"service_id": SVC, "staff_id": STAFF, "slot_start": leg1_start},
+            {"service_id": SVC2, "staff_id": STAFF2, "slot_start": leg2_start},
+        ]
+        result = await create_appointment_chain(SHOP, CUSTOMER, legs)
+        assert result["status"] == "scheduled"
+        assert mock_void.await_count == 3  # 1 appointment insert + 2 appointment_services inserts
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_conflict_on_second_leg(self, mock_exec):
+        leg1_start = datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
+        leg2_start = datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30, "price_eur": Decimal("35.00")},
+             {"id": SVC2, "duration_minutes": 30, "price_eur": Decimal("20.00")}],
+            [],  # leg1 overlap check: clear
+            [{"id": "existing"}],  # leg2 overlap check: conflict
+        ]
+        legs = [
+            {"service_id": SVC, "staff_id": STAFF, "slot_start": leg1_start},
+            {"service_id": SVC2, "staff_id": STAFF2, "slot_start": leg2_start},
+        ]
+        with pytest.raises(SlotConflictError):
+            await create_appointment_chain(SHOP, CUSTOMER, legs)
+
+    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
+    async def test_missing_service_raises_invalid_service(self, mock_exec):
+        leg1_start = datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
+        leg2_start = datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
+        mock_exec.side_effect = [
+            [{"id": SVC, "duration_minutes": 30, "price_eur": Decimal("35.00")}],  # only 1 of 2 services found
+        ]
+        legs = [
+            {"service_id": SVC, "staff_id": STAFF, "slot_start": leg1_start},
+            {"service_id": SVC2, "staff_id": STAFF2, "slot_start": leg2_start},
+        ]
+        with pytest.raises(RuntimeError, match="invalid_service"):
+            await create_appointment_chain(SHOP, CUSTOMER, legs)

@@ -28,7 +28,7 @@ async def test_session_started_returns_assembled_prompt():
     config = {
         "display_name": "Salone Lucia",
         "greeting_after_disclosure": "Sono Aria",
-        "voice_preset": "warm_female", "tone_id": None,
+        "voice_preset": "verse", "tone_id": None,
         "answer_mode": "overflow", "services_to_mention": [],
     }
     policy = {"disclosure_text": "Salve, assistente AI...",

@@ -3,19 +3,11 @@
 -- Run after 01_schema.sql. Safe to re-run (ON CONFLICT DO NOTHING).
 
 -- Shops
-INSERT INTO shops (id, name, phone_number, address, welcome_message, tone_instructions, personality, special_instructions, is_active)
+INSERT INTO shops (id, name, phone_number, address, is_active)
 VALUES
   ('a0000000-0000-0000-0000-000000000001', 'Salon Bella', '+39 02 1234567', 'Via Roma 42, Milano',
-   'Ciao, benvenuto da Salon Bella! Come ti chiami?',
-   'Amichevole e informale, dai del tu al cliente',
-   'Sei Bella, l''assistente virtuale del Salon Bella. Sei solare, cordiale e sempre pronta ad aiutare.',
-   'Se il cliente chiede di un servizio che non offriamo, suggerisci il servizio più simile disponibile.',
    true),
   ('b0000000-0000-0000-0000-000000000002', 'Studio Hair', '+39 06 7654321', 'Via del Corso 15, Roma',
-   'Buongiorno, benvenuto allo Studio Hair. Come posso aiutarla?',
-   'Professionale e formale, dia del lei al cliente',
-   'Sei l''assistente dello Studio Hair. Sei professionale, preciso e attento ai dettagli.',
-   NULL,
    true)
 ON CONFLICT (id) DO NOTHING;
 
@@ -72,7 +64,10 @@ INSERT INTO staff_schedules (id, staff_id, day_of_week, start_time, end_time)
 SELECT gen_random_uuid(), s.id, d.day, '10:00', '18:00'
 FROM staff s
 CROSS JOIN (VALUES (0),(1),(2),(3),(4),(5)) AS d(day)
-ON CONFLICT (staff_id, day_of_week) DO NOTHING;
+WHERE NOT EXISTS (
+  SELECT 1 FROM staff_schedules ss
+  WHERE ss.staff_id = s.id AND ss.day_of_week = d.day
+);
 
 -- Sample Customers
 INSERT INTO customers (id, shop_id, full_name, preferred_staff_id)

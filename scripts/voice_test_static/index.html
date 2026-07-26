@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Kairo Voice Test Harness</title>
+<style>
+  :root {
+    --bg: oklch(0.09 0 0);
+    --surface: oklch(0.15 0.004 65);
+    --surface-2: oklch(0.19 0.006 65);
+    --border: oklch(0.28 0.006 65);
+    --ink: oklch(0.94 0.004 65);
+    --muted: oklch(0.64 0.01 65);
+
+    --primary: oklch(0.74 0.15 65);
+    --primary-ink: oklch(0.16 0.02 65);
+    --accent: oklch(0.58 0.14 210);
+
+    --success: oklch(0.72 0.17 145);
+    --warning: var(--primary);
+    --danger: oklch(0.68 0.19 25);
+
+    --success-soft: color-mix(in oklch, var(--success) 16%, var(--surface));
+    --warning-soft: color-mix(in oklch, var(--warning) 16%, var(--surface));
+    --danger-soft: color-mix(in oklch, var(--danger) 16%, var(--surface));
+
+    --radius: 10px;
+    --font: system-ui, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--ink);
+    max-width: 720px;
+    margin: 40px auto;
+    padding: 0 20px 60px;
+    line-height: 1.5;
+  }
+
+  h1 {
+    font-size: 1.75rem;
+    letter-spacing: -0.01em;
+    margin-bottom: 4px;
+  }
+
+  .subtitle {
+    color: var(--muted);
+    max-width: 70ch;
+    margin-top: 0;
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-top: 20px;
+  }
+
+  .field-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+  }
+
+  label {
+    display: block;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+
+  input {
+    width: 100%;
+    padding: 9px 10px;
+    font-size: 0.9375rem;
+    font-family: inherit;
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    transition: border-color 150ms ease-out;
+  }
+
+  input:hover { border-color: var(--muted); }
+
+  .actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+  }
+
+  button {
+    flex: 1;
+    min-width: 140px;
+    padding: 11px 20px;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    font-family: inherit;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background-color 150ms ease-out, border-color 150ms ease-out, opacity 150ms ease-out;
+  }
+
+  #startBtn {
+    background: var(--primary);
+    color: var(--primary-ink);
+  }
+  #startBtn:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 88%, white); }
+
+  #hangupBtn {
+    background: transparent;
+    color: var(--ink);
+    border-color: var(--border);
+  }
+  #hangupBtn:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  button:focus-visible,
+  input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+  }
+
+  #status {
+    font-weight: 600;
+    color: var(--muted);
+  }
+  #status.connecting { color: var(--warning); }
+  #status.connected { color: var(--success); }
+  #status.error { color: var(--danger); }
+
+  #mcpIndicator {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 0.75rem;
+    background: var(--surface-2);
+    color: var(--muted);
+    transition: background-color 150ms ease-out, color 150ms ease-out;
+  }
+  #mcpIndicator.in-progress { background: var(--warning-soft); color: var(--warning); }
+  #mcpIndicator.success { background: var(--success-soft); color: var(--success); }
+  #mcpIndicator.failed { background: var(--danger-soft); color: var(--danger); }
+
+  #log {
+    margin-top: 16px;
+    padding: 14px 16px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    min-height: 240px;
+    max-height: 420px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+  }
+
+  #log:empty::before {
+    content: "Waiting for a call to start…";
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  #log .line { margin-bottom: 6px; white-space: pre-wrap; }
+  #log .agent { color: var(--accent); }
+  #log .mcp { color: var(--warning); }
+  #log .mcp-ok { color: var(--success); }
+  #log .mcp-fail { color: var(--danger); font-weight: 600; }
+  #log .system { color: var(--muted); font-style: italic; }
+  #log .error { color: var(--danger); font-weight: 600; }
+
+  #log::-webkit-scrollbar { width: 8px; }
+  #log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition-duration: 0.01ms !important; }
+  }
+
+  @media (max-width: 480px) {
+    button { flex-basis: 100%; }
+  }
+</style>
+</head>
+<body>
+  <h1>Kairo Voice Test Harness</h1>
+  <p class="subtitle">Speaks to the real voice agent (same prompt/tools/DB as a real call) via OpenAI Realtime WebRTC. Tool calls hit the QA Fly app's MCP server — writes land on the QA Neon branch, not production.</p>
+
+  <div class="panel">
+    <div class="field-row">
+      <div>
+        <label for="shopId">Shop ID</label>
+        <input id="shopId" value="">
+      </div>
+      <div>
+        <label for="callerPhone">Caller phone (simulated)</label>
+        <input id="callerPhone" value="+390000000000">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="startBtn">Start Call</button>
+      <button id="hangupBtn" disabled>Hang Up</button>
+    </div>
+
+    <div class="status-row">
+      <p id="status">Idle</p>
+      <div id="mcpIndicator">MCP: idle</div>
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+<script>
+const DEBUG_EVENTS = true;  // log every unhandled Realtime event type (firehose) for debugging
+let pc = null;
+let agentLineEl = null;  // the <div> currently accumulating the agent's in-progress transcript
+let mcpCallStart = null;  // performance.now() when the current MCP call went in flight
+let responseActive = false;  // true while a Realtime response is generating
+let nudgePending = false;  // true from when we send a nudge until response.created confirms it landed
+
+// A bare {"type": "response.create"} just says "your turn" — with no signal
+// about WHY, the model can produce an empty/non-committal turn instead of
+// voicing the tool result. response.create's optional `response.instructions`
+// overrides session instructions for just this one response, so the nudge
+// can say explicitly what it wants. Mirrors call_supervisor.py's server-side
+// nudge (the production equivalent of this harness-only loop).
+const NUDGE_INSTRUCTIONS = 'Lo strumento ha appena restituito un risultato. ' +
+  'Comunicalo subito al cliente a voce con una frase breve e naturale, oppure ' +
+  'prosegui con il prossimo passo della prenotazione. Non restare in silenzio.';
+
+function logLine(cls, text) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = 'line ' + cls;
+  line.textContent = text;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+  return line;
+}
+
+function appendAgentDelta(delta) {
+  const el = document.getElementById('log');
+  if (!agentLineEl) {
+    agentLineEl = logLine('agent', 'Agent: ');
+  }
+  agentLineEl.textContent += delta;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(msg, state) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = state || '';
+}
+
+function setMcpIndicator(state, text) {
+  const el = document.getElementById('mcpIndicator');
+  el.className = state;
+  el.textContent = 'MCP: ' + text;
+}
+
+document.getElementById('startBtn').onclick = async () => {
+  setStatus('Requesting session...', 'connecting');
+  const shopId = document.getElementById('shopId').value.trim();
+  const callerPhone = document.getElementById('callerPhone').value.trim();
+
+  const sessionResp = await fetch('/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(shopId ? { shop_id: shopId, caller_phone: callerPhone }
+                                 : { caller_phone: callerPhone }),
+  });
+  if (!sessionResp.ok) {
+    const err = await sessionResp.json();
+    setStatus('Failed to create session', 'error');
+    logLine('error', 'ERROR: ' + JSON.stringify(err));
+    return;
+  }
+  const { client_secret, call_id } = await sessionResp.json();
+  logLine('system', 'Session created, call_id=' + call_id);
+  setStatus('Connecting...', 'connecting');
+
+  pc = new RTCPeerConnection();
+  const audioEl = document.createElement('audio');
+  audioEl.autoplay = true;
+  pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
+  document.body.appendChild(audioEl);
+
+  const mic = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  const micTrack = mic.getTracks()[0];
+  // Mute the mic while the agent delivers its opening greeting: on laptop speakers
+  // the mic hears the greeting, server-VAD treats it as caller speech and interrupts,
+  // and the agent loops re-greeting itself. Unmuted once the first response finishes.
+  // ponytail: greeting-only echo guard. Mid-call echo still needs headphones — add
+  // push-to-talk (turn_detection: null) if speaker testing during conversation matters.
+  micTrack.enabled = false;
+  pc.addTrack(micTrack);
+
+  const dc = pc.createDataChannel('oai-events');
+  dc.onopen = () => {
+    // Make the agent greet first, like a real call. Bare response.create makes
+    // the model speak immediately off its prompt, before the caller says anything.
+    dc.send(JSON.stringify({ type: 'response.create' }));
+    logLine('system', 'Triggered agent to speak first (mic muted during greeting)');
+  };
+  dc.onmessage = (e) => {
+    let ev;
+    try {
+      ev = JSON.parse(e.data);
+    } catch (err) {
+      return;  // non-JSON, ignore
+    }
+
+    // Track whether a response is currently generating, so we don't ask for a
+    // second one while one is in flight ("conversation already has an active response").
+    if (ev.type === 'response.created') { responseActive = true; nudgePending = false; }
+    if (ev.type === 'response.done') responseActive = false;
+
+    if (ev.type === 'response.done' && !micTrack.enabled) {
+      // Greeting finished — open the mic so the caller can reply.
+      micTrack.enabled = true;
+      logLine('system', 'Mic live — go ahead and talk');
+    }
+
+    if ((ev.type === 'response.audio_transcript.delta' ||
+         ev.type === 'response.output_audio_transcript.delta') && ev.delta) {
+      appendAgentDelta(ev.delta);
+    } else if (ev.type === 'response.audio_transcript.done' ||
+               ev.type === 'response.output_audio_transcript.done') {
+      agentLineEl = null;  // next delta starts a fresh line
+    } else if (ev.type === 'response.mcp_call.in_progress' ||
+               ev.type === 'response.mcp_call_arguments.done') {
+      // Model has decided to call an MCP tool and finished streaming arguments —
+      // the call itself is now in flight on OpenAI's side. Stamp the start so we
+      // can report the server round-trip latency when it completes.
+      mcpCallStart = performance.now();
+      setMcpIndicator('in-progress', 'calling ' + (ev.name || 'tool') + '...');
+      logLine('mcp', '[MCP call starting: ' + (ev.name || '?') + '(' + (ev.arguments || '') + ')]');
+    } else if (ev.type === 'response.output_item.done' && ev.item && ev.item.type === 'mcp_call') {
+      const item = ev.item;
+      const ms = mcpCallStart != null ? Math.round(performance.now() - mcpCallStart) : null;
+      mcpCallStart = null;
+      const latency = ms != null ? ' (' + ms + 'ms)' : '';
+      setMcpIndicator('success', item.name + ' completed' + latency);
+      logLine('mcp-ok', '[MCP call done: ' + item.server_label + '/' + item.name + latency +
+              ' -> ' + JSON.stringify(item.output).slice(0, 200) + ']');
+      // Realtime + hosted MCP does NOT auto-speak the tool result: the response that
+      // emitted the call already ended (response.done fires before the tool returns).
+      // Nudge a fresh response so the agent voices the result (or calls the next tool).
+      // Small delay so any auto-response OpenAI *might* start registers first, avoiding
+      // a duplicate. ponytail: harness-only — the production SIP path has no client to
+      // send this; see note in the report.
+      // nudgePending is set immediately (not inside the timeout) so two tool
+      // completions landing within the same 100ms window dedupe into one
+      // nudge instead of both scheduling a send — mirrors call_supervisor.py's
+      // nudge_pending guard, which the same class of race motivated there.
+      if (!responseActive && !nudgePending) {
+        nudgePending = true;
+        setTimeout(() => {
+          // If responseActive is true here, response.created already fired and
+          // reset nudgePending itself — nothing to do, no send needed.
+          if (!responseActive) {
+            dc.send(JSON.stringify({
+              type: 'response.create',
+              response: { instructions: NUDGE_INSTRUCTIONS },
+            }));
+            logLine('system', 'Nudged agent to voice the tool result');
+          }
+        }, 100);
+      }
+    } else if (ev.type === 'response.mcp_call.failed') {
+      const ms = mcpCallStart != null ? Math.round(performance.now() - mcpCallStart) : null;
+      mcpCallStart = null;
+      const latency = ms != null ? ' (' + ms + 'ms)' : '';
+      setMcpIndicator('failed', (ev.name || 'tool') + ' failed' + latency);
+      logLine('mcp-fail', '[MCP call FAILED' + latency + ': ' + JSON.stringify(ev).slice(0, 300) + ']');
+    } else if (ev.type === 'mcp_list_tools.failed' ||
+               ev.type === 'response.mcp_list_tools.failed') {
+      // The MCP handshake (initialize + tools/list) failed — the whole tool set is
+      // unusable for this session. This is what a wrong/redirecting server_url looks like.
+      setMcpIndicator('failed', 'tool list failed');
+      logLine('mcp-fail', '[MCP HANDSHAKE FAILED: ' + JSON.stringify(ev).slice(0, 400) + ']');
+    } else if (ev.type === 'error') {
+      // If our nudge itself was rejected (e.g. a response was already active),
+      // don't leave nudgePending stuck true for the rest of the call — that
+      // would silently suppress every future nudge after just one rejection.
+      nudgePending = false;
+      logLine('error', 'ERROR: ' + JSON.stringify(ev.error || ev));
+    } else if (/mcp|tool|function_call/i.test(ev.type)) {
+      // Any other MCP/tool-related event we don't explicitly render — surface it
+      // verbatim so tool activity is never silently invisible again.
+      logLine('mcp', '[' + ev.type + '] ' + JSON.stringify(ev).slice(0, 300));
+    } else if (DEBUG_EVENTS) {
+      logLine('system', '· ' + ev.type);  // firehose of every other event type
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  const sdpResp = await fetch('https://api.openai.com/v1/realtime/calls', {
+    method: 'POST',
+    body: offer.sdp,
+    headers: {
+      'Authorization': 'Bearer ' + client_secret,
+      'Content-Type': 'application/sdp',
+    },
+  });
+  const answerSdp = await sdpResp.text();
+  await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+
+  setStatus('Connected — talk into your mic', 'connected');
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('hangupBtn').disabled = false;
+};
+
+document.getElementById('hangupBtn').onclick = () => {
+  if (pc) { pc.close(); pc = null; }
+  agentLineEl = null;
+  setStatus('Idle');
+  setMcpIndicator('', 'idle');
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('hangupBtn').disabled = true;
+};
+</script>
+</body>
+</html>
