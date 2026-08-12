@@ -2,9 +2,10 @@
 
 Order matters and is a trust boundary, not a style choice: consent is re-checked
 here even though the webapp checks it twice, because this is the last code that
-runs before a named individual receives marketing. Credits are debited BEFORE
-the provider call — a send we can't bill must not happen, and an unbilled send
-is worse than a refunded one. See docs/messaging-design.md §6.3.
+runs before a named individual receives marketing. The balance is checked before
+the provider call and debited only after it accepts: refusing a send we can't
+bill, without charging for one the provider rejected. See
+docs/messaging-design.md §6.3.
 """
 from __future__ import annotations
 
