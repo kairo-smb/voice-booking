@@ -61,6 +61,8 @@ async def insert_debit_event(
     tokens: int,
     source: str,  # kept for signature compatibility; we map to 'granted'/'purchased'
     voice_call_id: UUID | None,
+    sms_message_id: UUID | None = None,
+    whatsapp_message_id: UUID | None = None,
 ) -> None:
     """Deduct `tokens` from the basket using granted-first ordering, log to ai_token_log."""
     amount = abs(tokens)
@@ -127,8 +129,42 @@ async def insert_debit_event(
     await execute_void(
         """
         INSERT INTO business_app_core.ai_token_log
-            (shop_id, credits_used, source, voice_call_id, created_at)
-        VALUES ($1, $2, $3::ai_credit_source, $4, now())
+            (shop_id, credits_used, source, voice_call_id,
+             sms_message_id, whatsapp_message_id, created_at)
+        VALUES ($1, $2, $3::ai_credit_source, $4, $5, $6, now())
         """,
         shop_id, amount, debit_source, voice_call_id,
+        sms_message_id, whatsapp_message_id,
     )
+
+
+async def try_debit_for_message(
+    *,
+    shop_id: UUID,
+    credits: int,
+    sms_message_id: UUID | None = None,
+    whatsapp_message_id: UUID | None = None,
+) -> bool:
+    """Debit for an outbound message, or refuse. Returns False without debiting.
+
+    Unlike insert_debit_event (the voice path) this never overdraws: a live call
+    can't be un-answered, but a message can simply not be sent. See
+    docs/messaging-design.md §5.2.
+    """
+    if credits <= 0:
+        return True   # a free message writes no ledger row
+    # ponytail: check-then-debit, not one locked transaction. Two concurrent
+    # sends could overdraw by one message; sends are owner-triggered and
+    # effectively serial today. Wrap both in a single FOR UPDATE tx if bulk
+    # campaigns ever run concurrently.
+    if await get_balance(shop_id) < credits:
+        return False
+    await insert_debit_event(
+        shop_id=shop_id,
+        tokens=credits,
+        source="granted",
+        voice_call_id=None,
+        sms_message_id=sms_message_id,
+        whatsapp_message_id=whatsapp_message_id,
+    )
+    return True
