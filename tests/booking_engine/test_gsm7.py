@@ -1,4 +1,10 @@
-from booking_engine.services.messaging.gsm7 import sanitize, encode_info
+from booking_engine.services.messaging.gsm7 import (
+    _BASIC,
+    _EXTENDED,
+    _TRANSLITERATE,
+    encode_info,
+    sanitize,
+)
 
 
 def test_italian_accents_are_gsm7_and_free():
@@ -46,3 +52,28 @@ def test_extended_chars_count_double():
     assert info.encoding == "gsm7"
     assert info.segments == 1     # 80 × 2 = 160 septets = exactly one segment
     assert encode_info("€" * 81).segments == 2
+
+
+# The two tables below drive billing directly, and a bad edit to either would
+# mis-charge silently — no behavioural test would fail. These assert the
+# invariants instead of the outputs.
+
+def test_basic_and_extended_alphabets_do_not_overlap():
+    # Overlap would let an extension char be counted as 1 septet instead of 2.
+    assert not set(_BASIC) & set(_EXTENDED)
+
+
+def test_every_transliteration_target_is_representable():
+    # A replacement that isn't itself in the alphabet defeats the point:
+    # sanitize() would "clean" the text and it would still fall back to UCS-2.
+    alphabet = set(_BASIC) | set(_EXTENDED)
+    for source, replacement in _TRANSLITERATE.items():
+        assert set(replacement) <= alphabet, f"{source!r} → {replacement!r}"
+
+
+def test_transliteration_sources_are_distinct_codepoints():
+    # Three different Unicode spaces map to ASCII space; transcribing them as
+    # literal " " collapses all three into one no-op entry that still passes
+    # every behavioural test above.
+    for cp in (0x00A0, 0x2009, 0x202F):
+        assert chr(cp) in _TRANSLITERATE, f"missing U+{cp:04X}"
