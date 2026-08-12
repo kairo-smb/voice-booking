@@ -9,6 +9,7 @@ is worse than a refunded one. See docs/messaging-design.md §6.3.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -23,6 +24,8 @@ from booking_engine.services.phone_normalize import normalize_e164
 # Legally required in every marketing message (Garante). Appended server-side,
 # never left to the LLM that wrote the body.
 OPT_OUT_FOOTER = " Rispondi STOP per non ricevere piu'."
+
+logger = logging.getLogger(__name__)
 
 # Twilio list price for Italy, used only to pre-charge. The status callback
 # writes the real price; this is never the billed figure of record.
@@ -109,9 +112,12 @@ async def send_marketing_sms(
 
     # Estimated from list price; the status webhook reconciles with the real one.
     credits = send_credits(_ESTIMATED_USD_PER_SEGMENT * info.segments)
-    if not await tbq.try_debit_for_message(
-        shop_id=shop_id, credits=credits, sms_message_id=message_id
-    ):
+
+    # Check the balance now, debit only after the provider accepts. Debiting
+    # first meant a Twilio rejection left the shop paying for a message that was
+    # never sent, on a call that cost us nothing — charging for that is worse
+    # than the narrow race this ordering accepts.
+    if await tbq.get_balance(shop_id) < credits:
         await sms_queries.mark_failed(message_id=message_id, error_code="insufficient_credits")
         return SendResult(ok=False, reason="insufficient_credits", message_id=message_id)
 
@@ -123,6 +129,16 @@ async def send_marketing_sms(
     except Exception as exc:  # noqa: BLE001 — provider errors are data, not crashes
         await sms_queries.mark_failed(message_id=message_id, error_code=str(exc)[:200])
         return SendResult(ok=False, reason="provider_error", message_id=message_id)
+
+    # ponytail: the message is already gone, so a refused debit here can only be
+    # logged, not undone. Only reachable if the basket drained between the check
+    # above and now — owner-triggered sends are effectively serial.
+    if not await tbq.try_debit_for_message(
+        shop_id=shop_id, credits=credits, sms_message_id=message_id
+    ):
+        logger.warning(
+            "sms.unbilled_send shop=%s message=%s credits=%s", shop_id, message_id, credits
+        )
 
     await sms_queries.mark_sent(
         message_id=message_id, provider_sid=result.sid,

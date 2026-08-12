@@ -82,7 +82,8 @@ class _Recorder:
 
 
 def _wire(monkeypatch, rec, *, customer, opted_out=False, sender="+37251234567",
-          debit_ok=True, twilio=None):
+          debit_ok=True, balance=10_000, twilio=None):
+    async def q_balance(shop_id): return balance
     async def q_sender(shop_id): return sender
     async def q_customer(shop_id, customer_id): return customer
     async def q_opted(shop_id, phone): return opted_out
@@ -101,6 +102,7 @@ def _wire(monkeypatch, rec, *, customer, opted_out=False, sender="+37251234567",
     monkeypatch.setattr(sms_send.sms_queries, "insert_outbound", q_insert)
     monkeypatch.setattr(sms_send.sms_queries, "mark_sent", q_sent)
     monkeypatch.setattr(sms_send.sms_queries, "mark_failed", q_failed)
+    monkeypatch.setattr(sms_send.tbq, "get_balance", q_balance)
     monkeypatch.setattr(sms_send.tbq, "try_debit_for_message", q_debit)
     monkeypatch.setattr(
         sms_send, "_twilio_send",
@@ -153,7 +155,7 @@ async def test_opted_out_phone_is_suppressed(monkeypatch):
 async def test_insufficient_credits_blocks_the_send(monkeypatch):
     # Never send something that can't be billed.
     rec = _Recorder()
-    _wire(monkeypatch, rec, customer=_consenting_customer(), debit_ok=False)
+    _wire(monkeypatch, rec, customer=_consenting_customer(), balance=0)
 
     result = await sms_send.send_marketing_sms(
         shop_id=SHOP, customer_id=CUSTOMER, body="Ciao"
@@ -162,6 +164,24 @@ async def test_insufficient_credits_blocks_the_send(monkeypatch):
     assert result.ok is False
     assert result.reason == "insufficient_credits"
     assert rec.sent is None
+    assert rec.debited is None      # refused before any money moved
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_does_not_charge_the_shop(monkeypatch):
+    # Twilio rejected it, so Twilio charged us nothing. Debiting before the
+    # provider call would have billed the salon for a message that never went.
+    rec = _Recorder()
+    def boom(**kw):
+        raise RuntimeError("21610 unsubscribed recipient")
+    _wire(monkeypatch, rec, customer=_consenting_customer(), twilio=boom)
+
+    result = await sms_send.send_marketing_sms(
+        shop_id=SHOP, customer_id=CUSTOMER, body="Ciao"
+    )
+
+    assert result.reason == "provider_error"
+    assert rec.debited is None
 
 
 @pytest.mark.asyncio

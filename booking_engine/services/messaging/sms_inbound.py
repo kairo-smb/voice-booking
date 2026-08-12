@@ -14,7 +14,13 @@ from booking_engine.services.phone_normalize import normalize_e164
 # Italian and English opt-out words. Matched as the WHOLE message (modulo
 # whitespace and punctuation), never as a substring: "non fermatevi, stop mai!"
 # is not an opt-out and unsubscribing someone who didn't ask is its own harm.
-_STOP_WORDS = {"stop", "alt", "cancella", "cancellami", "unsubscribe", "stopall"}
+_STOP_WORDS = {
+    "stop", "alt", "cancella", "cancellami", "unsubscribe", "stopall",
+    # Colloquial and literal Italian variants a real customer plausibly sends.
+    # Safe to include precisely because matching is whole-message: "basta cosi,
+    # grazie" is a reply, not an opt-out, and does not match.
+    "basta", "disiscrivimi", "disiscriviti",
+}
 _STRIP = re.compile(r"^[\s\W_]+|[\s\W_]+$", re.UNICODE)
 
 
