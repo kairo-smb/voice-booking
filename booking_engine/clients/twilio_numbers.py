@@ -76,3 +76,33 @@ def purchase_number(
         kwargs["address_sid"] = address_sid
     result = client.incoming_phone_numbers.create(**kwargs)
     return PurchasedNumber(sid=result.sid, phone_number=result.phone_number)
+
+
+def release_number(*, sid: str, account_sid: str, auth_token: str) -> None:
+    """Give a number back to Twilio.
+
+    Called when we bought one we cannot store — without this, losing the
+    insert race leaks a number billed at ~$3/mo forever.
+    """
+    Client(account_sid, auth_token).incoming_phone_numbers(sid).delete()
+
+
+@dataclass
+class NumberStatus:
+    sid: str
+    phone_number: str
+    voice_url: str
+    sms_url: str
+
+
+def fetch_number(*, sid: str, account_sid: str, auth_token: str) -> NumberStatus:
+    """Read a number back from Twilio.
+
+    Raises TwilioRestException with status 404 if the number no longer belongs
+    to this account — which is exactly the signal the health check needs.
+    """
+    n = Client(account_sid, auth_token).incoming_phone_numbers(sid).fetch()
+    return NumberStatus(
+        sid=n.sid, phone_number=n.phone_number,
+        voice_url=n.voice_url or "", sms_url=n.sms_url or "",
+    )
