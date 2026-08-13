@@ -248,21 +248,24 @@ now, when*:
 |---|---|---|
 | `draft`, no submission | What the number is for, what the document is, that review takes a few days | the form |
 | `draft` + `evaluation_errors` | Twilio's own violations, verbatim | fix and resubmit |
-| `pending_review` | "Richiesta inviata il {submitted_at}. Verifica in corso." + **expected by {date}** | none — say so explicitly |
+| `pending_review` | "Richiesta inviata il {submitted_at}. Verifica in corso, di solito **pochi giorni lavorativi**." | none — say so explicitly |
 | `pending_review`, past the window | "Sta richiedendo più tempo del previsto. Nessuna azione da parte tua." | contact support |
 | `rejected` | Twilio's `rejection_reason`, verbatim | resubmit with a corrected document |
 | `approved` / provisioning | "Approvata. Stiamo attivando il numero." | none |
 | `provisioned` | the number + the green/red semaphore | — |
 
-**Expected-by date: `submitted_at` + 3 business days.** Twilio's regulatory
-review is documented as 1–3 business days; the deleted Telnyx-era route in this
-repo carried the same figure. Show the conservative end, not the optimistic
-one — a promise that slips is worse than a slower promise kept. The constant
-lives in one place so it can be corrected once real review times are observed.
+**No specific date is shown** (decided 2026-08-13). Twilio documents 1–3
+business days and the deleted Telnyx-era route carried the same figure, but we
+have no observed data for *Estonian mobile business bundles* specifically, and
+a date shown to a salon that then slips is worse than no date at all. The copy
+says "pochi giorni lavorativi". Adding a date later costs nothing; the first
+real salon is the one you least want to disappoint.
 
-**Past the window, stop promising.** Do not keep showing a date that has
-already passed; switch to the overdue copy above. The state is derived from
-`submitted_at`, not stored, so it needs no extra column and cannot go stale.
+**The threshold still exists internally.** `REVIEW_BUSINESS_DAYS = 3` drives
+only the switch to the overdue copy — nothing renders it. Derived from
+`submitted_at` at read time, so it needs no column and cannot go stale. Turn
+the date on once there are real review times to base it on, and correct the
+constant at the same time.
 
 **No notification is sent today, deliberately.**
 `booking_engine/clients/push_notifications.py::send_push` is a **stub** that

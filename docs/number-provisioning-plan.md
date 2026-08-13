@@ -546,14 +546,17 @@ export async function hasActiveSubscription(shopId: string): Promise<boolean> {
 
 ```typescript
 // src/lib/numbers/request-state.ts
-export const REVIEW_BUSINESS_DAYS = 3   // one place, correct it once real times are known
+// Drives ONLY the switch to the overdue copy. No date is rendered — we have no
+// observed review times for Estonian mobile bundles, and a date that slips is
+// worse than none. Turn a date on once there is real data. See design §8.1.
+export const REVIEW_BUSINESS_DAYS = 3
 
 export type RequestView =
   | { kind: 'no_plan' }
   | { kind: 'form' }
   | { kind: 'violations'; violations: { friendly_name: string; description: string }[] }
-  | { kind: 'pending'; expectedBy: Date }
-  | { kind: 'overdue' }
+  | { kind: 'pending'; submittedAt: Date }
+  | { kind: 'overdue'; submittedAt: Date }
   | { kind: 'rejected'; reason: string }
   | { kind: 'approved' }
   | { kind: 'active'; number: string; health: 'unknown' | 'green' | 'red'; detail: string | null }
@@ -562,7 +565,7 @@ export function addBusinessDays(from: Date, n: number): Date { /* skip Sat/Sun *
 export function viewFor(input: {...}, now: Date): RequestView
 ```
 
-Test it: `pending_review` submitted 1 business day ago → `pending` with the right `expectedBy`; submitted 5 business days ago → `overdue`, **not** a stale past date; a Friday submission skips the weekend.
+Test it: submitted 1 business day ago → `pending`; submitted 5 business days ago → `overdue`; a **Friday** submission is still `pending` on the following Monday (the weekend must not count toward the threshold — that is the whole reason `addBusinessDays` exists rather than a plain day count). Assert no test expects a rendered date.
 
 - [ ] **Step 2:** The form: business name prefilled from `shops.name`, contact email prefilled from the owner, file input for the *visura camerale*. State plainly, before they start, that Twilio review takes a few days and what the document is — the friction is acceptable, being surprised by it is not.
 - [ ] **Step 3:** i18n in all three locale files — all three carry this key set and a missing key is a runtime gap.
