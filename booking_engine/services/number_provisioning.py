@@ -209,12 +209,24 @@ async def provision_approved(shop_id: UUID, *, settings) -> str:
         # Lost the race to a concurrent provision (double-tick, retried cron
         # run racing another). Give the number back or it bills ~$3/mo
         # forever with nothing referencing it.
-        await asyncio.to_thread(
-            twilio_numbers.release_number,
-            sid=purchased.sid,
-            account_sid=account_sid,
-            auth_token=auth_token,
-        )
+        try:
+            await asyncio.to_thread(
+                twilio_numbers.release_number,
+                sid=purchased.sid,
+                account_sid=account_sid,
+                auth_token=auth_token,
+            )
+        except Exception:  # noqa: BLE001 — a failed release must not fail the tick
+            # Raising here would abort this shop's tick run, and the next run
+            # takes the already_provisioned path (the winner's row exists), so
+            # nothing would ever look at this number again. Log it loudly
+            # instead: the SID is the only handle anyone has to reclaim it.
+            logger.exception(
+                "numbers.release_failed shop=%s sid=%s — number is LEAKED and "
+                "must be released manually in the Twilio console",
+                shop_id, purchased.sid,
+            )
+            return "raced_release_failed"
         return "raced_released"
 
     await number_request_queries.set_status(shop_id=shop_id, status="provisioned")
