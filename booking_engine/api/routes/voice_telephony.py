@@ -135,6 +135,7 @@ async def provision(
             auth_token=settings.twilio_auth_token,
             bundle_sid=settings.twilio_bundle_sid or None,
             address_sid=settings.twilio_address_sid or None,
+            sms_url=f"{settings.public_base_url}/api/v1/sms/webhook/inbound",
         )
     except TwilioRestException as exc:
         raise HTTPException(502, f"Twilio number purchase failed: {exc.msg}") from exc
