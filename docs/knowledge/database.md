@@ -38,21 +38,26 @@ The Control Plane (`webapp`) has full CRUD on all of the above except `appointme
 
 **Other stable conventions:** soft deletes via `is_active = false` (never hard-delete a row with dependent appointments); timezone is hardcoded `Europe/Rome` for all slot calculations (`ZoneInfo("Europe/Rome")` in `queries.py`).
 
+**`customers.marketing_consent*` columns appear in no migration in this repo.** They arrive via the webapp's own migration chain, not this repo's — noted here so nobody re-diagnoses that as a missing-migration bug (found while grounding the 2026-08-14 number-provisioning docs; see `CLAUDE.md`).
+
 ## `voice_agent` schema — authoritative here
 
-DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `10_shop_config_voice_preset_default.sql`, applied in filename order. `01_schema.sql`/`02_seed_data.sql` are a **separate, local-only bootstrap pair** with fake data and unqualified table names — `scripts/migrate.sh` explicitly skips both; never run them against real Neon.
+DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `12_number_requests.sql`, applied in filename order. `01_schema.sql`/`02_seed_data.sql` are a **separate, local-only bootstrap pair** with fake data and unqualified table names — `scripts/migrate.sh` explicitly skips both; never run them against real Neon.
 
 | Table | Added in | Purpose |
 |---|---|---|
 | `calls` | 03, extended 04/08 | one row per inbound call — caller number, matched/created customer, outcome, and (08) a structured hairstylist `service_brief` |
 | `call_transcripts` | 03 | per-turn transcript rows for a call |
 | `call_events` | 03 | tool-call/event log for a call |
-| `shop_telephony` | 04, extended 09 | provisioned Twilio number per shop, `setup_path` (new/forward), `provider` (defaults `'twilio'` since 09) |
+| `shop_telephony` | 04, extended 09/12 | provisioned Twilio number per shop, `setup_path` (new/forward), `provider` (defaults `'twilio'` since 09), `health_status`/`health_detail`/`health_checked_at` (12, green/red semaphore — see below) |
 | `shop_config` | 04, extended 06/07/10 | Layer 1 voice config: `enabled`, `display_name`, greetings, `voice_preset`, `tone_id` (06, FK to `voice_tones`, replaced an inline `tone_preset` string), `business_hours`, `answer_mode`, token top-up settings |
 | `callback_memos` | 04 | merchant callback reminders created by `escalate_to_merchant` |
 | `auth_events` | 04 | identity-verification audit trail |
 | `system_policy` | 04 | disclosure/consent text (seeded it-IT) |
 | `voice_tones` | 06 | 8 seeded presets (`is_preset=true`) plus room for shop-authored custom tones (`created_by_shop_id`); seeded names: professionale, amichevole, efficiente, luxury, tecnico, casual, empatico, conciso |
+| `number_requests` | 12 | one row per shop, PK `shop_id`: self-service Estonian-number regulatory-bundle lifecycle (`status` draft→evaluating→pending_review→approved/rejected→provisioned, the Twilio `regulation_sid`/`bundle_sid`/`end_user_sid`/`document_sid`, `evaluation_errors` jsonb verbatim from Twilio, `rejection_reason`). Polled hourly by `POST /api/v1/messaging/tick`. See [Architecture](architecture.md#self-service-number-provisioning-path-2-onboarding) and `CLAUDE.md` §2026-08-14. |
+
+**`shop_telephony`'s health semaphore (12):** `health_status` (`unknown`/`green`/`red`, default `unknown`) records whether a provisioned number still exists at Twilio with webhooks pointed at us. A Twilio-unreachable probe deliberately leaves the prior status untouched rather than flipping to red — only a confirmed 404 or webhook drift changes the light (`services/number_health.py::decide_health`).
 
 `business_app_core.shops` also gained two columns directly in migration 03: `voice` (default `'alloy'`) and `language` (default `'it'`) — the one place this repo's migrations touch the other schema, both additive/nullable-safe.
 

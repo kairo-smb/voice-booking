@@ -21,6 +21,122 @@ not as a follow-up. See `docs/knowledge/README.md` for the full rule.
 
 ---
 
+## 2026-08-14 — Self-service Estonian number provisioning: the 2026-07-16 shared-bundle model is SUPERSEDED for this path
+
+**The 2026-07-16 "one Kairo-entity bundle, reused across every shop, no
+per-salon KYC" decision (below) does not hold for self-service.** Twilio's
+ISV guidance is explicit: *"Each customer needs their own bundle. Do not
+reuse your business information in customer bundles. End-User records must
+reflect the actual end-user, not you. Twilio audits this."* A salon
+requesting its own number through the webapp now gets its own regulatory
+bundle, built from a form it fills in — not a slot in Kairo's shared one.
+**This supersedes only the self-service path**: the shared-bundle
+`TWILIO_BUNDLE_SID` and the manual `POST /voice/numbers/search` +
+`/voice/numbers/provision` pair are untouched and still live, still used for
+Path 1 (forwarding) and ops-triggered onboarding — reusing Kairo's own info
+across *Kairo-triggered* provisioning was never the audited case Twilio's
+rule is about. Only reselling to a salon under its own name required a
+bundle-per-customer.
+
+**What Estonia Mobile actually requires — queried, never hardcoded.**
+`GET /v2/RegulatoryCompliance/Regulations?IsoCountry=EE&NumberType=mobile`
+returns exactly one regulation (`RN26dca8d0e541a6c8fce4abd46e518506`,
+business-only — no individual option, a sole trader with no company
+registration cannot get a number at all): one End-User field
+(`business_name`) and one supporting document
+(`commercial_registrar_excerpt`, an Italian *visura camerale*). No address,
+VAT, or personal ID — lighter than the 2026-07-16 research suggested, and
+**sending fields the regulation doesn't ask for is a known cause of
+evaluation failure**, so nothing beyond that is collected. The regulation is
+looked up at request time and stored on the request row rather than
+hardcoded, since Twilio's own docs say these can change;
+`tests/live_twilio/test_estonia_regulation.py` is the canary — a red run
+there means Estonia's rules moved, not a code bug.
+
+**Twilio is the validator, not us.** `POST /Bundles/{sid}/Evaluations` is
+synchronous and returns field-level violations, shown back to the salon
+verbatim. Verified against a live noncompliant evaluation while building
+this: the response objects have **no `description` field** — the human
+explanation is in `failure_reason`. Parsing `description` doesn't error, it
+just silently returns empty explanations; a genuine dead end that surfaced
+because two people happened to eyeball the raw response rather than trust
+the SDK's shape.
+
+**Reintroduces the exact friction the 2026-07-16 decision eliminated, and
+that's accepted, not a regression.** Per-salon KYC is unavoidable once Kairo
+is reselling under each salon's own name rather than its own. It puts a
+document fetch plus a multi-day Twilio review between "salon pays" and
+"salon has a number" — see the "waiting experience" states in
+`src/lib/numbers/request-state.ts` (webapp) for how that gap is surfaced
+rather than left to look broken. No specific completion date is shown
+(decided 2026-08-13): "pochi giorni lavorativi" instead of a number, since
+there's no observed review-time data for Estonian mobile bundles yet and a
+date that slips reads worse than no date. `REVIEW_BUSINESS_DAYS = 3`
+(webapp) drives only the switch to "taking longer than expected" copy.
+
+**A real bug this closed: the upsert orphaned purchased numbers.**
+`upsert_telephony`'s `ON CONFLICT (shop_id) DO UPDATE` meant a second
+provision call bought a second number and overwrote the row — the first
+stayed billed by Twilio (~$3/mo) with nothing in the DB referencing it. The
+primary key guaranteed one *row*, not one *purchase*, and self-service makes
+a double-click a real path to hitting this, not just a theoretical race.
+Fixed with a new `insert_telephony` (`ON CONFLICT DO NOTHING RETURNING *`)
+used only by the provisioning paths (`upsert_telephony` itself is untouched,
+still used for legitimate updates like activation status): check-first
+(idempotent replay of a double-tick), insert-only, and on a lost race
+`release_number` the just-purchased number back to Twilio rather than leak
+it. A failed release is logged loudly, not raised — raising would abort that
+shop's tick and the next run takes the `already_provisioned` path, so
+nothing would ever look at the leaked number again.
+
+**The health semaphore is outage-safe by construction.**
+`services/number_health.py::decide_health` returns `None` (no verdict) for
+an inconclusive probe — Twilio unreachable — which only stamps
+`health_checked_at` and leaves `health_status` alone. Only a confirmed 404
+or webhook drift is allowed to flip the light. Without this, a transient
+Twilio outage during the hourly tick would repaint every salon's number red
+at once.
+
+**The gate is `shops.plan_id IS NOT NULL`, not a new 'gratis' plan row** —
+free is the *absence* of a plan, matching how Gratis already works
+elsewhere in the webapp (see that repo's `decisions.md`). This is the
+**first** subscription gate in the webapp; gating is otherwise entirely by
+vertical bundle and role — deliberately kept to one predicate
+(`hasActiveSubscription`), no tier concept introduced.
+
+**`send_push` is a stub that only logs** (`clients/push_notifications.py`,
+unchanged by this work — flagged since 2026-07-24 below). Events
+(`number_request_approved`/`number_request_rejected`) are still emitted for
+consistency with the existing call-lifecycle/balance-alert emitters, so they
+become real the day that stub is wired — nobody is actually notified today;
+the salon learns the outcome by opening Inbox.
+
+**Flagged, not actioned:**
+- **Cancellation gap.** When a subscription lapses, the webapp's
+  `process-event.ts` nulls `plan_id` but nothing releases the shop's number
+  — it keeps costing ~$3/mo with no one paying for it. A product decision
+  (grace period vs. release vs. bill separately), not a provisioning defect.
+- **Crash-between-purchase-and-insert gap.** If the process dies between
+  `purchase_number` and `insert_telephony` succeeding, the number is bought
+  Twilio-side with no local row and no release path — the existing
+  lost-race release only fires when the *insert* loses, not when the
+  process never reaches it. Needs a reconciliation job; not built.
+- `business_app_core.customers.marketing_consent*` columns appear in no
+  migration in this repo — they arrive via the webapp's own chain. Noted in
+  `docs/knowledge/database.md` so this doesn't get re-diagnosed as a missing
+  migration.
+
+**Docs:** `docs/knowledge/architecture.md` (new "Self-service number
+provisioning" section), `database.md` (`number_requests` table,
+`shop_telephony` health columns), `providers.md` (Twilio section — the two
+coexisting bundle models, the regulation/evaluation gotchas), and a new
+`docs/knowledge/api/number-provisioning.md` page (linked from `api/README.md`
+and `_sidebar.md`). `docs/number-provisioning-design.md` (the working design
+doc this entry and those pages were written from) is deleted as of this
+change — superseded by the shipped docs above.
+
+---
+
 ## 2026-07-24 — Repo cleanup: deleted dead docs/scripts, rewrote two stale docs, closed a dependency drift
 
 **What was removed (confirmed dead first, not guessed):** `docs/DEPLOY_VOICE_GATEWAY_LIFECYCLE.md`
