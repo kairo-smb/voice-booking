@@ -92,21 +92,58 @@ async def test_evaluate_returns_compliant_true_and_no_violations():
 @pytest.mark.asyncio
 @respx.mock
 async def test_evaluate_maps_only_failed_entries_when_noncompliant():
+    """Fixture shape verified against a real live noncompliant evaluation
+    (Estonia mobile, End-User assigned with no supporting document) on
+    2026-08-14 — see CLAUDE.md. Twilio's `results[]` entries have no
+    `description` key; the violation message lives in `failure_reason`.
+    """
     respx.post(f"{_BASE}/Bundles/BU1/Evaluations").mock(
         return_value=httpx.Response(200, json={
             "status": "noncompliant",
             "results": [
-                {"friendly_name": "business_name", "description": "is required",
-                 "passed": False},
-                {"friendly_name": "commercial_registrar_excerpt",
-                 "description": "looks fine", "passed": True},
+                {
+                    "friendly_name": "Business",
+                    "requirement_name": "business_info",
+                    "requirement_friendly_name": "Business",
+                    "object_type": "business",
+                    "passed": True,
+                    "error_code": None,
+                    "failure_reason": None,
+                    "valid": [{"friendly_name": "Business Name",
+                               "object_field": "business_name",
+                               "error_code": None, "failure_reason": None}],
+                    "invalid": [],
+                },
+                {
+                    "friendly_name": "Extract from the commercial register",
+                    "requirement_name": "business_name_info",
+                    "requirement_friendly_name": "Business Name",
+                    "object_type": "commercial_registrar_excerpt",
+                    "passed": False,
+                    "error_code": 22216,
+                    "failure_reason": (
+                        "An Extract from the commercial register is missing. "
+                        "Please add one to the regulatory bundle."
+                    ),
+                    "valid": [],
+                    "invalid": [{"friendly_name": "Business Name",
+                                 "object_field": "business_name",
+                                 "error_code": 22217,
+                                 "failure_reason": "The Business Name is missing."}],
+                },
             ],
         })
     )
     ok, violations = await evaluate(bundle_sid="BU1", account_sid="AC", auth_token="tok")
     assert ok is False
     assert violations == [
-        Violation(friendly_name="business_name", description="is required"),
+        Violation(
+            friendly_name="Extract from the commercial register",
+            description=(
+                "An Extract from the commercial register is missing. "
+                "Please add one to the regulatory bundle."
+            ),
+        ),
     ]
 
 

@@ -106,14 +106,22 @@ async def assign_item(*, bundle_sid: str, object_sid: str,
 
 async def evaluate(*, bundle_sid: str, account_sid: str,
                    auth_token: str) -> tuple[bool, list[Violation]]:
-    """Synchronous. Returns (compliant, violations) with Twilio's own wording."""
+    """Synchronous. Returns (compliant, violations) with Twilio's own wording.
+
+    `results[]` entries are a flat list (confirmed against a live noncompliant
+    evaluation, see CLAUDE.md 2026-08-14 entry) but the message field is
+    `failure_reason`, not `description` — Twilio's evaluation objects have no
+    `description` key at all. Getting this wrong doesn't produce an empty
+    violation list (friendly_name still resolves), but it silently drops the
+    only text explaining *why* the requirement failed.
+    """
     body = await _post(f"/Bundles/{bundle_sid}/Evaluations", {},
                        account_sid=account_sid, auth_token=auth_token)
     if body.get("status") == "compliant":
         return True, []
     return False, [
         Violation(friendly_name=v.get("friendly_name", ""),
-                  description=v.get("description", ""))
+                  description=v.get("failure_reason") or "")
         for v in body.get("results", [])
         if v.get("passed") is False
     ]
