@@ -14,7 +14,6 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, Response
-from twilio.request_validator import RequestValidator
 
 from booking_engine.config import Settings, get_settings
 from booking_engine.db.voice_config_queries import get_config
@@ -22,6 +21,7 @@ from booking_engine.db.voice_telephony_queries import get_telephony_by_kairo_num
 from booking_engine.services.phone_normalize import digits_only
 from booking_engine.services.realtime_session import build_sip_uri
 from booking_engine.services.token_meter import decide_session
+from booking_engine.services.twilio_signature import twilio_signature_valid
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/voice/twiml", tags=["voice-twiml"])
@@ -54,12 +54,9 @@ def _dial_fallback(number: str) -> Response:
 
 
 def _twilio_signature_valid(request: Request, form: dict, settings: Settings) -> bool:
-    """Verify X-Twilio-Signature; no-op until TWILIO_AUTH_TOKEN is provisioned."""
-    if not settings.twilio_auth_token:
-        return True
-    signature = request.headers.get("X-Twilio-Signature", "")
-    url = f"{settings.public_base_url}/api/v1/voice/twiml/incoming"
-    return RequestValidator(settings.twilio_auth_token).validate(url, form, signature)
+    return twilio_signature_valid(
+        request, form, settings, path="/api/v1/voice/twiml/incoming"
+    )
 
 
 @router.post("/incoming")

@@ -42,6 +42,8 @@ def create_app() -> FastAPI:
     app.include_router(voice_balance.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_heartbeat
     app.include_router(voice_heartbeat.router, prefix="/api/v1")
+    from booking_engine.api.routes import sms
+    app.include_router(sms.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_tools_catalog
     app.include_router(voice_tools_catalog.router)
     from booking_engine.api.routes import voice_tools_booking
