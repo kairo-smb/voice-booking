@@ -3,9 +3,10 @@ name: Deploy Fly Production
 # Production Fly release pipeline for the voice-webhook/MCP surface
 # (kairo-booking-engine). Pushes to main provision a throwaway Neon branch
 # from production, apply migrations + seed fixtures to it, and run the
-# live_db suite against it. Only if that passes are migrations applied for
-# real to production, then the app deployed. A regression or failing
-# migration stops the release before prod is touched.
+# live_db suite against it. Only if that passes is webapp's migrate-prod
+# workflow dispatched (it owns applying migrations to the real shared
+# production DB, see migrate-via-webapp below), then the app deployed. A
+# regression or failing migration stops the release before prod is touched.
 
 on:
   push:
@@ -27,7 +28,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio
+      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio respx
       - name: Run unit tests
         run: pytest tests/voice_gateway/ tests/booking_engine/ -q
 
@@ -107,7 +108,7 @@ jobs:
           PGOPTIONS="-c search_path=business_app_core,public" \
             psql -v ON_ERROR_STOP=1 "$CI_DB_URL" -f booking_engine/db/sql/02_seed_data.sql
 
-      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio
+      - run: pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio respx
 
       - name: Run live_db tests
         run: pytest tests/live_db/ -q
