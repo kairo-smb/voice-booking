@@ -420,3 +420,46 @@ async def test_tick_release_sweep_failure_does_not_fail_tick_or_hide_health():
         assert data["health"] == {"checked": 5, "green": 5, "red": 0, "inconclusive": 0}
         # The failure must be counted, not silently swallowed.
         assert data["errors"] >= 1
+
+
+def test_telephony_out_carries_health_and_release_fields():
+    """These three drive the health dot and the grace-period warning.
+
+    TelephonyOut lists its fields explicitly, so anything unnamed is dropped
+    silently — the UI then renders 'unknown' forever and the release warning
+    never appears. That is invisible rather than broken, so it needs its own
+    test rather than relying on an endpoint assertion.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    from booking_engine.api.routes.voice_telephony import _telephony_out
+
+    when = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    out = _telephony_out({
+        "shop_id": uuid4(), "kairo_number": "+37258989650",
+        "kairo_number_sid": "PN1", "setup_path": "new",
+        "salon_existing_number": None,
+        "health_status": "red", "health_detail": "webhook_drift",
+        "release_scheduled_at": when,
+    })
+
+    assert out["health_status"] == "red"
+    assert out["health_detail"] == "webhook_drift"
+    assert out["release_scheduled_at"].startswith("2026-09-01")
+
+
+def test_telephony_out_defaults_when_columns_are_absent():
+    """A row from before migration 13 must not blow up the endpoint."""
+    from uuid import uuid4
+
+    from booking_engine.api.routes.voice_telephony import _telephony_out
+
+    out = _telephony_out({
+        "shop_id": uuid4(), "kairo_number": "+37258989650",
+        "kairo_number_sid": "PN1", "setup_path": "new",
+        "salon_existing_number": None,
+    })
+
+    assert out["health_status"] == "unknown"
+    assert out["release_scheduled_at"] is None

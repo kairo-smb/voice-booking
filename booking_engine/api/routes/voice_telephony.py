@@ -50,6 +50,13 @@ class TelephonyOut(BaseModel):
     kairo_number_sid: str
     setup_path: str
     salon_existing_number: str | None
+    # The UI renders the health dot and the grace-period warning from these.
+    # This model lists its fields explicitly, so anything not named here is
+    # silently dropped — omitting them made both features invisible rather
+    # than broken, which is the harder failure to notice.
+    health_status: str = "unknown"
+    health_detail: str | None = None
+    release_scheduled_at: datetime | None = None
 
 
 class ReleaseIn(BaseModel):
@@ -96,6 +103,9 @@ def _telephony_out(row: dict) -> dict:
         kairo_number_sid=row["kairo_number_sid"],
         setup_path=row["setup_path"],
         salon_existing_number=row["salon_existing_number"],
+        health_status=row.get("health_status") or "unknown",
+        health_detail=row.get("health_detail"),
+        release_scheduled_at=row.get("release_scheduled_at"),
     ).model_dump(mode="json")
 
 
