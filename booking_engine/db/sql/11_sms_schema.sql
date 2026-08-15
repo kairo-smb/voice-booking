@@ -46,15 +46,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS sms_outbound_campaign_customer_uniq
 CREATE INDEX IF NOT EXISTS sms_outbound_provider_sid_idx
   ON sms.outbound_messages (provider_sid);
 
--- Suppression list of last resort: a STOP must be honoured from a phone that
--- matches no customers row (import, wrong number, deleted customer), and this
--- is also the legal evidence trail for the Garante.
-CREATE TABLE IF NOT EXISTS sms.opt_outs (
-  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  shop_id          uuid NOT NULL REFERENCES business_app_core.shops(id) ON DELETE CASCADE,
-  phone_normalized text NOT NULL,
-  keyword          text NOT NULL,
-  raw_body         text,
-  created_at       timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (shop_id, phone_normalized)
-);
+-- sms.opt_outs (STOP-reply suppression list) was removed from this file when
+-- STOP handling was dropped — opt-out is now in-store staff clearing
+-- customers.marketing_consent, the sole suppression rule. No DROP TABLE was
+-- added: environments that already created the table keep it, harmlessly
+-- empty and unused. See CLAUDE.md's STOP-removal entry.

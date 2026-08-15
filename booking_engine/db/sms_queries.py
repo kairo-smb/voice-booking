@@ -29,14 +29,6 @@ async def get_customer_for_send(shop_id: UUID, customer_id: UUID) -> dict | None
     )
 
 
-async def is_opted_out(shop_id: UUID, phone_normalized: str) -> bool:
-    row = await execute_one(
-        "SELECT 1 AS hit FROM sms.opt_outs WHERE shop_id = $1 AND phone_normalized = $2",
-        shop_id, phone_normalized,
-    )
-    return row is not None
-
-
 async def insert_outbound(
     *,
     shop_id: UUID,
@@ -103,58 +95,3 @@ async def update_status_by_sid(
         """,
         provider_sid, status, price_usd, error_code,
     )
-
-
-async def record_opt_out(
-    *, shop_id: UUID, phone_normalized: str, keyword: str, raw_body: str
-) -> None:
-    """Suppression list entry. Idempotent — a second STOP is not an error."""
-    await execute_void(
-        """
-        INSERT INTO sms.opt_outs (shop_id, phone_normalized, keyword, raw_body)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (shop_id, phone_normalized) DO NOTHING
-        """,
-        shop_id, phone_normalized, keyword, raw_body,
-    )
-
-
-async def withdraw_marketing_consent(*, shop_id: UUID, phone_normalized: str) -> int:
-    """Reflect the STOP in the single source of truth.
-
-    Without this the webapp keeps listing the customer as consenting while SMS
-    silently suppresses them. Returns the number of rows updated (0 when the
-    phone matches no customer — the opt_outs row still stands alone).
-    """
-    row = await execute_one(
-        """
-        WITH updated AS (
-            UPDATE business_app_core.customers
-            SET marketing_consent = false,
-                marketing_consent_withdrawn_at = now(),
-                marketing_consent_source = 'sms_stop',
-                updated_at = now()
-            -- customers.phone_normalized is GENERATED as digits-only
-            -- (regexp_replace(phone,'\D','')), while callers pass E.164 with a
-            -- leading '+'. Comparing them directly never matches, so a STOP
-            -- would file the opt-out row and silently leave consent intact —
-            -- exactly the divergence sms.opt_outs exists to prevent.
-            WHERE shop_id = $1
-              AND phone_normalized = regexp_replace($2, '\D', '', 'g')
-              AND marketing_consent_withdrawn_at IS NULL
-            RETURNING 1
-        )
-        SELECT count(*) AS n FROM updated
-        """,
-        shop_id, phone_normalized,
-    )
-    return int(row["n"]) if row else 0
-
-
-async def get_shop_by_sender_number(number: str) -> UUID | None:
-    """Inbound webhooks identify the shop by the number that was texted."""
-    row = await execute_one(
-        "SELECT shop_id FROM voice_agent.shop_telephony WHERE kairo_number = $1",
-        number,
-    )
-    return row["shop_id"] if row else None

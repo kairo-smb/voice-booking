@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field, field_validator
 from booking_engine.api.deps import require_control_plane_token, _get_settings
 from booking_engine.config import Settings
 from booking_engine.db import sms_queries
-from booking_engine.services.messaging.sms_inbound import handle_inbound
 from booking_engine.services.messaging.sms_send import send_marketing_sms
 from booking_engine.services.twilio_signature import twilio_signature_valid
 
@@ -48,6 +47,7 @@ async def send(
         body=payload.body,
         account_sid=settings.twilio_account_sid,
         auth_token=settings.twilio_auth_token,
+        public_base_url=settings.public_base_url,
     )
     if not result.ok:
         # 409, not 400: the request was valid, the current state refuses it.
@@ -57,25 +57,6 @@ async def send(
         "segments": result.segments,
         "credits": result.credits,
     }}
-
-
-@router.post("/webhook/inbound")
-async def inbound(
-    request: Request,
-    settings: Annotated[Settings, Depends(_get_settings)],
-) -> Response:
-    form = dict(await request.form())
-    if not twilio_signature_valid(
-        request, form, settings, path="/api/v1/sms/webhook/inbound"
-    ):
-        return Response(status_code=403)
-    await handle_inbound(
-        to_number=form.get("To", ""),
-        from_number=form.get("From", ""),
-        body=form.get("Body", ""),
-    )
-    # Always 200, even for a non-STOP reply: a retry storm helps nobody.
-    return Response(content=_EMPTY_TWIML, media_type="application/xml")
 
 
 @router.post("/webhook/status")

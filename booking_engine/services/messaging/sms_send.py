@@ -22,10 +22,6 @@ from booking_engine.services.messaging.gsm7 import encode_info, sanitize
 from booking_engine.services.messaging.send_credits import send_credits
 from booking_engine.services.phone_normalize import normalize_e164
 
-# Legally required in every marketing message (Garante). Appended server-side,
-# never left to the LLM that wrote the body.
-OPT_OUT_FOOTER = " Rispondi STOP per non ricevere piu'."
-
 logger = logging.getLogger(__name__)
 
 # Twilio list price for Italy, used only to pre-charge. The status callback
@@ -49,7 +45,12 @@ class SendResult:
 
 
 def _has_active_consent(customer: dict) -> bool:
-    """Mirrors the webapp's hasActiveMarketingConsent() exactly."""
+    """Mirrors the webapp's hasActiveMarketingConsent() exactly.
+
+    The only suppression rule: opt-out is handled in-store (a staff member
+    clears marketing consent in the app), not via an in-message STOP reply —
+    see CLAUDE.md's STOP-removal entry.
+    """
     return (
         bool(customer.get("marketing_consent"))
         and customer.get("marketing_consent_granted_at") is not None
@@ -58,10 +59,13 @@ def _has_active_consent(customer: dict) -> bool:
 
 
 def _twilio_send(*, to: str, from_: str, body: str,
-                 account_sid: str, auth_token: str) -> TwilioResult:
+                 account_sid: str, auth_token: str,
+                 status_callback: str | None = None) -> TwilioResult:
     """Blocking Twilio call. Wrapped in a thread by the caller."""
     client = Client(account_sid, auth_token)
-    msg = client.messages.create(to=to, from_=from_, body=body)
+    msg = client.messages.create(
+        to=to, from_=from_, body=body, status_callback=status_callback,
+    )
     return TwilioResult(
         sid=msg.sid,
         price_usd=abs(float(msg.price)) if getattr(msg, "price", None) else None,
@@ -75,6 +79,7 @@ async def send_marketing_sms(
     body: str,
     account_sid: str = "",
     auth_token: str = "",
+    public_base_url: str = "",
 ) -> SendResult:
     """Gate, build, bill, send. Every refusal is persisted, never silent."""
     sender = await sms_queries.get_shop_sender_number(shop_id)
@@ -92,8 +97,14 @@ async def send_marketing_sms(
         normalize_e164(customer.get("phone"))
         or normalize_e164(customer.get("phone_normalized"))
     )
-    text = sanitize(body.strip()) + OPT_OUT_FOOTER
+    text = sanitize(body.strip())
     info = encode_info(text)
+    # Without this Twilio never calls POST /sms/webhook/status, so our row
+    # stays 'sent' forever and price_usd stays NULL even though Twilio has
+    # the real price. Empty when public_base_url isn't configured (local/test).
+    status_callback = (
+        f"{public_base_url}/api/v1/sms/webhook/status" if public_base_url else None
+    )
 
     async def _suppress(reason: str) -> SendResult:
         # Recorded, not dropped: "why did Giulia not get it?" must be answerable.
@@ -108,8 +119,6 @@ async def send_marketing_sms(
         return await _suppress("no_phone")
     if not _has_active_consent(customer):
         return await _suppress("no_consent")
-    if await sms_queries.is_opted_out(shop_id, phone):
-        return await _suppress("opted_out")
 
     message_id = await sms_queries.insert_outbound(
         shop_id=shop_id, customer_id=customer_id, to_phone=phone,
@@ -132,6 +141,7 @@ async def send_marketing_sms(
         result = await asyncio.to_thread(
             _twilio_send, to=phone, from_=sender, body=text,
             account_sid=account_sid, auth_token=auth_token,
+            status_callback=status_callback,
         )
     except Exception as exc:  # noqa: BLE001 — provider errors are data, not crashes
         await sms_queries.mark_failed(message_id=message_id, error_code=str(exc)[:200])

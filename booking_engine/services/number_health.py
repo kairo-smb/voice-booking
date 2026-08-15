@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 class HealthProbe:
     found: bool
     voice_url: str
-    sms_url: str
     reachable: bool
 
 
@@ -40,7 +39,7 @@ def decide_health(probe: HealthProbe, *, base_url: str) -> tuple[str | None, str
     previously stored health_status alone rather than overwrite it. This is
     the mechanism that keeps a transient Twilio outage from repainting every
     salon's number red: only a probe that can *prove* something is wrong
-    (a confirmed 404, or webhooks pointing somewhere other than us) is
+    (a confirmed 404, or a webhook pointing somewhere other than us) is
     allowed to flip the light. Everything else — including "we couldn't even
     reach Twilio to ask" — is treated as no information, not bad news.
 
@@ -48,18 +47,17 @@ def decide_health(probe: HealthProbe, *, base_url: str) -> tuple[str | None, str
     1. reachable=False first: an unreachable probe cannot prove absence, so
        it must not be allowed to fall through to the "missing" check below.
     2. found=False: Twilio returned a confirmed 404 — the number is gone.
-    3. webhook drift: found, but voice_url/sms_url don't both start with
-       our own base_url (including an empty sms_url, which can't receive
-       STOP and is a real fault, not a green light).
+    3. webhook drift: found, but voice_url doesn't start with our own
+       base_url. sms_url is deliberately not checked — there is no inbound
+       SMS handler any more (STOP handling was removed; see CLAUDE.md), so
+       there is nothing for sms_url to correctly point at.
     4. otherwise green.
     """
     if not probe.reachable:
         return None, "provider_unreachable"
     if not probe.found:
         return "red", "number_missing"
-    if not (
-        probe.voice_url.startswith(base_url) and probe.sms_url.startswith(base_url)
-    ):
+    if not probe.voice_url.startswith(base_url):
         return "red", "webhook_drift"
     return "green", None
 
@@ -90,14 +88,13 @@ async def check_all(*, settings: Settings) -> dict:
                 probe = HealthProbe(
                     found=True,
                     voice_url=result.voice_url,
-                    sms_url=result.sms_url,
                     reachable=True,
                 )
             except TwilioRestException as exc:
                 if exc.status == 404:
-                    probe = HealthProbe(found=False, voice_url="", sms_url="", reachable=True)
+                    probe = HealthProbe(found=False, voice_url="", reachable=True)
                 else:
-                    probe = HealthProbe(found=False, voice_url="", sms_url="", reachable=False)
+                    probe = HealthProbe(found=False, voice_url="", reachable=False)
 
             status, detail = decide_health(probe, base_url=settings.public_base_url)
         except Exception:

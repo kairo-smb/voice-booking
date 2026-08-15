@@ -58,7 +58,7 @@ DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `12_number_reques
 | `voice_tones` | 06 | 8 seeded presets (`is_preset=true`) plus room for shop-authored custom tones (`created_by_shop_id`); seeded names: professionale, amichevole, efficiente, luxury, tecnico, casual, empatico, conciso |
 | `number_requests` | 12 | one row per shop, PK `shop_id`: self-service Estonian-number regulatory-bundle lifecycle (`status` draft→evaluating→pending_review→approved/rejected→provisioned, the Twilio `regulation_sid`/`bundle_sid`/`end_user_sid`/`document_sid`, `evaluation_errors` jsonb verbatim from Twilio, `rejection_reason`). Polled hourly by `POST /api/v1/messaging/tick`. See [Architecture](architecture.md#self-service-number-provisioning-path-2-onboarding) and `CLAUDE.md` §2026-08-14. |
 
-**`shop_telephony`'s health semaphore (12):** `health_status` (`unknown`/`green`/`red`, default `unknown`) records whether a provisioned number still exists at Twilio with webhooks pointed at us. A Twilio-unreachable probe deliberately leaves the prior status untouched rather than flipping to red — only a confirmed 404 or webhook drift changes the light (`services/number_health.py::decide_health`).
+**`shop_telephony`'s health semaphore (12):** `health_status` (`unknown`/`green`/`red`, default `unknown`) records whether a provisioned number still exists at Twilio with its voice webhook pointed at us. A Twilio-unreachable probe deliberately leaves the prior status untouched rather than flipping to red — only a confirmed 404 or voice-webhook drift changes the light (`services/number_health.py::decide_health`). `sms_url` is deliberately not checked — there is no inbound SMS handler any more (STOP handling removed; see `CLAUDE.md`), so there is nothing for it to correctly point at.
 
 `business_app_core.shops` also gained two columns directly in migration 03: `voice` (default `'alloy'`) and `language` (default `'it'`) — the one place this repo's migrations touch the other schema, both additive/nullable-safe.
 
@@ -74,19 +74,20 @@ designed but not built; this repo currently has `sms` only.
 |---|---|
 | `campaigns` | batch-send container (`draft → approved → sending → sent/cancelled`). **Exists, nothing writes to it yet** — Phase 1 is one-off sends only. |
 | `outbound_messages` | one row per send attempt, including refused ones (`status='suppressed'`, `suppressed_reason` — a refusal is always persisted, never silently dropped). `credits_charged`/`price_usd` are the billed figures; `campaign_id IS NULL` means a one-off send. Unique on `(campaign_id, customer_id)` where both are set, so re-running a batch send can't double-message a customer. |
-| `opt_outs` | suppression list of last resort, keyed `(shop_id, phone_normalized)`. |
+| `opt_outs` | **unused as of the STOP-removal (see `CLAUDE.md`).** Kept in the schema, no `DROP TABLE` — intentionally left behind rather than dropped — but nothing reads or writes it any more. |
 
-**Why `opt_outs` exists alongside `customers.marketing_consent`:** a STOP
-reply must be honoured even from a phone number that matches no
-`customers` row (a wrong number, an imported list, a deleted customer) —
-there is nothing in `business_app_core` to flip in that case. When the
-phone *does* match a customer, the STOP handler
-(`services/messaging/sms_inbound.py`) writes **both**: the `opt_outs` row
-(works regardless of a match) and `customers.marketing_consent = false` /
-`marketing_consent_withdrawn_at = now()` /
-`marketing_consent_source = 'sms_stop'` (keeps the webapp's own consent UI
-honest — it reads `business_app_core` directly). `sms.opt_outs` is also the
-legal evidence trail for the Garante.
+**STOP handling removed; suppression is `customers.marketing_consent`
+alone.** This repo previously reimplemented STOP-keyword parsing in
+application code (Twilio's automatic STOP handling doesn't cover the
+Estonian DID) and wrote both `sms.opt_outs` and
+`customers.marketing_consent = false` on a recognised STOP reply. The owner
+decided to remove that entirely — opt-out is now handled in-store, by a
+staff member clearing marketing consent in the app. There is no inbound SMS
+webhook and no opt-out footer any more; `sms_send.py`'s only suppression
+check is `customers.marketing_consent`/`_granted_at`/`_withdrawn_at`. See
+`CLAUDE.md`'s STOP-removal entry for the full reasoning, including the
+explicit note that this is a weaker position under Italian marketing rules,
+accepted as the owner's decision.
 
 **Gap worth knowing:** `business_app_core.customers.marketing_consent`,
 `_granted_at`, `_withdrawn_at`, `_source` exist on the live database but

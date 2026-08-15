@@ -12,7 +12,6 @@ for the tables.
 | Method | Path | File | Auth | Purpose |
 |---|---|---|---|---|
 | `POST` | `/api/v1/sms/send` | `sms.py` | Control-plane bearer | synchronous one-off marketing send; called by the webapp's `send-sms` route |
-| `POST` | `/api/v1/sms/webhook/inbound` | `sms.py` | `X-Twilio-Signature` | STOP keyword handling |
 | `POST` | `/api/v1/sms/webhook/status` | `sms.py` | `X-Twilio-Signature` | delivery status + the real Twilio price |
 
 ## `POST /api/v1/sms/send`
@@ -24,23 +23,19 @@ On success: `{"data": {"message_id", "segments", "credits"}}`.
 On refusal: **409**, not 400 — the request was well-formed, the current
 state refuses it — with `{"detail": "<reason>"}`. Reasons:
 `no_sender_number`, `customer_not_found`, `no_phone`, `no_consent`,
-`opted_out`, `insufficient_credits`, `provider_error`.
+`insufficient_credits`, `provider_error`.
 
-The opt-out footer (`" Rispondi STOP per non ricevere piu'."`) is appended
-server-side to every body before sanitizing/encoding and before sending —
-never left to the caller or the LLM that wrote the draft. Credits are
-computed off the resulting segment count and checked against the shop's
-balance before Twilio is called; the debit itself only happens after
-Twilio accepts the send (see `CLAUDE.md` §2026-08-12).
-
-## `POST /api/v1/sms/webhook/inbound`
-
-Twilio form fields `From`/`To`/`Body`. Always returns 200 + empty TwiML,
-even for a non-STOP reply — a Twilio retry storm on an ordinary customer
-reply helps nobody. A recognised STOP keyword (see
-[Providers → SMS](../providers.md#sms-sending-twilio-messaging-api)) writes
-both `sms.opt_outs` and withdraws
-`business_app_core.customers.marketing_consent`.
+**No in-message opt-out.** STOP handling (footer + inbound webhook) was
+removed — see `CLAUDE.md`'s STOP-removal entry. The body sent is the
+sanitised text alone; suppression is `business_app_core.customers.
+marketing_consent` alone, cleared in-store by staff, not by a customer
+reply. Credits are computed off the resulting segment count and checked
+against the shop's balance before Twilio is called; the debit itself only
+happens after Twilio accepts the send (see `CLAUDE.md` §2026-08-12). The
+send now also passes Twilio a `status_callback` (built from
+`public_base_url` + this file's own `/webhook/status` path below) so
+delivery status/price actually come back — previously omitted, so
+`sms.outbound_messages` rows stayed `status='sent'`/`price_usd=NULL` forever.
 
 ## `POST /api/v1/sms/webhook/status`
 

@@ -33,11 +33,17 @@ and `CLAUDE.md` §2026-08-12). The shop's own Twilio DID — the same number
 that answers voice calls — is also the SMS sender; no second number, no
 shared Kairo sender.
 
-**Key files:** `booking_engine/services/messaging/{sms_send,sms_inbound,gsm7,send_credits}.py`, `booking_engine/db/sms_queries.py`, `booking_engine/api/routes/sms.py`, `booking_engine/services/twilio_signature.py`.
+**Key files:** `booking_engine/services/messaging/{sms_send,gsm7,send_credits}.py`, `booking_engine/db/sms_queries.py`, `booking_engine/api/routes/sms.py`, `booking_engine/services/twilio_signature.py`.
 
 **Env vars:** none new — reuses `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`. `sms_send.py` calls `twilio.rest.Client.messages.create()` directly; it does not go through `clients/twilio_numbers.py`, which is provisioning-only (search/purchase numbers).
 
-**Gotcha — Twilio's automatic STOP handling doesn't cover this number.** Twilio auto-registers STOP/START keyword handling for US/Canada long codes only; the Estonian DID (2026-07-16 decision) gets none of it. `services/messaging/sms_inbound.py` reimplements STOP parsing entirely in application code — a whole-message match (never a substring match) against an IT/EN keyword list, so a reply like "non fermatevi, stop mai!" is not misread as an opt-out.
+**No in-message opt-out (STOP handling removed).** There is no inbound SMS
+webhook, no STOP-keyword parsing, and no opt-out footer — see `CLAUDE.md`'s
+STOP-removal entry. Suppression is `business_app_core.customers.
+marketing_consent` alone, cleared in-store by a staff member; `sms.opt_outs`
+still exists in the schema but nothing writes to it any more. Provisioned
+numbers no longer set an `sms_url` webhook (`clients/twilio_numbers.py::purchase_number`),
+and `services/number_health.py::decide_health` checks `voice_url` only.
 
 **Gotcha — segment/encoding is a billing surface, not cosmetic.** GSM-7 fits 160 chars/segment; the moment a body contains one character GSM-7 can't represent (most emoji, curly quotes, em dashes, uppercase accented vowels other than É), the whole message drops to UCS-2 at 70 chars/segment — silently tripling the bill on a stray LLM-written curly quote. `gsm7.py`'s `sanitize()` transliterates that typographic noise back into GSM-7 losslessly; genuinely non-GSM-7 content (emoji) is priced honestly, never silently stripped. Segment counting is duplicated in the webapp (`src/lib/messaging/sms-preview.ts`, a pre-click cost preview) rather than shared — this repo's count is authoritative at send time.
 

@@ -57,19 +57,18 @@ def purchase_number(
     auth_token: str,
     bundle_sid: str | None = None,
     address_sid: str | None = None,
-    sms_url: str | None = None,
 ) -> PurchasedNumber:
-    """Purchase a number and bind its webhooks.
+    """Purchase a number and bind its voice webhook.
 
     `bundle_sid` ties the purchase to a regulatory Bundle — required for
     regulated number types like Estonia mobile. For self-service provisioning
     this is the *salon's own* bundle, not a shared one (Twilio's ISV rules
     forbid reusing our business info in customer bundles).
 
-    `sms_url` is not optional in practice, only in the signature: without it
-    the number has no inbound SMS webhook, so STOP messages never reach us —
-    a legal opt-out failure — and the health semaphore reports webhook_drift
-    forever because it checks that sms_url points back at us.
+    No `sms_url` is set: there is no inbound SMS handler (STOP handling was
+    removed — opt-out is now in-store, via customers.marketing_consent; see
+    CLAUDE.md). Leaving the number's SMS webhook unset is intentional, not a
+    gap.
     """
     client = Client(account_sid, auth_token)
     kwargs: dict = {
@@ -77,9 +76,6 @@ def purchase_number(
         "voice_url": voice_url,
         "voice_method": "POST",
     }
-    if sms_url:
-        kwargs["sms_url"] = sms_url
-        kwargs["sms_method"] = "POST"
     if bundle_sid:
         kwargs["bundle_sid"] = bundle_sid
     if address_sid:

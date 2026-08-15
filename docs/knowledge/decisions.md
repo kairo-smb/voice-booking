@@ -8,6 +8,7 @@ A short index into `CLAUDE.md`'s full history log — enough to find the relevan
 
 | Date | Decision | CLAUDE.md section |
 |---|---|---|
+| 2026-08-15 | STOP handling removed entirely (owner decision); suppression is `marketing_consent` alone; fixed missing `status_callback` | §"Removed STOP handling entirely; suppression is `marketing_consent` alone (owner decision)" |
 | 2026-07-24 | CI: migration ownership for the shared Neon DB moved to the `webapp` repo | §"CI: migration ownership moved to the webapp repo" |
 | 2026-07-24 | Repo cleanup: deleted dead docs/scripts, rewrote stale docs, closed a dependency drift | §"Repo cleanup: deleted dead docs/scripts..." |
 | 2026-07-24 | In-process MCP tool dispatch (fixed self-proxying "dead air" over real HTTPS) + a tool-call timeout | §"Root-caused session 'dead air'..." |

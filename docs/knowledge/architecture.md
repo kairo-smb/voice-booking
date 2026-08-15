@@ -57,14 +57,17 @@ webapp (owner clicks "Invia SMS" in a modal)
   → POST /api/v1/hair-salon/customers/{id}/send-sms   (webapp's own route; re-checks consent)
     → POST /api/v1/sms/send                            (this repo, CONTROL_PLANE_SECRET)
         services/messaging/sms_send.py::send_marketing_sms
-          consent + opt-out gate → sanitize + append footer (gsm7.py)
-          → balance check → Twilio send → debit credits (token_basket_queries)
+          consent gate (marketing_consent alone — no in-message opt-out) → sanitize (gsm7.py)
+          → balance check → Twilio send (with status_callback) → debit credits (token_basket_queries)
           → persist to sms.outbound_messages
 ```
 
-Inbound: Twilio POSTs STOP replies to `POST /api/v1/sms/webhook/inbound`
-and delivery/price callbacks to `POST /api/v1/sms/webhook/status`, both
-`X-Twilio-Signature`-verified with the same helper the TwiML webhook uses.
+**No inbound SMS webhook / STOP handling.** Opt-out was removed as an
+in-message mechanism — see `CLAUDE.md`'s STOP-removal entry. Suppression is
+`business_app_core.customers.marketing_consent` alone, cleared in-store by
+staff. Twilio still POSTs delivery/price callbacks to
+`POST /api/v1/sms/webhook/status`, `X-Twilio-Signature`-verified with the
+same helper the TwiML webhook uses.
 
 **Single debit path, by design.** Only `sms_send.py` ever calls
 `try_debit_for_message` — the webapp's `send-sms` route forwards the

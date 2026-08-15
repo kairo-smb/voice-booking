@@ -81,12 +81,11 @@ class _Recorder:
         self.debited = None
 
 
-def _wire(monkeypatch, rec, *, customer, opted_out=False, sender="+37251234567",
+def _wire(monkeypatch, rec, *, customer, sender="+37251234567",
           debit_ok=True, balance=10_000, twilio=None):
     async def q_balance(shop_id): return balance
     async def q_sender(shop_id): return sender
     async def q_customer(shop_id, customer_id): return customer
-    async def q_opted(shop_id, phone): return opted_out
     async def q_insert(**kw):
         rec.inserted = kw
         return uuid4()
@@ -98,7 +97,6 @@ def _wire(monkeypatch, rec, *, customer, opted_out=False, sender="+37251234567",
 
     monkeypatch.setattr(sms_send.sms_queries, "get_shop_sender_number", q_sender)
     monkeypatch.setattr(sms_send.sms_queries, "get_customer_for_send", q_customer)
-    monkeypatch.setattr(sms_send.sms_queries, "is_opted_out", q_opted)
     monkeypatch.setattr(sms_send.sms_queries, "insert_outbound", q_insert)
     monkeypatch.setattr(sms_send.sms_queries, "mark_sent", q_sent)
     monkeypatch.setattr(sms_send.sms_queries, "mark_failed", q_failed)
@@ -111,7 +109,9 @@ def _wire(monkeypatch, rec, *, customer, opted_out=False, sender="+37251234567",
 
 
 @pytest.mark.asyncio
-async def test_opt_out_footer_is_appended_server_side(monkeypatch):
+async def test_body_sent_is_the_sanitised_input_with_no_suffix(monkeypatch):
+    # No STOP footer: opt-out is handled in-store now, not via an in-message
+    # reply — the body sent is exactly the sanitised text, nothing appended.
     rec = _Recorder()
     _wire(monkeypatch, rec, customer=_consenting_customer())
 
@@ -119,7 +119,7 @@ async def test_opt_out_footer_is_appended_server_side(monkeypatch):
         shop_id=SHOP, customer_id=CUSTOMER, body="Ciao Giulia, ti aspettiamo!"
     )
 
-    assert rec.inserted["body"].endswith(sms_send.OPT_OUT_FOOTER)
+    assert rec.inserted["body"] == "Ciao Giulia, ti aspettiamo!"
 
 
 @pytest.mark.asyncio
@@ -135,19 +135,6 @@ async def test_withdrawn_consent_is_suppressed_not_sent(monkeypatch):
     assert result.ok is False
     assert result.reason == "no_consent"
     assert rec.inserted["status"] == "suppressed"
-    assert rec.sent is None
-
-
-@pytest.mark.asyncio
-async def test_opted_out_phone_is_suppressed(monkeypatch):
-    rec = _Recorder()
-    _wire(monkeypatch, rec, customer=_consenting_customer(), opted_out=True)
-
-    result = await sms_send.send_marketing_sms(
-        shop_id=SHOP, customer_id=CUSTOMER, body="Ciao"
-    )
-
-    assert result.reason == "opted_out"
     assert rec.sent is None
 
 
@@ -237,3 +224,42 @@ async def test_shop_without_a_number_cannot_send(monkeypatch):
     )
 
     assert result.reason == "no_sender_number"
+
+
+@pytest.mark.asyncio
+async def test_status_callback_url_is_passed_to_the_provider(monkeypatch):
+    # Without this Twilio never calls POST /sms/webhook/status, so the row
+    # stays 'sent' forever and price_usd stays NULL forever (CLAUDE.md).
+    rec = _Recorder()
+    captured = {}
+
+    def fake_twilio(**kw):
+        captured.update(kw)
+        return sms_send.TwilioResult(sid="SM123", price_usd=0.093)
+
+    _wire(monkeypatch, rec, customer=_consenting_customer(), twilio=fake_twilio)
+
+    await sms_send.send_marketing_sms(
+        shop_id=SHOP, customer_id=CUSTOMER, body="Ciao Giulia!",
+        public_base_url="https://api.example.com",
+    )
+
+    assert captured["status_callback"] == "https://api.example.com/api/v1/sms/webhook/status"
+
+
+@pytest.mark.asyncio
+async def test_status_callback_is_none_when_public_base_url_is_unset(monkeypatch):
+    rec = _Recorder()
+    captured = {}
+
+    def fake_twilio(**kw):
+        captured.update(kw)
+        return sms_send.TwilioResult(sid="SM123", price_usd=0.093)
+
+    _wire(monkeypatch, rec, customer=_consenting_customer(), twilio=fake_twilio)
+
+    await sms_send.send_marketing_sms(
+        shop_id=SHOP, customer_id=CUSTOMER, body="Ciao Giulia!",
+    )
+
+    assert captured["status_callback"] is None

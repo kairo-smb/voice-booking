@@ -191,10 +191,6 @@ async def provision_approved(shop_id: UUID, *, settings) -> str:
         twilio_numbers.purchase_number,
         phone_number=found[0].phone_number,
         voice_url=f"{settings.public_base_url}/api/v1/voice/twiml/incoming",
-        # Without this the number has no inbound SMS webhook: STOP messages are
-        # dropped (a legal opt-out failure) and the health semaphore reports
-        # webhook_drift forever. Must match what decide_health checks for.
-        sms_url=f"{settings.public_base_url}/api/v1/sms/webhook/inbound",
         account_sid=account_sid,
         auth_token=auth_token,
         bundle_sid=req["bundle_sid"],  # the SALON's own bundle, never a shared one

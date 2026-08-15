@@ -11,10 +11,7 @@ applied (confirmed 2026-08-12, still true — see CLAUDE.md 2026-07-17), so
 These tests discover a real shop at runtime instead, write only into the
 (new, otherwise-empty) `sms.*` tables, and delete what they wrote.
 
-Nothing here mutates a real customer. `withdraw_marketing_consent` is only
-exercised with a phone that matches nobody — asserting it reports zero rows —
-because the alternative is revoking a real person's marketing consent to make
-a test pass.
+Nothing here mutates a real customer.
 
 Run with:  TEST_DATABASE_URL=postgresql://... pytest tests/live_db/test_sms_live.py -v
 """
@@ -25,7 +22,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from booking_engine.db import sms_queries
-from booking_engine.db.connection import execute, execute_one, execute_void
+from booking_engine.db.connection import execute_one, execute_void
 
 # Phones in a range no real customer can hold, so a stray row can never collide
 # with — or be mistaken for — production data.
@@ -46,64 +43,11 @@ async def any_shop_id(db_connection) -> UUID:
 
 
 @pytest.fixture
-async def cleanup_opt_outs():
-    """Delete opt_out rows created by a test, even if it failed mid-way."""
-    keys: list[tuple[UUID, str]] = []
-    yield keys
-    for shop_id, phone in keys:
-        await execute_void(
-            "DELETE FROM sms.opt_outs WHERE shop_id = $1 AND phone_normalized = $2",
-            shop_id, phone,
-        )
-
-
-@pytest.fixture
 async def cleanup_outbound():
     ids: list[UUID] = []
     yield ids
     for message_id in ids:
         await execute_void("DELETE FROM sms.outbound_messages WHERE id = $1", message_id)
-
-
-class TestOptOutLive:
-    async def test_record_opt_out_is_idempotent(self, any_shop_id, cleanup_opt_outs):
-        """A customer who texts STOP twice must not cause an error.
-
-        Also the ON CONFLICT proof against the real schema: the 2026-07-18
-        incident was this exact clause failing because the unique constraint it
-        named did not exist on the live table.
-        """
-        phone = _unique_phone()
-        cleanup_opt_outs.append((any_shop_id, phone))
-
-        await sms_queries.record_opt_out(
-            shop_id=any_shop_id, phone_normalized=phone, keyword="STOP", raw_body="STOP"
-        )
-        await sms_queries.record_opt_out(
-            shop_id=any_shop_id, phone_normalized=phone, keyword="STOP", raw_body="stop"
-        )
-
-        rows = await execute(
-            "SELECT id FROM sms.opt_outs WHERE shop_id = $1 AND phone_normalized = $2",
-            any_shop_id, phone,
-        )
-        assert len(rows) == 1
-        assert await sms_queries.is_opted_out(any_shop_id, phone) is True
-
-    async def test_unknown_phone_is_not_opted_out(self, any_shop_id):
-        assert await sms_queries.is_opted_out(any_shop_id, _unique_phone()) is False
-
-    async def test_withdraw_consent_for_unknown_phone_reports_zero(self, any_shop_id):
-        """STOP from a phone matching no customer must work, not raise.
-
-        This is the whole reason sms.opt_outs exists alongside the consent
-        columns: imported lists, wrong numbers and deleted customers still have
-        to be suppressed.
-        """
-        updated = await sms_queries.withdraw_marketing_consent(
-            shop_id=any_shop_id, phone_normalized=_unique_phone()
-        )
-        assert updated == 0
 
 
 class TestCustomerLookupLive:
@@ -137,7 +81,7 @@ class TestOutboundLive:
             customer_id=None,
             to_phone=_unique_phone(),
             from_number="+37251234567",
-            body="Ciao Giulia, ti aspettiamo! Rispondi STOP per non ricevere piu'.",
+            body="Ciao Giulia, ti aspettiamo!",
             segments=1,
             encoding="gsm7",
             status="suppressed",
@@ -212,6 +156,3 @@ class TestSenderNumberLive:
         The point is that the query runs against the real schema at all."""
         result = await sms_queries.get_shop_sender_number(any_shop_id)
         assert result is None or isinstance(result, str)
-
-    async def test_unrouteable_number_resolves_to_no_shop(self, db_connection):
-        assert await sms_queries.get_shop_by_sender_number("+37259999999") is None

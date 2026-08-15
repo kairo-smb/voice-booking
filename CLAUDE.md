@@ -6,6 +6,80 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-08-15 — Removed STOP handling entirely; suppression is `marketing_consent` alone (owner decision)
+
+**Decision (owner's, not a recommendation — implemented as directed, not
+re-litigated):** marketing SMS no longer carries an in-message opt-out.
+Removed, together, both halves of the old mechanism — the appended footer
+(`" Rispondi STOP per non ricevere piu'."`) and the code that honoured a
+STOP reply — on the reasoning that leaving either one alone is worse than
+either clean end state (promising an opt-out we don't offer, or silently
+dropping the promise while still parsing replies nobody can act on).
+Suppression is now `business_app_core.customers.marketing_consent` alone;
+opt-out happens in-store, when a staff member clears marketing consent in
+the app.
+
+**What was deleted:** `sms_send.py`'s `OPT_OUT_FOOTER` constant and the
+append; its `is_opted_out` gate and `_suppress("opted_out")` branch
+(`_has_active_consent` is now the *only* suppression rule — its docstring
+says so); `services/messaging/sms_inbound.py` (STOP-keyword parsing) and its
+test file entirely; the `POST /sms/webhook/inbound` route and its
+`X-Twilio-Signature` verification (`POST /sms/webhook/status` is
+untouched); `sms_queries.py`'s `is_opted_out`/`record_opt_out`/
+`withdraw_marketing_consent`/`get_shop_by_sender_number` (that last one
+existed only to route inbound messages to a shop); the `sms_url` parameter
+on `twilio_numbers.py::purchase_number` and its two callers
+(`number_provisioning.py`, `voice_telephony.py`) — a purchased number no
+longer gets an SMS webhook bound at all, since nothing would answer it.
+
+**`sms.opt_outs` is left in place, not dropped.** `11_sms_schema.sql` no
+longer creates it (removed the `CREATE TABLE` block, replaced with a
+one-line comment pointing here), but no `DROP TABLE` was added either —
+environments that already have the table keep it, harmlessly empty and
+unread by any code path now.
+
+**`number_health.py::decide_health` now checks `voice_url` only.** It used
+to flag `webhook_drift` unless *both* `voice_url` and `sms_url` pointed back
+at us; with no inbound SMS handler there is nothing for `sms_url` to
+correctly point at, so requiring it would have permanently flagged every
+number red. `HealthProbe` dropped its `sms_url` field to match. (Twilio's
+own `NumberStatus`/`fetch_number` still read `sms_url` back from the API —
+harmless, unrelated to the health verdict — left alone since nothing asked
+for it and it costs nothing to keep reading.)
+
+**Bundled into the same pass: fixed `_twilio_send` never passing
+`status_callback`.** Verified against a live send that Twilio's status
+webhook (`POST /sms/webhook/status`) could never fire without it — the
+`sms.outbound_messages` row stayed `status='sent'`/`price_usd=NULL` forever
+even though Twilio has the real price. `send_marketing_sms` now takes
+`public_base_url` and threads a `status_callback` (`{public_base_url}/api/v1/sms/webhook/status`,
+mount prefix confirmed against `api/app.py` rather than assumed) through to
+`_twilio_send`, which now passes it to `client.messages.create()`.
+
+**This is a materially weaker position under Italian marketing-SMS rules —
+recorded plainly, not softened.** An in-message STOP reply is common
+practice for demonstrating an always-available, per-message opt-out to the
+Garante; relying solely on staff clearing consent in-store means a customer
+who wants to stop receiving messages has no self-service channel and must
+rely on the salon acting on their request. This tradeoff was made
+knowingly by the owner, not discovered and left unaddressed — restated here
+so it isn't mistaken for an oversight later.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — 359 passed, 14 skipped, 0 failed (down from
+365 passed before this change: net of deleting `test_sms_inbound.py`'s 5
+tests and `test_opted_out_phone_is_suppressed`, replacing
+`test_opt_out_footer_is_appended_server_side` with an equivalent
+no-suffix assertion, and adding 2 new `status_callback` tests).
+`tests/live_db/test_sms_live.py` (not run in this environment — no
+`TEST_DATABASE_URL` — but checked for dangling references) had its
+`TestOptOutLive` class and `test_unrouteable_number_resolves_to_no_shop`
+removed, since they exercised the deleted query functions directly against
+real Neon. GSM-7 segment counts in the surviving tests did not change —
+recomputed rather than assumed: every existing test body is short enough
+(well under 160 GSM-7 chars) that removing ~37 characters of footer doesn't
+cross a segment boundary either before or after.
+
 ## Documentation
 
 Human-oriented docs (architecture, database, voice-agent logic, providers,
