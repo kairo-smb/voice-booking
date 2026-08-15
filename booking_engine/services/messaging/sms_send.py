@@ -85,7 +85,13 @@ async def send_marketing_sms(
     if not customer:
         return SendResult(ok=False, reason="customer_not_found")
 
-    phone = customer.get("phone_normalized") or normalize_e164(customer.get("phone"))
+    # customers.phone_normalized is a GENERATED column: regexp_replace(phone,'\D','')
+    # — digits only, no leading '+'. Handing that straight to Twilio sends to a
+    # malformed destination, so always re-normalise to E.164 here.
+    phone = (
+        normalize_e164(customer.get("phone"))
+        or normalize_e164(customer.get("phone_normalized"))
+    )
     text = sanitize(body.strip()) + OPT_OUT_FOOTER
     info = encode_info(text)
 

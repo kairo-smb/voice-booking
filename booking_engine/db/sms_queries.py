@@ -134,7 +134,13 @@ async def withdraw_marketing_consent(*, shop_id: UUID, phone_normalized: str) ->
                 marketing_consent_withdrawn_at = now(),
                 marketing_consent_source = 'sms_stop',
                 updated_at = now()
-            WHERE shop_id = $1 AND phone_normalized = $2
+            -- customers.phone_normalized is GENERATED as digits-only
+            -- (regexp_replace(phone,'\D','')), while callers pass E.164 with a
+            -- leading '+'. Comparing them directly never matches, so a STOP
+            -- would file the opt-out row and silently leave consent intact —
+            -- exactly the divergence sms.opt_outs exists to prevent.
+            WHERE shop_id = $1
+              AND phone_normalized = regexp_replace($2, '\D', '', 'g')
               AND marketing_consent_withdrawn_at IS NULL
             RETURNING 1
         )
