@@ -32,9 +32,16 @@ def search_available_numbers(
     account_sid: str,
     auth_token: str,
 ) -> list[AvailableNumber]:
-    """Return up to `limit` available mobile numbers for the country."""
+    """Return up to `limit` available SMS-capable mobile numbers for the country.
+
+    `sms_enabled=True` is a hard requirement, not a preference: the number is
+    the salon's SMS sender, and a voice-only one would provision cleanly and
+    then fail on the first send. Estonian mobiles happen to be SMS-capable
+    today, which is exactly why this is filtered rather than assumed — a
+    catalogue change would otherwise surface as a broken salon, not an error.
+    """
     client = Client(account_sid, auth_token)
-    kwargs: dict = {"limit": limit}
+    kwargs: dict = {"limit": limit, "sms_enabled": True}
     if area_code:
         kwargs["area_code"] = area_code
     found = client.available_phone_numbers(country).mobile.list(**kwargs)

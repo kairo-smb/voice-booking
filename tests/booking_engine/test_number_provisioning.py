@@ -381,3 +381,37 @@ async def test_provision_approved_happy_path_uses_the_salons_own_bundle(monkeypa
     assert statuses == [{"shop_id": shop_id, "status": "provisioned"}]
     assert len(pushed) == 1
     assert pushed[0]["event"] == "number_request_approved"
+
+
+def test_number_search_requires_sms_capability(monkeypatch):
+    """SMS capability is a hard requirement, not a preference.
+
+    The number IS the salon's SMS sender. A voice-only one would provision
+    cleanly and only fail on the first send — a broken salon rather than an
+    error at the point of purchase.
+    """
+    captured = {}
+
+    class _Mobile:
+        def list(self, **kwargs):
+            captured.update(kwargs)
+            return []
+
+    class _Country:
+        mobile = _Mobile()
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        def available_phone_numbers(self, country):
+            captured["country"] = country
+            return _Country()
+
+    from booking_engine.clients import twilio_numbers
+    monkeypatch.setattr(twilio_numbers, "Client", _Client)
+
+    twilio_numbers.search_available_numbers(
+        area_code=None, country="EE", limit=1, account_sid="AC", auth_token="tok",
+    )
+
+    assert captured["sms_enabled"] is True
+    assert captured["country"] == "EE"
