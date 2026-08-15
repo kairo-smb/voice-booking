@@ -8,6 +8,7 @@ booking_engine/db/sql/12_number_requests.sql.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from uuid import UUID
 
 from booking_engine.db.connection import execute, execute_one, execute_void
@@ -88,14 +89,18 @@ async def set_status(
     rejection_reason: str | None = None,
     submitted_at_now: bool = False,
     reviewed_at_now: bool = False,
+    released_at_now: bool = False,
+    released_number: str | None = None,
 ) -> None:
     """Transition a request's status.
 
-    submitted_at/reviewed_at are only stamped when the matching *_now
-    flag is set, so a status update that doesn't cross that milestone
+    submitted_at/reviewed_at/released_at are only stamped when the matching
+    *_now flag is set, so a status update that doesn't cross that milestone
     leaves the existing timestamp alone. evaluation_errors/
     rejection_reason are written as NULL (not the JSON string "null")
     when cleared, so a cleared error field reads as genuinely absent.
+    released_number follows set_sids' COALESCE pattern: only overwritten
+    when a value is actually given.
     """
     evaluation_errors_json = (
         json.dumps(evaluation_errors) if evaluation_errors is not None else None
@@ -108,11 +113,13 @@ async def set_status(
             rejection_reason = $4,
             submitted_at = CASE WHEN $5 THEN now() ELSE submitted_at END,
             reviewed_at = CASE WHEN $6 THEN now() ELSE reviewed_at END,
+            released_at = CASE WHEN $7 THEN now() ELSE released_at END,
+            released_number = COALESCE($8, released_number),
             updated_at = now()
         WHERE shop_id = $1
         """,
         shop_id, status, evaluation_errors_json, rejection_reason,
-        submitted_at_now, reviewed_at_now,
+        submitted_at_now, reviewed_at_now, released_at_now, released_number,
     )
 
 
@@ -129,10 +136,43 @@ async def list_pending_review() -> list[dict]:
 
 
 async def list_provisioned_numbers() -> list[dict]:
-    """Every shop with a live number, for the health check."""
+    """Every shop with a live number, for the health check and the release sweep.
+
+    release_scheduled_at rides along here (rather than a second per-shop
+    query) since the release sweep needs both this list and each row's
+    schedule state together.
+    """
     return await execute(
-        "SELECT shop_id, kairo_number, kairo_number_sid "
+        "SELECT shop_id, kairo_number, kairo_number_sid, release_scheduled_at "
         "FROM voice_agent.shop_telephony"
+    )
+
+
+async def has_active_plan(shop_id: UUID) -> bool:
+    """True if the shop currently holds a paid plan.
+
+    Free is the absence of a plan (shops.plan_id IS NULL) — see CLAUDE.md.
+    A shop row that can't be found at all (shouldn't happen for a shop that
+    holds a number, but not impossible under concurrent deletion) is treated
+    as no plan, not an error.
+    """
+    row = await execute_one(
+        "SELECT plan_id IS NOT NULL AS has_plan FROM business_app_core.shops WHERE id = $1",
+        shop_id,
+    )
+    return bool(row and row["has_plan"])
+
+
+async def set_release_schedule(*, shop_id: UUID, deadline: datetime | None) -> None:
+    """Set or clear the release deadline on a shop's telephony row.
+
+    Lives here (not voice_telephony_queries.py) alongside the other
+    shop_telephony writes this module already owns (list_provisioned_numbers,
+    set_health) even though the column itself is on shop_telephony.
+    """
+    await execute_void(
+        "UPDATE voice_agent.shop_telephony SET release_scheduled_at = $2 WHERE shop_id = $1",
+        shop_id, deadline,
     )
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from booking_engine.db.connection import execute_one
+from booking_engine.db.connection import execute_one, execute_void
 
 
 async def upsert_telephony(
@@ -80,4 +80,18 @@ async def get_telephony_by_kairo_number(kairo_number: str) -> dict | None:
     return await execute_one(
         "SELECT * FROM voice_agent.shop_telephony WHERE kairo_number = $1",
         kairo_number,
+    )
+
+
+async def delete_telephony(shop_id: UUID) -> None:
+    """Drop the shop's telephony row once its number has been released.
+
+    Called only after the number has been confirmed released at Twilio
+    (services/number_release.py) — deleting first would leave us paying for
+    a number we no longer track, the same orphan class as the insert-only
+    guarantee above protects against.
+    """
+    await execute_void(
+        "DELETE FROM voice_agent.shop_telephony WHERE shop_id = $1",
+        shop_id,
     )

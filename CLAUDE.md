@@ -6,6 +6,72 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-08-15 — Grace-period number release, closing the 2026-08-14 "Cancellation gap"
+
+**Decision:** built `services/number_release.py`, closing the gap the
+2026-08-14 self-service-provisioning entry flagged but didn't fix: when a
+shop's subscription lapses (webapp's `billing/webhook/process-event.ts`
+nulls `shops.plan_id`), nothing in this repo released the shop's Twilio
+number — it kept costing ~$3/mo with no plan behind it. Not an instant
+release: releasing the moment a plan lapses gives the salon no warning and
+Twilio does not hold a released number for them to reclaim if they
+resubscribe. Instead, a pure `decide_release(inp, now)` policy function
+(`has_plan`, `release_scheduled_at`) → `('none'|'schedule'|'clear'|'release',
+deadline)` drives an hourly-tick-shaped `sweep()`: the first tick that sees a
+number with no plan behind it schedules a 14-day deadline
+(`GRACE_DAYS`), a later tick clears it if the plan comes back in time, and
+only a tick that finds the deadline already passed calls `release_for_shop`.
+
+**The one rule that makes this safe under repeated hourly ticks:** "no plan,
+already scheduled, deadline still in the future" must return `('none',
+existing_deadline)`, not re-schedule — re-stamping `now() + 14 days` on
+every tick would push the deadline forward forever and the number would
+never actually be released. Covered by a regression test that runs
+`decide_release` twice, an hour apart, and asserts the deadline didn't move.
+
+**The deadline lives in `voice_agent`, not `business_app_core`, on
+purpose** — a `plan_lapsed_at` column would belong on `shops`, which is the
+webapp repo's schema, not this one's to alter. `shop_telephony.release_scheduled_at`
+(migration `13_number_release.sql`) is derived from when *this* repo's tick
+first noticed, which is all it needs to be.
+
+**`release_for_shop` order is deliberate: Twilio first, the local row
+second** — same orphan-prevention shape as `insert_telephony`'s
+insert-only guarantee (2026-08-14 entry above). Deleting
+`shop_telephony`'s row before Twilio confirms the number is gone would
+leave us paying for a number nothing tracks anymore. A Twilio 404 is
+treated as "already released" (e.g. a prior run released it and crashed
+before deleting the row) and still proceeds to delete + record; any other
+Twilio failure leaves the row untouched so the next tick retries — never
+silently drops the shop from future consideration.
+
+**`number_requests.status` gained `'released'`**, plus `released_at`/
+`released_number` columns, so a released shop's history survives after its
+`shop_telephony` row is deleted (and so a later re-provision starts from a
+known prior state, not a gap). The status CHECK constraint (created inline
+in migration 12) had to be dropped and re-added to widen it — its generated
+name (`number_requests_status_check`) was confirmed by querying
+`pg_constraint` against a scratch DB built from the full migration chain
+through 12, rather than assumed. Idempotency proved by applying the entire
+`booking_engine/db/sql/` chain twice against a fresh scratch DB (stub
+`business_app_core.shops`/`customers`/`appointments`/`ai_token_log` tables,
+same pattern migration 12 was verified with) — both runs exited 0, and
+`'released'` was accepted while a bogus status was still rejected,
+re-checked after the double apply specifically (not just the first).
+
+**Not wired into the hourly tick yet.** `sweep()` is written and tested but
+`booking_engine/api/routes/messaging_tick.py` doesn't call it — this entry
+covers the release mechanism only, matching the task's explicit scope (its
+commit list didn't touch `messaging_tick.py`). Wiring it in, plus a QA-branch
+check that a shop with `plan_id IS NULL` and a live `shop_telephony` row
+gets the flow it's supposed to, are the next steps before this actually
+protects anyone's bill.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — 373 passed, 14 skipped, 0 failed (up from
+the 359/14/0 baseline recorded in the 2026-08-15 STOP-handling entry below,
++14 new `test_number_release.py` tests, no existing test touched).
+
 ## 2026-08-15 — Removed STOP handling entirely; suppression is `marketing_consent` alone (owner decision)
 
 **Decision (owner's, not a recommendation — implemented as directed, not
