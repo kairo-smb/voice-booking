@@ -59,13 +59,19 @@ same pattern migration 12 was verified with) — both runs exited 0, and
 `'released'` was accepted while a bogus status was still rejected,
 re-checked after the double apply specifically (not just the first).
 
-**Not wired into the hourly tick yet.** `sweep()` is written and tested but
-`booking_engine/api/routes/messaging_tick.py` doesn't call it — this entry
-covers the release mechanism only, matching the task's explicit scope (its
-commit list didn't touch `messaging_tick.py`). Wiring it in, plus a QA-branch
-check that a shop with `plan_id IS NULL` and a live `shop_telephony` row
-gets the flow it's supposed to, are the next steps before this actually
-protects anyone's bill.
+**Wired into the hourly tick** as a third stage, after the health check, in
+`booking_engine/api/routes/messaging_tick.py` — this entry originally
+covered the release mechanism only (matching that task's explicit scope,
+whose commit list didn't touch `messaging_tick.py`); the wiring landed in a
+follow-up change the same day. Runs last so a failure in the release sweep
+can never suppress the health refresh above it, wrapped in its own
+try/except so it's counted under `errors` rather than 500ing the tick. Also
+added in that follow-up: an explicit owner-initiated `POST
+/voice/numbers/release` endpoint (`voice_telephony.py`) that calls
+`release_for_shop` directly, bypassing the grace period on purpose — a
+salon giving up its number deliberately, not a lapsed-plan guess. Still
+needed: a QA-branch check that a shop with `plan_id IS NULL` and a live
+`shop_telephony` row gets the flow it's supposed to.
 
 **Verification:** `python -m pytest tests/ --ignore=tests/live_db
 --ignore=tests/live_twilio -q` — 373 passed, 14 skipped, 0 failed (up from

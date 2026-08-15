@@ -1,5 +1,6 @@
 """Tests for POST /voice/numbers/request, GET /voice/numbers/request/{shop_id},
-POST /messaging/tick, and the idempotent POST /voice/numbers/provision path.
+POST /voice/numbers/release, POST /messaging/tick, and the idempotent
+POST /voice/numbers/provision path.
 """
 from __future__ import annotations
 
@@ -217,6 +218,10 @@ async def test_tick_with_approved_bundle_calls_provision_approved():
         "booking_engine.api.routes.messaging_tick.check_all",
         new_callable=AsyncMock,
         return_value={"checked": 0, "green": 0, "red": 0, "inconclusive": 0},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.release_sweep",
+        new_callable=AsyncMock,
+        return_value={"scheduled": 0, "cleared": 0, "released": 0, "errors": 0},
     ):
         app = create_app()
         transport = ASGITransport(app=app)
@@ -262,7 +267,11 @@ async def test_tick_one_bad_shop_does_not_stop_the_sweep_or_health_check():
         "booking_engine.api.routes.messaging_tick.check_all",
         new_callable=AsyncMock,
         return_value={"checked": 3, "green": 3, "red": 0, "inconclusive": 0},
-    ) as mock_check_all:
+    ) as mock_check_all, patch(
+        "booking_engine.api.routes.messaging_tick.release_sweep",
+        new_callable=AsyncMock,
+        return_value={"scheduled": 0, "cleared": 0, "released": 0, "errors": 0},
+    ):
         app = create_app()
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
@@ -277,3 +286,137 @@ async def test_tick_one_bad_shop_does_not_stop_the_sweep_or_health_check():
         assert mock_provision.call_args.args[0] == good_shop
         mock_check_all.assert_called_once()
         assert data["health"]["checked"] == 3
+
+
+@pytest.mark.asyncio
+async def test_release_requires_auth():
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.post(
+            "/api/v1/voice/numbers/release",
+            json={"shop_id": str(uuid4()), "reason": "owner_requested"},
+        )
+        assert r.status_code in (401, 403, 503)
+
+
+@pytest.mark.asyncio
+async def test_release_no_number_returns_404():
+    shop_id = uuid4()
+    with patch(
+        "booking_engine.api.routes.voice_telephony.release_for_shop",
+        new_callable=AsyncMock,
+        return_value="no_number",
+    ):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/release",
+                headers=AUTH,
+                json={"shop_id": str(shop_id), "reason": "owner_requested"},
+            )
+        assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_release_failed_returns_502():
+    shop_id = uuid4()
+    with patch(
+        "booking_engine.api.routes.voice_telephony.release_for_shop",
+        new_callable=AsyncMock,
+        return_value="release_failed",
+    ):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/release",
+                headers=AUTH,
+                json={"shop_id": str(shop_id), "reason": "owner_requested"},
+            )
+        assert r.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_release_success_returns_200():
+    shop_id = uuid4()
+    with patch(
+        "booking_engine.api.routes.voice_telephony.release_for_shop",
+        new_callable=AsyncMock,
+        return_value="released",
+    ) as mock_release:
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/release",
+                headers=AUTH,
+                json={"shop_id": str(shop_id), "reason": "owner_requested"},
+            )
+        assert r.status_code == 200
+        assert r.json()["data"]["status"] == "released"
+        mock_release.assert_called_once()
+        assert mock_release.call_args.args[0] == shop_id
+        assert mock_release.call_args.kwargs["reason"] == "owner_requested"
+
+
+@pytest.mark.asyncio
+async def test_tick_includes_release_block():
+    with patch(
+        "booking_engine.api.routes.messaging_tick.list_pending_review",
+        new_callable=AsyncMock,
+        return_value=[],
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.check_all",
+        new_callable=AsyncMock,
+        return_value={"checked": 0, "green": 0, "red": 0, "inconclusive": 0},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.release_sweep",
+        new_callable=AsyncMock,
+        return_value={"scheduled": 1, "cleared": 0, "released": 2, "errors": 0},
+    ) as mock_sweep:
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post("/api/v1/messaging/tick", headers=AUTH)
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["release"] == {
+            "scheduled": 1, "cleared": 0, "released": 2, "errors": 0,
+        }
+        mock_sweep.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_tick_release_sweep_failure_does_not_fail_tick_or_hide_health():
+    with patch(
+        "booking_engine.api.routes.messaging_tick.list_pending_review",
+        new_callable=AsyncMock,
+        return_value=[],
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.check_all",
+        new_callable=AsyncMock,
+        return_value={"checked": 5, "green": 5, "red": 0, "inconclusive": 0},
+    ) as mock_check_all, patch(
+        "booking_engine.api.routes.messaging_tick.release_sweep",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("twilio blew up"),
+    ):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post("/api/v1/messaging/tick", headers=AUTH)
+        # The endpoint must still return 200 even though the release sweep
+        # raised — the cron treats any non-2xx as a failed run, and one
+        # shop's Twilio hiccup during release must not mask the rest of
+        # the tick's work.
+        assert r.status_code == 200
+        data = r.json()["data"]
+        # Health must still have run and be present/populated — it runs
+        # before the release sweep specifically so a release failure can
+        # never prevent it.
+        mock_check_all.assert_called_once()
+        assert data["health"] == {"checked": 5, "green": 5, "red": 0, "inconclusive": 0}
+        # The failure must be counted, not silently swallowed.
+        assert data["errors"] >= 1

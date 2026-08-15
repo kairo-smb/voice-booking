@@ -1,8 +1,9 @@
 """POST /messaging/tick — the single scheduled entry point.
 
 One hourly cron hits this. It polls regulatory bundles that are under review,
-provisions numbers whose bundles were approved, then refreshes the health
-semaphore for every shop that has a number.
+provisions numbers whose bundles were approved, refreshes the health
+semaphore for every shop that has a number, then runs the number-release
+sweep (grace-period release of lapsed-plan shops' Twilio numbers).
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from booking_engine.config import Settings, get_settings
 from booking_engine.db.number_request_queries import list_pending_review, set_status
 from booking_engine.services.number_health import check_all
 from booking_engine.services.number_provisioning import provision_approved
+from booking_engine.services.number_release import sweep as release_sweep
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +65,23 @@ async def tick(
 
     health = await check_all(settings=settings)
 
+    # Runs last, deliberately: a failure in the release sweep must never
+    # prevent health from being refreshed for every shop above it. Wrapped
+    # so a single Twilio hiccup here is counted, not raised — the cron
+    # treats any non-2xx as a failed run, and one shop's release problem
+    # should not mask the rest of this tick's work.
+    try:
+        release = await release_sweep(settings=settings)
+    except Exception:  # noqa: BLE001 — see comment above
+        logger.exception("messaging_tick.release_sweep_failed")
+        release = {"scheduled": 0, "cleared": 0, "released": 0, "errors": 1}
+        errors += 1
+
     return {"data": {
         "reviewed": reviewed,
         "provisioned": provisioned,
         "rejected": rejected,
         "errors": errors,
         "health": health,
+        "release": release,
     }}

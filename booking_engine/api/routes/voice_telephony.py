@@ -22,6 +22,7 @@ from booking_engine.db import number_request_queries as rq
 from booking_engine.db import voice_telephony_queries as q
 from booking_engine.db.voice_config_queries import get_config
 from booking_engine.services.number_provisioning import submit_request
+from booking_engine.services.number_release import release_for_shop
 from booking_engine.services.setup_instructions import build_instructions
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,11 @@ class TelephonyOut(BaseModel):
     kairo_number_sid: str
     setup_path: str
     salon_existing_number: str | None
+
+
+class ReleaseIn(BaseModel):
+    shop_id: UUID
+    reason: str
 
 
 class NumberRequestOut(BaseModel):
@@ -169,6 +175,26 @@ async def provision(
         winner = await q.get_telephony(body.shop_id)
         return {"data": _telephony_out(winner)}
     return {"data": _telephony_out(row)}
+
+
+@router.post("/release")
+async def release(
+    body: ReleaseIn,
+    settings: Annotated[Settings, Depends(get_settings)],
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Owner-initiated release — a salon deliberately giving up its number,
+    as opposed to `sweep`'s grace-period release of a lapsed plan. This
+    bypasses the grace period on purpose: they asked.
+    """
+    outcome = await release_for_shop(body.shop_id, settings=settings, reason=body.reason)
+    if outcome == "released":
+        return {"data": {"status": "released"}}
+    if outcome == "no_number":
+        raise HTTPException(404, "No telephony provisioned for this shop")
+    # "release_failed" — Twilio refused; the row is intentionally still
+    # there and the next sweep retries.
+    raise HTTPException(502, "Twilio refused to release the number")
 
 
 @router.get("/{shop_id}/setup-instructions")
