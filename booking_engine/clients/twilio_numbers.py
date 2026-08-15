@@ -57,12 +57,19 @@ def purchase_number(
     auth_token: str,
     bundle_sid: str | None = None,
     address_sid: str | None = None,
+    sms_url: str | None = None,
 ) -> PurchasedNumber:
-    """Purchase a number and bind its Voice URL to the dynamic TwiML webhook.
+    """Purchase a number and bind its webhooks.
 
-    `bundle_sid` ties the purchase to the one Kairo-entity regulatory Bundle
-    (created once, out-of-band) reused across every DID — required for
-    regulated number types like Estonia mobile.
+    `bundle_sid` ties the purchase to a regulatory Bundle — required for
+    regulated number types like Estonia mobile. For self-service provisioning
+    this is the *salon's own* bundle, not a shared one (Twilio's ISV rules
+    forbid reusing our business info in customer bundles).
+
+    `sms_url` is not optional in practice, only in the signature: without it
+    the number has no inbound SMS webhook, so STOP messages never reach us —
+    a legal opt-out failure — and the health semaphore reports webhook_drift
+    forever because it checks that sms_url points back at us.
     """
     client = Client(account_sid, auth_token)
     kwargs: dict = {
@@ -70,9 +77,42 @@ def purchase_number(
         "voice_url": voice_url,
         "voice_method": "POST",
     }
+    if sms_url:
+        kwargs["sms_url"] = sms_url
+        kwargs["sms_method"] = "POST"
     if bundle_sid:
         kwargs["bundle_sid"] = bundle_sid
     if address_sid:
         kwargs["address_sid"] = address_sid
     result = client.incoming_phone_numbers.create(**kwargs)
     return PurchasedNumber(sid=result.sid, phone_number=result.phone_number)
+
+
+def release_number(*, sid: str, account_sid: str, auth_token: str) -> None:
+    """Give a number back to Twilio.
+
+    Called when we bought one we cannot store — without this, losing the
+    insert race leaks a number billed at ~$3/mo forever.
+    """
+    Client(account_sid, auth_token).incoming_phone_numbers(sid).delete()
+
+
+@dataclass
+class NumberStatus:
+    sid: str
+    phone_number: str
+    voice_url: str
+    sms_url: str
+
+
+def fetch_number(*, sid: str, account_sid: str, auth_token: str) -> NumberStatus:
+    """Read a number back from Twilio.
+
+    Raises TwilioRestException with status 404 if the number no longer belongs
+    to this account — which is exactly the signal the health check needs.
+    """
+    n = Client(account_sid, auth_token).incoming_phone_numbers(sid).fetch()
+    return NumberStatus(
+        sid=n.sid, phone_number=n.phone_number,
+        voice_url=n.voice_url or "", sms_url=n.sms_url or "",
+    )

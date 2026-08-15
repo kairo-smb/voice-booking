@@ -1,0 +1,61 @@
+name: Messaging cron
+
+# Hourly scheduled entry point for two independent, unrelated-but-cheap-to-
+# co-schedule jobs against the QA Booking Engine app:
+#
+#   1. POST /api/v1/messaging/tick — polls Twilio regulatory bundles,
+#      provisions numbers for approved ones, and refreshes a health
+#      semaphore. Added alongside this workflow.
+#
+#   2. POST /api/v1/voice/heartbeat/forwarding — detects salons whose call
+#      forwarding has silently stopped. This endpoint has existed since
+#      before, but its docstring's "triggered by EventBridge nightly" claim
+#      has been false since 2026-07-18, when the AWS Lambda/EventBridge
+#      deploy path was deleted (see CLAUDE.md). Nothing has called it since
+#      — it is wired in here rather than left orphaned, since routing it
+#      through this same schedule costs one extra step.
+#
+# Both steps hit the same app, so they share one job/schedule rather than
+# two near-duplicate workflows. Each step is independent: the heartbeat step
+# still runs (`if: always()`) even if the tick step fails, so one broken
+# subsystem doesn't mask a problem in the other. The job as a whole still
+# fails if either step fails, so this cannot go quietly green while doing
+# nothing.
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: booking-engine-messaging-cron
+  cancel-in-progress: false
+
+jobs:
+  tick-and-heartbeat:
+    name: Messaging tick + forwarding heartbeat
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CONTROL_PLANE_SECRET: ${{ secrets.CONTROL_PLANE_SECRET }}
+      BASE_URL: ${{ vars.QA_BASE_URL || 'https://kairo-booking-engine-qa.fly.dev' }}
+    steps:
+      - name: Guard - required secret must be set
+        run: |
+          if [ -z "${CONTROL_PLANE_SECRET}" ]; then
+            echo "::error::CONTROL_PLANE_SECRET is not set. Refusing to send an unauthenticated request."
+            exit 1
+          fi
+
+      - name: Messaging tick (bundle poll, provisioning, health semaphore)
+        run: |
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer ${CONTROL_PLANE_SECRET}" \
+            "${BASE_URL}/api/v1/messaging/tick"
+
+      - name: Forwarding heartbeat (silent-forwarding-drop detection)
+        if: always()
+        run: |
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer ${CONTROL_PLANE_SECRET}" \
+            "${BASE_URL}/api/v1/voice/heartbeat/forwarding"

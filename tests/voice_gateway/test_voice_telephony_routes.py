@@ -49,7 +49,9 @@ async def test_provision_writes_telephony_row():
     from booking_engine.clients.twilio_numbers import PurchasedNumber
     with patch("booking_engine.api.routes.voice_telephony.purchase_number",
                return_value=PurchasedNumber(sid="PN1", phone_number="+37251234567")) as mock_purchase, \
-         patch("booking_engine.db.voice_telephony_queries.upsert_telephony",
+         patch("booking_engine.db.voice_telephony_queries.get_telephony",
+               return_value=None), \
+         patch("booking_engine.db.voice_telephony_queries.insert_telephony",
                return_value={
                    "shop_id": "00000000-0000-0000-0000-000000000001",
                    "kairo_number": "+37251234567",
@@ -117,7 +119,9 @@ async def test_setup_instructions_404_when_no_telephony():
 async def test_provision_returns_502_when_twilio_purchase_fails():
     from twilio.base.exceptions import TwilioRestException
     with patch("booking_engine.api.routes.voice_telephony.purchase_number",
-               side_effect=TwilioRestException(400, "https://api.twilio.com/x", "Bundle not approved")):
+               side_effect=TwilioRestException(400, "https://api.twilio.com/x", "Bundle not approved")), \
+         patch("booking_engine.db.voice_telephony_queries.get_telephony",
+               return_value=None):
         app = create_app()
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
