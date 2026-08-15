@@ -6,12 +6,13 @@
 
 ## Ownership boundary
 
-Two schemas in one Neon Postgres database:
+Three schemas in one Neon Postgres database:
 
 | Schema | Owner | This repo's access |
 |---|---|---|
 | `business_app_core` | the `webapp` Control Plane repo | reads/writes narrowly through `booking_engine/db/queries.py`; **never alters its DDL** |
 | `voice_agent` | this repo | owns it fully — DDL lives in `booking_engine/db/sql/`, applied in order by `scripts/migrate.sh` |
+| `sms` | this repo | owns it fully, added 2026-08-12 — see [`sms` schema](#sms-schema--authoritative-here) below |
 
 **Do not hand-copy `business_app_core`'s schema into a doc.** That has already gone stale and caused real bugs at least twice (`CLAUDE.md` §2026-07-24 "Repo cleanup..." and the schema-mismatch history it references). The accurate, current mapping is `booking_engine/db/queries.py`, exercised against real Neon-shaped data by `tests/live_db/*`. Read that file for column names, not this one.
 
@@ -61,10 +62,52 @@ DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `12_number_reques
 
 `business_app_core.shops` also gained two columns directly in migration 03: `voice` (default `'alloy'`) and `language` (default `'it'`) — the one place this repo's migrations touch the other schema, both additive/nullable-safe.
 
+## `sms` schema — authoritative here
+
+Added 2026-08-12 (`booking_engine/db/sql/11_sms_schema.sql`), owned by this
+repo like `voice_agent`. Phase 1 of a larger SMS/WhatsApp messaging design —
+see [Architecture → SMS marketing send](architecture.md#sms-marketing-send-phase-1-of-messaging)
+and `CLAUDE.md` §2026-08-12. WhatsApp (a separate `whatsapp` schema) is
+designed but not built; this repo currently has `sms` only.
+
+| Table | Purpose |
+|---|---|
+| `campaigns` | batch-send container (`draft → approved → sending → sent/cancelled`). **Exists, nothing writes to it yet** — Phase 1 is one-off sends only. |
+| `outbound_messages` | one row per send attempt, including refused ones (`status='suppressed'`, `suppressed_reason` — a refusal is always persisted, never silently dropped). `credits_charged`/`price_usd` are the billed figures; `campaign_id IS NULL` means a one-off send. Unique on `(campaign_id, customer_id)` where both are set, so re-running a batch send can't double-message a customer. |
+| `opt_outs` | suppression list of last resort, keyed `(shop_id, phone_normalized)`. |
+
+**Why `opt_outs` exists alongside `customers.marketing_consent`:** a STOP
+reply must be honoured even from a phone number that matches no
+`customers` row (a wrong number, an imported list, a deleted customer) —
+there is nothing in `business_app_core` to flip in that case. When the
+phone *does* match a customer, the STOP handler
+(`services/messaging/sms_inbound.py`) writes **both**: the `opt_outs` row
+(works regardless of a match) and `customers.marketing_consent = false` /
+`marketing_consent_withdrawn_at = now()` /
+`marketing_consent_source = 'sms_stop'` (keeps the webapp's own consent UI
+honest — it reads `business_app_core` directly). `sms.opt_outs` is also the
+legal evidence trail for the Garante.
+
+**Gap worth knowing:** `business_app_core.customers.marketing_consent`,
+`_granted_at`, `_withdrawn_at`, `_source` exist on the live database but
+appear in **no migration file inside this repo** — they were added through
+the webapp's own migration chain, not this repo's. Grepping only this repo
+for those columns will come up empty; they're real, just owned elsewhere —
+same ownership-boundary caution as the rest of `business_app_core` above.
+
+`business_app_core.ai_token_log` gained two nullable, FK-less columns in
+the same change — `sms_message_id`, `whatsapp_message_id` — via the
+**webapp's** own migration (`46_ai_token_log_message_fk.sql`), not this
+repo's chain, since `ai_token_log` lives in `business_app_core`. They
+mirror the existing `voice_call_id` column so a credit debit for a message
+send is traceable back to the row that caused it; no FK, since
+`sms.outbound_messages`/future `whatsapp.messages` are owned by this repo
+and `ai_token_log` must not depend on a schema it doesn't own.
+
 ## Cross-schema references
 
-`voice_agent.calls` FKs into `business_app_core.shops`/`customers`/`appointments` — cross-schema foreign keys are used deliberately rather than duplicating those rows into `voice_agent`.
+`voice_agent.calls` FKs into `business_app_core.shops`/`customers`/`appointments` — cross-schema foreign keys are used deliberately rather than duplicating those rows into `voice_agent`. `sms.outbound_messages`/`sms.opt_outs` do the same into `business_app_core.shops`/`customers`.
 
 ## Connection
 
-`booking_engine/db/connection.py` — a single asyncpg pool (`pool_min_size=2`, `pool_max_size=10`, both from `Settings`). **No `pool.acquire()` timeout is configured anywhere in this codebase** — under enough concurrent calls the pool itself becomes a contention point with no bound on the wait (flagged, not yet actioned, in `CLAUDE.md` §2026-07-21 "Cost-gated pricing..."; not urgent while call volume is near zero).
+`booking_engine/db/connection.py` — a single asyncpg pool (`pool_min_size=2`, `pool_max_size=10`, both from `Settings`). **No `pool.acquire()` timeout is configured anywhere in this codebase** — under enough concurrent calls the pool itself becomes a contention point with no bound on the wait (flagged, not yet actioned, in `CLAUDE.md` §2026-07-24 "Root-caused session 'dead air'..."; not urgent while call volume is near zero).

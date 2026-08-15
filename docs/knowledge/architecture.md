@@ -14,7 +14,7 @@ Caller (phone) → Twilio (TwiML) → OpenAI Realtime API (native SIP, STT/LLM/T
                                     Neon PostgreSQL (business_app_core + voice_agent)
 ```
 
-One deployed service — `booking_engine`, a FastAPI app (`booking_engine/api/app.py`). There is no separate "voice gateway" process; an earlier two-service split was unified here (see `CLAUDE.md` §2026-07-21 "Realtime + hosted MCP..." and the architecture-divergence note it superseded).
+One deployed service — `booking_engine`, a FastAPI app (`booking_engine/api/app.py`). There is no separate "voice gateway" process; an earlier two-service split was folded into this one before the current history log begins — the only surviving trace is the `tests/voice_gateway/` directory name, which today tests `booking_engine/services/*` (`CLAUDE.md` §2026-07-24 "Repo cleanup...", which deleted the last dead references to it).
 
 ## Call flow
 
@@ -27,9 +27,9 @@ One deployed service — `booking_engine`, a FastAPI app (`booking_engine/api/ap
 ## Auth boundaries
 
 Four distinct auth schemes across the surface — see [API overview](api/README.md) for the full breakdown:
-- `CONTROL_PLANE_SECRET` — the separate `webapp` Control Plane repo, reading/writing voice config, calls, analytics, telephony provisioning.
+- `CONTROL_PLANE_SECRET` — the separate `webapp` Control Plane repo, reading/writing voice config, calls, analytics, telephony provisioning, and (since 2026-08-12) triggering a one-off SMS send (`POST /api/v1/sms/send`).
 - `OPENAI_TOOL_SECRET` — OpenAI's Realtime tool/event calls (`/voice/tools/*`, `/voice/events/*`), and the MCP mount.
-- Twilio request-signature verification (`TWILIO_AUTH_TOKEN`) — the TwiML webhook only.
+- Twilio request-signature verification (`TWILIO_AUTH_TOKEN`) — the TwiML webhook and, since 2026-08-12, the two SMS webhooks (`services/twilio_signature.py`, one verifier shared by all three routes).
 - The OpenAI `realtime.call.incoming` webhook (`/voice/openai/incoming`) currently verifies a signature **only if `OPENAI_WEBHOOK_SECRET` is set** — unset, it accepts unsigned requests (a known, flagged gap; see the `ponytail:` comment at the top of `voice_openai.py`).
 - The plain REST API (`shops`, `customers`, `services`, `availability`, `appointments`) has **no auth dependency at all** today.
 
@@ -42,6 +42,39 @@ A second, independent flow alongside the SIP call path above — no caller invol
 3. `GET /api/v1/voice/numbers/request/{shop_id}` is the webapp's poll target — returns the request row and the telephony row (if any) so the UI can pick which state to render.
 
 **This coexists with, and does not replace, the older manual `/voice/numbers/search` + `/voice/numbers/provision` pair** — those still purchase against the one shared Kairo-entity bundle (`TWILIO_BUNDLE_SID`) from the 2026-07-16 decision, used for Path 1 (forwarding) and ops-triggered onboarding. Only the new `/request` path builds a bundle per salon. Full rationale for why a shared bundle is no longer viable for self-service: `CLAUDE.md` §2026-08-14. Design detail (regulatory model, the orphaned-number bug and its fix, the health-semaphore contract): see the git history of the now-deleted `docs/number-provisioning-design.md`, or `CLAUDE.md` §2026-08-14.
+## SMS marketing send (Phase 1 of messaging)
+
+First shipped piece of a larger SMS/WhatsApp messaging design
+(`docs/messaging-design.md` — a working document, deleted once the whole
+design ships; the durable record is this section, [Database → `sms`
+schema](database.md#sms-schema--authoritative-here), [Providers →
+SMS](providers.md#sms-sending-twilio-messaging-api), [API →
+SMS](api/sms.md), and `CLAUDE.md` §2026-08-12). Phase 1 is one outbound SMS
+to one consenting customer, triggered from the webapp:
+
+```
+webapp (owner clicks "Invia SMS" in a modal)
+  → POST /api/v1/hair-salon/customers/{id}/send-sms   (webapp's own route; re-checks consent)
+    → POST /api/v1/sms/send                            (this repo, CONTROL_PLANE_SECRET)
+        services/messaging/sms_send.py::send_marketing_sms
+          consent + opt-out gate → sanitize + append footer (gsm7.py)
+          → balance check → Twilio send → debit credits (token_basket_queries)
+          → persist to sms.outbound_messages
+```
+
+Inbound: Twilio POSTs STOP replies to `POST /api/v1/sms/webhook/inbound`
+and delivery/price callbacks to `POST /api/v1/sms/webhook/status`, both
+`X-Twilio-Signature`-verified with the same helper the TwiML webhook uses.
+
+**Single debit path, by design.** Only `sms_send.py` ever calls
+`try_debit_for_message` — the webapp's `send-sms` route forwards the
+request and re-checks consent but never touches credits itself, so there
+is exactly one place a send can be billed.
+
+**Synchronous, not queued.** `/sms/send` blocks until Twilio accepts the
+message or the send is refused, because the caller is a salon owner
+watching a modal, not a batch job. Bulk/scheduled sends (`sms.campaigns`)
+are a later phase — nothing writes that table yet.
 
 ## Alternate entrypoint (testing only)
 

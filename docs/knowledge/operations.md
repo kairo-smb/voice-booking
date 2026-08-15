@@ -8,7 +8,7 @@ Deploy, migrations, CI, environment variables, and live-call testing.
 
 ## Branching & environments
 
-Two Fly.io apps from the same `booking_engine/Dockerfile.fly`: production (`fly.toml`, app `kairo-booking-engine`, `min_machines_running = 0`) and QA (`fly.qa.toml`, app `kairo-booking-engine-qa`, `min_machines_running = 1`). Deploys automatically via GitHub Actions on push to `main` (production, `deploy-fly-prod.yml`) or `QA` (`deploy-qa.yml`) — both run tests and migration checks against a throwaway Neon branch first (see [Providers → Neon](providers.md#neon-postgresql)).
+Two Fly.io apps from the same `booking_engine/Dockerfile.fly`: production (`fly.toml`, app `kairo-booking-engine`, `min_machines_running = 0`) and QA (`fly.qa.toml`, app `kairo-booking-engine-qa`, `min_machines_running = 1`). Deploys automatically via GitHub Actions on push to `main` (production, `deploy-fly-prod.yml`) or `QA` (`deploy-qa.yml`) — both run tests and migration checks against a throwaway Neon branch first (see [Providers → Neon](providers.md#neon-postgresql)), then hand the real migration off to the `webapp` repo (below) before deploying.
 
 Manual deploy:
 ```bash
@@ -24,12 +24,16 @@ DATABASE_URL="$DATABASE_URL" ./scripts/migrate.sh
 ```
 Applies every file in `booking_engine/db/sql/` in order, **except** `01_schema.sql`/`02_seed_data.sql` (a local-only bootstrap pair — the script skips them explicitly). See [Database](database.md) for what each migration adds.
 
+**This repo does not migrate the shared QA/production branches itself.** `scripts/migrate.sh` is run here only against a *local* DB or the per-run ephemeral Neon branch. For real QA/prod, the `migrate-via-webapp` job in `deploy-qa.yml`/`deploy-fly-prod.yml` dispatches `kairo-smb/webapp`'s `migrate-qa.yml`/`migrate-prod.yml` and waits for it (20 min timeout) — the `webapp` repo is the parent that owns applying **all** schemas to the shared DB in order (`business_app_core` → `voice_agent` → `market_intel`), so this service can never deploy ahead of its schema. Refreshing the QA branch from production is likewise `webapp`'s job now, not this repo's.
+
 ## Secrets
 
 `CONTROL_PLANE_SECRET` and `OPENAI_TOOL_SECRET` are Fly app secrets, not GitHub Actions secrets — `flyctl deploy` doesn't inject them:
 ```bash
 fly secrets set CONTROL_PLANE_SECRET='...' OPENAI_TOOL_SECRET='...' --app kairo-booking-engine
 ```
+`WEBAPP_MIGRATE_DISPATCH_TOKEN` is the opposite case — a **GitHub Actions** repo secret only (a token with `actions:write` on `kairo-smb/webapp`), never a Fly secret. Without it the `migrate-via-webapp` job fails and neither environment deploys.
+
 Full env var list: `booking_engine/config.py`'s `Settings` class is the exhaustive source; the auth-relevant subset is restated per-provider in [Providers](providers.md).
 
 ## Post-deploy smoke test

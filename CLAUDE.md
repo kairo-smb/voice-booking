@@ -136,6 +136,162 @@ doc this entry and those pages were written from) is deleted as of this
 change — superseded by the shipped docs above.
 
 ---
+## 2026-08-12 — Phase 1 messaging: SMS marketing send (schema, send/inbound/status, fail-closed billing)
+
+**Decision:** first shipped piece of a larger SMS/WhatsApp messaging design
+(full draft: `docs/messaging-design.md`, a working document deleted once the
+whole design ships — this entry plus `docs/knowledge/{architecture,database,
+providers}.md` and `docs/knowledge/api/sms.md` are the durable record).
+Phase 1: a salon owner can send one personalised marketing SMS to one
+consenting customer, from the shop's own Twilio DID, billed as AI credits.
+New `sms` schema (`booking_engine/db/sql/11_sms_schema.sql`:
+`campaigns`/`outbound_messages`/`opt_outs`), new package
+`booking_engine/services/messaging/` (`gsm7.py`, `send_credits.py`,
+`sms_send.py`, `sms_inbound.py`), new routes `POST /api/v1/sms/send` +
+`/sms/webhook/{inbound,status}`. Companion webapp change (own commits, own
+repo): Marketing's Customers tab renamed "Salute Clienti" → "Touchpoint
+Clienti", and its existing win-back-copy generator modal gained an "Invia
+SMS" button.
+
+**SMS for marketing, not WhatsApp.** WhatsApp forbids free-form
+business-initiated messages outside a 24h customer-initiated session — only
+pre-approved templates, which can't carry the per-customer LLM-generated
+copy this feature exists to send. SMS has no such restriction. (WhatsApp
+booking/reminders are a later phase of the same design, not built yet.)
+
+**Billing: 2× Twilio cost via AI credits, through a dedicated converter —
+not the webapp's `rawToUserCredits()`.**
+`booking_engine/services/messaging/send_credits.py` implements
+`ceil(twilio_usd * 2 * 1000)`. Deliberately not the webapp's existing
+10×-margin, floor-at-1 converter: 10× is the LLM margin, wrong for a
+pass-through send cost; a floor of 1 would charge a credit for a free
+WhatsApp service message once that phase ships, quietly inverting the
+"customer speaks first, and it's free" economics that phase depends on.
+
+**Credits are debited after Twilio accepts the send, not before —
+reversed mid-implementation (commit `4883814`).** The first cut checked
+the balance and debited before calling Twilio; a Twilio-side rejection then
+left the shop billed for a message that was never sent, on a call that cost
+Kairo nothing. Fixed to check balance → send → debit only after a
+successful Twilio accept, logging (not blocking) the narrow case where the
+balance drains in that window — sends are owner-triggered and effectively
+serial today, so this is an accepted race, not a real gap.
+`booking_engine/db/token_basket_queries.py::try_debit_for_message` is
+fail-closed either way: unlike the voice path's `insert_debit_event`
+(drains-and-proceeds, because a live call can't be un-answered), a message
+that can't be billed is never sent — the row is marked
+`suppressed_reason='insufficient_credits'` instead.
+
+**Consent lives in `business_app_core.customers`, the single source of
+truth shared with the webapp; `sms.opt_outs` is the suppression list of
+last resort.** A STOP reply must be honoured even from a phone number
+matching no `customers` row (import, wrong number, deleted customer) —
+nothing in `business_app_core` to flip in that case, hence the standalone
+table. When the phone *does* match a customer,
+`services/messaging/sms_inbound.py` writes **both**: the `opt_outs` row
+(unconditional) and `customers.marketing_consent = false` (keeps the
+webapp's own consent UI honest, since it reads `business_app_core`
+directly). `opt_outs` also doubles as the legal evidence trail for the
+Garante.
+
+**The opt-out footer is appended server-side, never left to the LLM.**
+Legally required on every Italian marketing SMS
+(`" Rispondi STOP per non ricevere piu'."`). `sms_send.py` appends it
+before sanitizing/encoding, so the segment count and any consent-suppressed
+row both reflect the real wire text.
+
+**Twilio's automatic STOP handling doesn't cover this number.** It's
+US/Canada-long-code-only; the Estonian DID (2026-07-16 decision) gets none
+of it, so `sms_inbound.py` reimplements STOP parsing as application code —
+whole-message match against an IT/EN keyword list (`stop`, `alt`,
+`cancella`, `basta`, `disiscrivimi`, … — widened in `4883814` after review),
+never a substring match, so "non fermatevi, stop mai!" is not misread as an
+opt-out.
+
+**Generation and sending are two separate charges.** The webapp's existing
+`retention-message` route already billed generation at 10× LLM cost; this
+adds a second, independent charge for the send at 2× Twilio. A regenerate
+costs only the former, "Invia SMS" only the latter.
+
+**The webapp never deducts credits for a send — one debit path, full
+stop.** `POST /api/v1/hair-salon/customers/[id]/send-sms` (webapp)
+re-checks consent and forwards to this repo's `/api/v1/sms/send`; only
+`sms_send.py` here ever calls `try_debit_for_message`. Two debit paths for
+the same charge would eventually double-charge or drift.
+
+**`/sms/send` is synchronous**, unlike the tick-based batch/reminder
+mechanism the rest of the messaging design calls for (not built this
+phase) — the caller is a salon owner watching a modal, who needs "Inviato"
+or "Credito insufficiente" now, not within the hour.
+
+**Segment/encoding counting is intentionally duplicated, not shared,
+across the two repos.** `booking_engine/services/messaging/gsm7.py`
+(authoritative, at send time) and the webapp's
+`src/lib/messaging/sms-preview.ts` (a pre-click cost preview shown before
+the owner clicks "Invia") independently implement the same GSM-7
+septet/segment logic — the alternative is a network round-trip on every
+keystroke while the owner is still typing. Small drift between the two is
+accepted; a real send always goes through `gsm7.py`.
+
+**Twilio signature verification now has one implementation for three
+routes.** Extracted `_twilio_signature_valid` out of `voice_twiml.py` into
+`booking_engine/services/twilio_signature.py`; the TwiML webhook and both
+new SMS webhooks all call it — matching the 2026-07-16 entry's own
+"one verifier, not two, or they drift" precedent from the Telnyx→Twilio
+migration. Still a no-op (accepts unsigned requests) if `TWILIO_AUTH_TOKEN`
+is unset — same known gap as before, not introduced or closed by this
+change.
+
+**Found in passing, not fixed here (out of this task's scope):**
+`business_app_core.customers.marketing_consent`/`_granted_at`/
+`_withdrawn_at`/`_source` — read directly by `sms_send.py`'s consent gate —
+exist on the live database but appear in **no migration file inside this
+repo**; they were added through the webapp's own migration chain. A
+contributor grepping only this repo for those columns would wrongly
+conclude they don't exist. Documented in `database.md`.
+
+**Still needed:** live-DB verification (`tests/live_db/test_sms_live.py`)
+and one real SMS sent to a real handset — both still open per
+`docs/messaging-plan-phase1.md` Task 15 (not run in this environment,
+`TEST_DATABASE_URL`/live Twilio not available here). WhatsApp (reminders +
+self-booking), campaign batches (`sms.campaigns` exists, nothing writes it
+yet), and number provisioning are later phases of the same design, not
+started.
+
+## 2026-07-24 — CI: migration ownership moved to the webapp repo (logged retroactively 2026-08-10)
+
+**Recorded after the fact.** Commit `4124013` ("Updated CI") shipped this change
+without an entry here or a matching `docs/knowledge/` update — found during a
+2026-08-10 doc-alignment pass, when `operations.md`/`providers.md` still
+described the superseded behaviour. The entry is dated to the change, not to
+when it was written down.
+
+**Decision:** this repo no longer applies migrations to the real QA or
+production Neon branches. `deploy-qa.yml`'s `promote-qa` job and
+`deploy-fly-prod.yml`'s `migrate-prod` job were both replaced by a single
+`migrate-via-webapp` job that dispatches `kairo-smb/webapp`'s
+`migrate-qa.yml`/`migrate-prod.yml` (via `benc-uk/workflow-dispatch@v1`,
+`wait-for-completion`, 20 min timeout) and blocks the Fly deploy on it. The
+QA-branch restore-from-production step moved there too.
+
+**Why:** the shared Neon DB now has three schemas with a required application
+order (`business_app_core` → `voice_agent` → `market_intel`) owned by three
+repos. Each repo migrating its own schema independently means the order is
+whatever the CI race happens to produce. Making `webapp` the single parent that
+applies all three keeps the order deterministic and guarantees this service
+never deploys ahead of its schema.
+
+**Unchanged:** the ephemeral-branch validation from the 2026-07-18 entry below
+still runs first, identically, in all three workflows — a throwaway
+copy-on-write branch off production, migrated + seeded + `live_db`-tested, then
+deleted. That remains the only Neon branch this repo migrates itself, and it
+still gates the release. `scripts/migrate.sh` is unchanged and still the local
+path.
+
+**New GitHub Actions secret:** `WEBAPP_MIGRATE_DISPATCH_TOKEN` — needs
+`actions:write` on `kairo-smb/webapp`. It is a CI secret, not a Fly app secret;
+without it neither environment can deploy at all, since the deploy job now
+depends on the dispatch job.
 
 ## 2026-07-24 — Repo cleanup: deleted dead docs/scripts, rewrote two stale docs, closed a dependency drift
 
