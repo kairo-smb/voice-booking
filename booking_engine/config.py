@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     # Telnyx -> Twilio"
     twilio_bundle_sid: str = ""
     twilio_address_sid: str = ""
+    # WhatsApp. The Meta app identifiers are served to the webapp so Embedded
+    # Signup has one source of truth; they are public values, not secrets.
+    meta_app_id: str = ""
+    meta_config_id: str = ""
+    # Marketing sends are dripped across this local window (Europe/Rome) so a
+    # salon's promotions arrive during opening hours, not at 03:00.
+    whatsapp_send_start_hour: int = 9
+    whatsapp_send_end_hour: int = 20
     # OpenAI SIP routing
     openai_sip_project_id: str = ""
     openai_api_key: str = ""

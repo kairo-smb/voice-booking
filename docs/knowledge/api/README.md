@@ -18,6 +18,7 @@ Most routes return `{"data": ...}` on success (see `voice.py::_wrap`, or a Pydan
 | Control-plane bearer | `Authorization: Bearer <CONTROL_PLANE_SECRET>` | the `webapp` Control Plane | [Voice Control Plane](voice-control-plane.md), and [SMS](sms.md)'s `POST /sms/send` |
 | Tool bearer | `Authorization: Bearer <OPENAI_TOOL_SECRET>` | OpenAI Realtime (tool calls + session events) | [Voice Tools](voice-tools.md), and the `/mcp` mount |
 | Signature-verified webhook | `X-Twilio-Signature`, validated against `TWILIO_AUTH_TOKEN` | Twilio | [Telephony Webhooks](telephony-webhooks.md) and [SMS](sms.md)'s two webhooks (one shared verifier, `services/twilio_signature.py` — no-op if `TWILIO_AUTH_TOKEN` unset) |
+| Signature-verified webhook, **subaccount token** | `X-Twilio-Signature`, validated against `whatsapp.senders.subaccount_auth_token` | Twilio, on behalf of one salon | [WhatsApp](whatsapp.md)'s `/webhook/status` and `/webhook/inbound`. Twilio signs with the token of the account owning the resource, so the parent token would reject every genuine request |
 | **None** | — | anyone who can reach the route | [Business API](business.md) (`shops`/`customers`/`services`/`availability`/`appointments`); `voice_openai.py`'s `/voice/openai/incoming` also has no *enforced* auth today — see [Telephony Webhooks](telephony-webhooks.md) |
 
 Auth dependencies live in `booking_engine/api/deps.py` (`require_control_plane_token`, `require_tool_token`).
@@ -30,3 +31,4 @@ Auth dependencies live in `booking_engine/api/deps.py` (`require_control_plane_t
 - **[Voice Control Plane](voice-control-plane.md)** — config, balance, heartbeat, telephony provisioning, calls/analytics — everything the webapp calls.
 - **[Number Provisioning](number-provisioning.md)** — self-service Estonian number request (per-salon Twilio regulatory bundle) and the hourly cron that polls/purchases/health-checks it.
 - **[SMS](sms.md)** — marketing SMS send plus the Twilio SMS webhooks (STOP handling, delivery status). Phase 1 of a larger messaging design; see [Architecture](../architecture.md#sms-marketing-send-phase-1-of-messaging).
+- **[WhatsApp](whatsapp.md)** — per-salon WhatsApp sender onboarding (Meta Tech Provider + Embedded Signup) and template-based marketing campaigns dripped across the day. See [Architecture](../architecture.md#whatsapp-marketing-one-sender-per-salon).

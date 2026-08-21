@@ -69,8 +69,8 @@ DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `13_number_releas
 Added 2026-08-12 (`booking_engine/db/sql/11_sms_schema.sql`), owned by this
 repo like `voice_agent`. Phase 1 of a larger SMS/WhatsApp messaging design —
 see [Architecture → SMS marketing send](architecture.md#sms-marketing-send-phase-1-of-messaging)
-and `CLAUDE.md` §2026-08-12. WhatsApp (a separate `whatsapp` schema) is
-designed but not built; this repo currently has `sms` only.
+and `CLAUDE.md` §2026-08-12. WhatsApp now has its own schema — see
+[`whatsapp` schema](#whatsapp-schema--authoritative-here) below.
 
 | Table | Purpose |
 |---|---|
@@ -107,9 +107,43 @@ send is traceable back to the row that caused it; no FK, since
 `sms.outbound_messages`/future `whatsapp.messages` are owned by this repo
 and `ai_token_log` must not depend on a schema it doesn't own.
 
+## `whatsapp` schema — authoritative here
+
+Added 2026-08-21 (`booking_engine/db/sql/14_whatsapp_schema.sql`), owned by
+this repo. See [Architecture → WhatsApp marketing](architecture.md#whatsapp-marketing-one-sender-per-salon),
+[Providers → WhatsApp](providers.md#whatsapp-meta-tech-provider--twilio),
+[API → WhatsApp](api/whatsapp.md), and `CLAUDE.md` §2026-08-21.
+
+| Table | Purpose |
+|---|---|
+| `senders` | one row per shop: the salon's Twilio **subaccount**, its Meta WABA id, the registered sender, display name, Meta's `quality_rating`/`messaging_limit` read back from Twilio, and `daily_cap` (default 50). `status` is `pending_signup → verifying → online` (or `offline`/`failed`). |
+| `templates` | one row per (shop, template_key). A template is per-WABA, so the same skeleton has a **different `content_sid` for every salon** and needs its own Meta approval. `status` tracks Meta's verdict (`unsubmitted`/`pending`/`approved`/`rejected`/`paused`/`disabled`). |
+| `outbound_messages` | queue **and** log in one table. A row is written the moment a send is planned and never deleted: `queued → sending → sent → delivered/read`, or `suppressed`/`failed`/`cancelled`. `variables` (jsonb) is what Twilio substitutes; `preview` is the rendered body, stored so a row says what the customer actually read rather than an opaque `HX` SID. |
+
+**Three things in this schema are load-bearing and easy to undo by accident:**
+
+- **`senders.subaccount_auth_token`.** Twilio signs a webhook with the auth
+  token of the account that *owns* the resource. WhatsApp traffic belongs to
+  the salon's subaccount, so validating those webhooks against
+  `TWILIO_AUTH_TOKEN` rejects every genuine request — and those webhooks
+  withdraw marketing consent, so failing open is not an option either.
+- **`outbound_messages.status = 'sending'` is a claim, not a provider state.**
+  The drip sweep flips rows into it in the same statement that selects them
+  (`whatsapp_queries.claim_due`, `FOR UPDATE … SKIP LOCKED`), so two
+  overlapping ticks or two Fly machines can never both send the same row. A
+  row stuck there — a tick that died mid-send — is requeued by the next
+  sweep (`requeue_stuck`), not abandoned.
+- **`whatsapp_outbound_campaign_customer_uniq`** (`shop_id, campaign_key,
+  customer_id`, partial) is the idempotency: a retried or double-clicked
+  campaign enqueue is a no-op, not a second message to the same person.
+
+`business_app_core.ai_token_log.whatsapp_message_id` — the column the SMS
+work added and left unused — is now written, by
+`token_basket_queries.try_debit_for_message`.
+
 ## Cross-schema references
 
-`voice_agent.calls` FKs into `business_app_core.shops`/`customers`/`appointments` — cross-schema foreign keys are used deliberately rather than duplicating those rows into `voice_agent`. `sms.outbound_messages`/`sms.opt_outs` do the same into `business_app_core.shops`/`customers`.
+`voice_agent.calls` FKs into `business_app_core.shops`/`customers`/`appointments` — cross-schema foreign keys are used deliberately rather than duplicating those rows into `voice_agent`. `sms.outbound_messages`/`sms.opt_outs` do the same into `business_app_core.shops`/`customers`, as do all three `whatsapp` tables.
 
 ## Connection
 

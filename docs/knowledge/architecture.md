@@ -80,6 +80,85 @@ message or the send is refused, because the caller is a salon owner
 watching a modal, not a batch job. Bulk/scheduled sends (`sms.campaigns`)
 are a later phase — nothing writes that table yet.
 
+## WhatsApp marketing (one sender per salon)
+
+Personalised promotions over WhatsApp instead of SMS, ~50/day/salon dripped
+across opening hours. Durable record: this section, [Database → `whatsapp`
+schema](database.md#whatsapp-schema--authoritative-here), [Providers →
+WhatsApp](providers.md#whatsapp-meta-tech-provider--twilio), [API →
+WhatsApp](api/whatsapp.md), and `CLAUDE.md` §2026-08-21.
+
+**The shape is forced by two hard external rules, not chosen:**
+
+1. **A business-initiated marketing message can only be a template Meta
+   approved in advance.** There is no free-form path. The end-to-end LLM copy
+   the SMS flow sends cannot be sent on WhatsApp as-is — personalisation
+   happens *inside variables*, in a fixed approved skeleton
+   (`services/messaging/whatsapp_templates.py`).
+2. **One WABA per Twilio account.** A salon's WhatsApp Business Account
+   therefore cannot share Kairo's account with every other salon, so each
+   gets its own Twilio **subaccount** — the same audited "don't reuse your own
+   business identity for a customer" rule as the regulatory bundles.
+
+```
+Kairo = Meta Tech Provider (one Meta app + Embedded Signup, in the webapp)
+  └── per salon: Twilio subaccount ──> the salon's own WABA
+                                   ──> 1 sender (whatsapp:+…)
+                                   ──> its own approved templates (HX…)
+```
+
+Onboarding is necessarily two round-trips, because a WABA can only be created
+by the salon itself inside Meta's browser popup:
+
+```
+POST /whatsapp/onboarding/start   → create subaccount, return Embedded Signup config
+   (salon completes Meta's popup in the webapp; the webapp gets a waba_id back)
+POST /whatsapp/onboarding/waba    → register the sender (Twilio Senders API, ISVSubAccount)
+   Meta sends an ownership OTP:
+     source='kairo' → it lands on a number WE own → /whatsapp/webhook/otp submits it
+     source='salon' → it lands on THEIR phone     → POST /whatsapp/onboarding/verify
+   → sender ONLINE → template catalogue created + submitted to Meta automatically
+```
+
+**The number is not a new purchase.** `source='kairo'` (the default) reuses
+`voice_agent.shop_telephony.kairo_number` — the Estonian mobile the salon
+already answers calls on, already SMS-capable, already under the salon's own
+regulatory bundle. No second number, no second ~$3/mo, and no bundle needed
+inside the subaccount. `source='salon'` imports the salon's own number
+instead (they must first delete its WhatsApp/WhatsApp Business App account).
+
+**Sending is queued, not synchronous** — the opposite of `/sms/send`, and for
+the reason that motivates the feature:
+
+```
+webapp (LLM writes the per-customer offer line, i.e. the template's {{3}})
+  → POST /api/v1/whatsapp/campaigns          (CONTROL_PLANE_SECRET)
+      whatsapp_send.py::enqueue_campaign
+        sender online? template approved? recipients ≤ daily_cap?
+        → per recipient: consent gate → one row in whatsapp.outbound_messages,
+          scheduled_at spread evenly across 09:00–20:00 Europe/Rome
+  → POST /api/v1/messaging/tick              (hourly cron)
+      whatsapp_send.py::send_due
+        claim due rows atomically → RE-check consent → balance check
+        → Twilio send → debit credits → mark sent
+```
+
+**Consent is re-read at send time, not trusted from enqueue.** A queued row
+can sit for hours; a customer whose consent is cleared in-store at 11:00 must
+not receive the message scheduled for 15:00. Same trust-boundary reasoning as
+`sms_send.py`'s re-check, but it matters more here because of the delay.
+
+**WhatsApp restores the self-service opt-out SMS gave up.** Meta puts a
+native "Stop promotions" button on every marketing template; a refusal comes
+back as error `63033`/`63050` on the status webhook, which writes
+`marketing_consent = false` into `business_app_core.customers`. That is a
+materially stronger position under Italian marketing rules than the SMS path
+(see `CLAUDE.md`'s STOP-removal entry), and it comes from Meta, not from us.
+
+**Billing reuses the SMS path exactly** — `send_credits()` (2× pass-through,
+not the webapp's 10× LLM margin), debited only *after* Twilio accepts, and
+recorded on `ai_token_log.whatsapp_message_id`.
+
 ## Alternate entrypoint (testing only)
 
 `clients/openai_realtime.py::create_ephemeral_session` mints a browser/WebRTC session for local testing (`scripts/voice_test_server.py`, `scripts/run_webrtc_harness.sh`) — a different transport than production SIP calls. See [Operations](operations.md) for the live-SIP softphone test path, which exercises the real call flow above end-to-end without needing a funded Twilio number.

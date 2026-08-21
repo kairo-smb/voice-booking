@@ -13,3 +13,4 @@
   - [Voice Control Plane](api/voice-control-plane.md)
   - [Number Provisioning](api/number-provisioning.md)
   - [SMS](api/sms.md)
+  - [WhatsApp](api/whatsapp.md)
