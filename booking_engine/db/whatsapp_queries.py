@@ -20,22 +20,18 @@ async def get_sender(shop_id: UUID) -> dict | None:
     )
 
 
-async def upsert_sender(
-    *, shop_id: UUID, display_name: str, source: str, subaccount_sid: str | None = None
-) -> dict:
+async def upsert_sender(*, shop_id: UUID, display_name: str, source: str) -> dict:
     row = await execute_one(
         """
-        INSERT INTO whatsapp.senders (shop_id, display_name, source, subaccount_sid)
-        VALUES ($1,$2,$3,$4)
+        INSERT INTO whatsapp.senders (shop_id, display_name, source)
+        VALUES ($1,$2,$3)
         ON CONFLICT (shop_id) DO UPDATE
         SET display_name = EXCLUDED.display_name,
             source = EXCLUDED.source,
-            subaccount_sid = COALESCE(whatsapp.senders.subaccount_sid,
-                                      EXCLUDED.subaccount_sid),
             updated_at = now()
         RETURNING *
         """,
-        shop_id, display_name, source, subaccount_sid,
+        shop_id, display_name, source,
     )
     return row  # type: ignore[return-value]
 
@@ -43,14 +39,14 @@ async def upsert_sender(
 async def set_sender_fields(shop_id: UUID, **fields) -> None:
     """Persist whatever we just learned, one column at a time.
 
-    Same shape as number_request_queries.set_sids: every Twilio SID is written
-    the moment it exists, so a crash halfway through onboarding leaves a
-    resumable row instead of an orphaned Twilio object nothing references.
+    Same shape as number_request_queries.set_sids: every Meta identifier is
+    written the moment it exists, so a crash halfway through onboarding leaves
+    a resumable row rather than a WABA we're subscribed to and can't find.
     """
     allowed = {
-        "status", "subaccount_sid", "subaccount_auth_token", "waba_id",
-        "sender_sid", "phone_number", "quality_rating", "messaging_limit",
-        "offline_reason", "daily_cap",
+        "status", "waba_id", "phone_number_id", "access_token", "platform_type",
+        "phone_number", "display_name", "quality_rating", "messaging_limit",
+        "throughput_level", "offline_reason", "daily_cap",
     }
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:
@@ -65,10 +61,14 @@ async def set_sender_fields(shop_id: UUID, **fields) -> None:
 
 
 async def list_verifying_senders() -> list[dict]:
-    """Senders mid-verification — polled by the tick to pick up Meta's verdict."""
+    """Senders not yet online — polled by the tick to pick up Meta's verdict.
+
+    Only reachable for `source='new'`, where Meta may still be reviewing the
+    number. A coexistence onboarding lands `online` in one round trip.
+    """
     return await execute(
         "SELECT * FROM whatsapp.senders WHERE status IN ('verifying','pending_signup') "
-        "AND sender_sid IS NOT NULL"
+        "AND phone_number_id IS NOT NULL AND access_token IS NOT NULL"
     )
 
 
@@ -78,10 +78,15 @@ async def get_sender_by_phone(phone: str) -> dict | None:
     )
 
 
-async def get_sender_by_subaccount(subaccount_sid: str) -> dict | None:
-    """Webhook entry point: Twilio tells us the AccountSid, nothing else."""
+async def get_sender_by_waba(waba_id: str) -> dict | None:
+    """Webhook entry point.
+
+    Meta posts every customer's traffic to one app-level URL and identifies
+    the tenant only by `entry[].id`, the WABA id — so this is the sole route
+    from an inbound webhook to a shop.
+    """
     return await execute_one(
-        "SELECT * FROM whatsapp.senders WHERE subaccount_sid = $1", subaccount_sid
+        "SELECT * FROM whatsapp.senders WHERE waba_id = $1", waba_id
     )
 
 
@@ -95,16 +100,19 @@ async def get_template(shop_id: UUID, template_key: str) -> dict | None:
 
 
 async def upsert_template(
-    *, shop_id: UUID, template_key: str, content_sid: str,
-    category: str, status: str, variable_count: int,
+    *, shop_id: UUID, template_key: str, name: str, meta_template_id: str,
+    language: str, category: str, status: str, variable_count: int,
 ) -> dict:
     row = await execute_one(
         """
         INSERT INTO whatsapp.templates
-            (shop_id, template_key, content_sid, category, status, variable_count)
-        VALUES ($1,$2,$3,$4,$5,$6)
+            (shop_id, template_key, name, meta_template_id, language,
+             category, status, variable_count)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
         ON CONFLICT (shop_id, template_key) DO UPDATE
-        SET content_sid = EXCLUDED.content_sid,
+        SET name = EXCLUDED.name,
+            meta_template_id = EXCLUDED.meta_template_id,
+            language = EXCLUDED.language,
             category = EXCLUDED.category,
             status = EXCLUDED.status,
             variable_count = EXCLUDED.variable_count,
@@ -112,33 +120,45 @@ async def upsert_template(
             updated_at = now()
         RETURNING *
         """,
-        shop_id, template_key, content_sid, category, status, variable_count,
+        shop_id, template_key, name, meta_template_id, language,
+        category, status, variable_count,
     )
     return row  # type: ignore[return-value]
 
 
 async def set_template_status(
-    *, content_sid: str, status: str, rejection_reason: str | None = None
+    *, shop_id: UUID, name: str, status: str, rejection_reason: str | None = None
 ) -> None:
+    """Record Meta's verdict on one template.
+
+    Keyed by (shop, name) and not by name alone: every salon's copy of the
+    catalogue carries the *same* name (`kairo_promo_v1`), so a global update
+    would rule on every shop at once from one shop's webhook.
+    """
     await execute_void(
         """
         UPDATE whatsapp.templates
-        SET status = $2, rejection_reason = $3, updated_at = now()
-        WHERE content_sid = $1
+        SET status = $3, rejection_reason = $4, updated_at = now()
+        WHERE shop_id = $1 AND name = $2
         """,
-        content_sid, status, rejection_reason,
+        shop_id, name, status, rejection_reason,
     )
 
 
 async def list_unresolved_templates() -> list[dict]:
-    """Templates Meta hasn't ruled on yet — polled by the tick."""
+    """Templates Meta hasn't ruled on yet — the tick's reconciler.
+
+    Verdicts normally arrive within minutes as `message_template_status_update`
+    webhooks; this exists because a missed webhook would otherwise leave a
+    template `pending` forever and block every send for that shop in silence.
+    """
     return await execute(
         """
-        SELECT t.*, w.subaccount_sid
+        SELECT t.*, w.waba_id, w.access_token
         FROM whatsapp.templates t
         JOIN whatsapp.senders w ON w.shop_id = t.shop_id
         WHERE t.status IN ('unsubmitted','received','pending')
-          AND w.subaccount_sid IS NOT NULL
+          AND w.waba_id IS NOT NULL AND w.access_token IS NOT NULL
         """
     )
 
@@ -147,29 +167,32 @@ async def list_unresolved_templates() -> list[dict]:
 
 async def enqueue(
     *, shop_id: UUID, customer_id: UUID | None, campaign_key: str | None,
-    to_phone: str, from_number: str, content_sid: str,
+    to_phone: str, from_number: str, template_name: str, template_language: str,
     variables: dict, preview: str, scheduled_at, status: str = "queued",
     suppressed_reason: str | None = None,
 ) -> UUID | None:
     """Queue one message. Returns None if this campaign already reached them.
 
     The None is the unique index doing idempotency: a retried or
-    double-clicked enqueue is a no-op, not a second message.
+    double-clicked enqueue is a no-op, not a second message. That guard earns
+    its keep on the bulk path, where "invia a 400 clienti" is exactly the
+    button someone double-clicks.
     """
     row = await execute_one(
         """
         INSERT INTO whatsapp.outbound_messages
             (shop_id, customer_id, campaign_key, to_phone, from_number,
-             content_sid, variables, preview, scheduled_at, status, suppressed_reason)
-        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11)
+             template_name, template_language, variables, preview,
+             scheduled_at, status, suppressed_reason)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12)
         ON CONFLICT (shop_id, campaign_key, customer_id)
             WHERE campaign_key IS NOT NULL AND customer_id IS NOT NULL
         DO NOTHING
         RETURNING id
         """,
         shop_id, customer_id, campaign_key, to_phone, from_number,
-        content_sid, json.dumps(variables), preview, scheduled_at,
-        status, suppressed_reason,
+        template_name, template_language, json.dumps(variables), preview,
+        scheduled_at, status, suppressed_reason,
     )
     return row["id"] if row else None
 
@@ -224,8 +247,31 @@ async def claim_due(limit: int) -> list[dict]:
     )
 
 
+async def sent_last_24h(shop_id: UUID) -> int:
+    """Messages that left in the last **rolling** 24 hours.
+
+    This is the window Meta's messaging-limit tier is measured in, and it is
+    deliberately not `sent_today`. A calendar-day count resets at midnight, so
+    a sender at its tier ceiling at 23:00 would be handed a fresh allowance
+    ninety minutes later and hand Meta nearly two tiers' worth of traffic
+    inside one of Meta's windows. The tier check must use Meta's clock.
+    """
+    row = await execute_one(
+        """
+        SELECT count(*) AS n FROM whatsapp.outbound_messages
+        WHERE shop_id = $1 AND sent_at >= now() - interval '24 hours'
+        """,
+        shop_id,
+    )
+    return int(row["n"]) if row else 0
+
+
 async def sent_today(shop_id: UUID) -> int:
-    """Messages that actually left today, for the per-shop daily cap."""
+    """Messages that left today, for Kairo's own drip rate and the UI counter.
+
+    Calendar-day on purpose — "quanti ne ho mandati oggi" is what the owner
+    means. Never use this for a Meta ceiling; see `sent_last_24h`.
+    """
     row = await execute_one(
         """
         SELECT count(*) AS n FROM whatsapp.outbound_messages
@@ -236,9 +282,91 @@ async def sent_today(shop_id: UUID) -> int:
     return int(row["n"]) if row else 0
 
 
+async def recently_contacted(
+    *, shop_id: UUID, customer_ids: list[UUID], hours: int
+) -> set[UUID]:
+    """Which of these customers already got a marketing message in `hours`.
+
+    Our own guard against Meta's per-user, cross-brand marketing cap (131049),
+    which is otherwise only discoverable *after* burning the send and taking
+    the quality-rating hit. One batched query rather than one per recipient:
+    a bulk campaign is up to 2000 of them.
+    """
+    if not customer_ids:
+        return set()
+    rows = await execute(
+        """
+        SELECT DISTINCT customer_id FROM whatsapp.outbound_messages
+        WHERE shop_id = $1
+          AND customer_id = ANY($2::uuid[])
+          AND sent_at >= now() - make_interval(hours => $3)
+        """,
+        shop_id, customer_ids, hours,
+    )
+    return {row["customer_id"] for row in rows}
+
+
+async def onboarded_last_7_days() -> int:
+    """Senders that went live in the last rolling 7 days, across all shops.
+
+    Meta caps a Tech Provider at 10 new customers per rolling 7 days (200 once
+    Access Verification is complete). Exceeding it makes the next salon's
+    onboarding fail at Meta with nothing in our logs explaining why.
+    """
+    row = await execute_one(
+        """
+        SELECT count(*) AS n FROM whatsapp.senders
+        WHERE verified_at >= now() - interval '7 days'
+        """
+    )
+    return int(row["n"]) if row else 0
+
+
+async def sent_this_month(shop_id: UUID) -> int:
+    """Messages that actually left this calendar month, for the plan quota.
+
+    Counts `sent_at`, not `created_at`: a queued row that never went out (no
+    consent, cancelled, out of credit) must not consume the shop's allowance.
+    """
+    row = await execute_one(
+        """
+        SELECT count(*) AS n FROM whatsapp.outbound_messages
+        WHERE shop_id = $1 AND sent_at >= date_trunc('month', now())
+        """,
+        shop_id,
+    )
+    return int(row["n"]) if row else 0
+
+
+async def monthly_quota(shop_id: UUID) -> int:
+    """How many WhatsApp messages this shop's plan allows per month.
+
+    The number lives on `business_app_core.subscription_plans` (webapp-owned,
+    migration 54) so support can change an allowance with an UPDATE instead of
+    a deploy. Fails closed: a shop with no plan, or a plan row predating the
+    column's backfill, gets 0 and sends nothing — matching the §5.3 rule that
+    messaging requires an active paid plan.
+    """
+    row = await execute_one(
+        """
+        SELECT COALESCE(p.whatsapp_monthly_messages, 0) AS n
+        FROM business_app_core.shops s
+        JOIN business_app_core.subscription_plans p ON p.id = s.plan_id
+        WHERE s.id = $1
+        """,
+        shop_id,
+    )
+    return int(row["n"]) if row else 0
+
+
 async def mark_sent(
-    *, message_id: UUID, provider_sid: str, price_usd: float | None, credits: int
+    *, message_id: UUID, provider_sid: str, price_usd: float | None,
+    credits: int | None = None,
 ) -> None:
+    """`provider_sid` is Meta's `wamid`; `price_usd` our own send-time estimate.
+
+    `credits` stays None on this channel — the salon pays Meta directly.
+    """
     await execute_void(
         """
         UPDATE whatsapp.outbound_messages
@@ -305,21 +433,48 @@ async def cancel_queued(*, shop_id: UUID, campaign_key: str) -> int:
 
 
 async def update_status_by_sid(
-    *, provider_sid: str, status: str, price_usd: float | None, error_code: str | None
+    *, provider_sid: str, status: str, error_code: str | None
 ) -> dict | None:
-    """Twilio status callback. Returns the row so the caller can act on it."""
+    """Meta status webhook, keyed on the `wamid`. Returns the row to act on.
+
+    No price argument: Meta bills the salon directly and reports no amount
+    here, so `price_usd` keeps the estimate written at send time rather than
+    being corrected later the way the SMS path's is.
+    """
     return await execute_one(
         """
         UPDATE whatsapp.outbound_messages
         SET status = $2,
-            price_usd = COALESCE($3, price_usd),
-            error_code = COALESCE($4, error_code),
+            error_code = COALESCE($3, error_code),
             updated_at = now()
         WHERE provider_sid = $1
         RETURNING *
         """,
-        provider_sid, status, price_usd, error_code,
+        provider_sid, status, error_code,
     )
+
+
+async def campaign_progress(*, shop_id: UUID, campaign_key: str) -> dict:
+    """Counts per status for one campaign, plus when the last one is due.
+
+    The bulk tile polls this: a campaign that drips over several days is
+    otherwise invisible between "inviata" and whatever arrives days later.
+    """
+    row = await execute_one(
+        """
+        SELECT
+          count(*) FILTER (WHERE status IN ('queued','sending')) AS pending,
+          count(*) FILTER (WHERE status IN ('sent','delivered','read')) AS sent,
+          count(*) FILTER (WHERE status = 'failed')      AS failed,
+          count(*) FILTER (WHERE status = 'suppressed')  AS suppressed,
+          count(*) FILTER (WHERE status = 'cancelled')   AS cancelled,
+          max(scheduled_at) FILTER (WHERE status = 'queued') AS last_due_at
+        FROM whatsapp.outbound_messages
+        WHERE shop_id = $1 AND campaign_key = $2
+        """,
+        shop_id, campaign_key,
+    )
+    return dict(row) if row else {}
 
 
 async def withdraw_marketing_consent(customer_id: UUID) -> None:
@@ -330,7 +485,9 @@ async def withdraw_marketing_consent(customer_id: UUID) -> None:
     does give the customer a self-service opt-out. Honouring it here keeps
     the webapp's consent UI — which reads business_app_core directly —
     honest, and stops the next campaign from burning a send on a guaranteed
-    63050.
+    131050. (That is Meta's opt-out code — the Twilio-era 63033/63050 are
+    gone. Note it is *not* 131049, the cross-brand frequency cap, which is a
+    cooldown and must never reach this function.)
     """
     await execute_void(
         """

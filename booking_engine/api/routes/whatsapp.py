@@ -1,9 +1,10 @@
-"""WhatsApp onboarding, campaigns, and Twilio webhooks.
+"""WhatsApp onboarding, campaigns, and Meta webhooks.
 
 Management endpoints are control-plane authenticated (the webapp is the only
-caller, same as /sms/send). The three webhooks are authenticated by Twilio
-signature instead — and by the *subaccount's* token, since that's the account
-that owns the traffic.
+caller, same as /sms/send). The webhook is authenticated by Meta's
+`X-Hub-Signature-256` over the raw body, with the **app secret** — one secret
+for every customer's traffic, unlike Twilio's per-account signing, which is
+why migration 15 dropped the per-subaccount token column.
 """
 from __future__ import annotations
 
@@ -11,54 +12,55 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token, _get_settings
 from booking_engine.config import Settings
 from booking_engine.db import whatsapp_queries as wq
+from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
+from booking_engine.services.messaging.whatsapp_pricing import price_list
 from booking_engine.services.messaging.whatsapp_send import enqueue_campaign
 from booking_engine.services.messaging.whatsapp_templates import CATALOGUE
-from booking_engine.services.twilio_signature import twilio_signature_valid
+from booking_engine.services.meta_signature import meta_signature_valid
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
 
-_EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
-
-# Twilio message status -> ours. 'read' is WhatsApp-only and worth keeping:
-# it's the one delivery signal SMS never had.
+# Meta message status -> ours. 'read' is WhatsApp-only and worth keeping: it's
+# the one delivery signal SMS never had.
 _STATUS_MAP = {
     "sent": "sent",
     "delivered": "delivered",
     "read": "read",
     "failed": "failed",
-    "undelivered": "failed",
 }
 
-# Meta refused because the recipient opted out of marketing. The only two
-# error codes that mean "stop asking", as opposed to "try again later".
-_OPT_OUT_CODES = {"63033", "63050"}
+# The recipient used Meta's native "Stop promotions" button — the self-service
+# opt-out this channel has and SMS doesn't. Distinct from 131049, the
+# cross-brand frequency cap, which is *not* an opt-out and is retried by
+# whatsapp_send rather than recorded here.
+_OPT_OUT_CODES = {131050}
 
 
 class StartRequest(BaseModel):
     shop_id: UUID
     display_name: str = Field(min_length=1, max_length=120)
-    source: str = "kairo"
-    phone_number: str | None = None
+    source: str = "coexistence"
 
 
-class WabaRequest(BaseModel):
+class CompleteRequest(BaseModel):
+    """Everything Meta's Embedded Signup popup hands back to the browser."""
+
     shop_id: UUID
+    code: str = Field(min_length=1, max_length=512)
     waba_id: str = Field(min_length=1, max_length=64)
-
-
-class VerifyRequest(BaseModel):
-    shop_id: UUID
-    code: str = Field(min_length=4, max_length=10)
+    phone_number_id: str = Field(min_length=1, max_length=64)
+    # Only used for source='new'; a coexistence number is already registered.
+    pin: str | None = Field(default=None, min_length=6, max_length=6)
 
 
 class Recipient(BaseModel):
@@ -70,7 +72,11 @@ class CampaignRequest(BaseModel):
     shop_id: UUID
     campaign_key: str = Field(min_length=1, max_length=80)
     template_key: str = "promo_v1"
-    recipients: list[Recipient] = Field(min_length=1, max_length=500)
+    # 2000 rather than the old 500: a bulk send to the whole consenting book is
+    # the point of the Touchpoint tile, and `spread` now lays a campaign across
+    # as many days as the daily cap needs. The monthly plan allowance is the
+    # real ceiling and is enforced in enqueue_campaign.
+    recipients: list[Recipient] = Field(min_length=1, max_length=2000)
 
 
 # ------------------------------------------------------------------ onboarding
@@ -81,45 +87,35 @@ async def start(
     settings: Annotated[Settings, Depends(_get_settings)],
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict:
-    """Step 1: create the salon's subaccount, return its Embedded Signup config."""
+    """Step 1: record intent, hand back the Embedded Signup config.
+
+    Creates nothing provider-side — the Twilio version had to create a
+    subaccount here and leaked one on every abandoned onboarding.
+    """
     result = await onboarding.start(
         shop_id=payload.shop_id, display_name=payload.display_name,
-        source=payload.source, phone_number=payload.phone_number,
-        settings=settings,
+        source=payload.source, settings=settings,
     )
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
     return {"data": result}
 
 
-@router.post("/onboarding/waba")
-async def waba(
-    payload: WabaRequest,
+@router.post("/onboarding/complete")
+async def complete(
+    payload: CompleteRequest,
     settings: Annotated[Settings, Depends(_get_settings)],
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict:
-    """Step 2: the salon finished Meta's popup; register the sender."""
-    result = await onboarding.attach_waba(
-        shop_id=payload.shop_id, waba_id=payload.waba_id, settings=settings
-    )
-    if not result.get("ok"):
-        raise HTTPException(status_code=409, detail=result.get("error"))
-    return {"data": result}
+    """Step 2 and last: the salon finished Meta's popup.
 
-
-@router.post("/onboarding/verify")
-async def verify(
-    payload: VerifyRequest,
-    settings: Annotated[Settings, Depends(_get_settings)],
-    _auth: Annotated[bool, Depends(require_control_plane_token)],
-) -> dict:
-    """Step 3 (source='salon' only): the salon types Meta's OTP.
-
-    For source='kairo' the OTP lands on a number we own and
-    /whatsapp/webhook/otp submits it without anyone typing anything.
+    Exchanges the code, subscribes to the WABA's webhooks, verifies the number
+    with Meta rather than trusting the popup, and injects the templates.
     """
-    result = await onboarding.submit_code(
-        shop_id=payload.shop_id, code=payload.code, settings=settings
+    result = await onboarding.complete(
+        shop_id=payload.shop_id, code=payload.code, waba_id=payload.waba_id,
+        phone_number_id=payload.phone_number_id, pin=payload.pin,
+        settings=settings,
     )
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
@@ -129,12 +125,21 @@ async def verify(
 @router.get("/status/{shop_id}")
 async def status(
     shop_id: UUID,
+    settings: Annotated[Settings, Depends(_get_settings)],
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict:
     """Everything the webapp needs to render the onboarding/waiting state."""
     sender = await wq.get_sender(shop_id)
     if not sender:
-        return {"data": {"status": "not_started", "templates": []}}
+        # The quota and the price list are plan facts, not sender facts: the
+        # webapp shows "what this would cost you" before onboarding starts.
+        return {"data": {
+            "status": "not_started", "templates": [],
+            "sent_this_month": 0,
+            "monthly_quota": await wq.monthly_quota(shop_id),
+            "pricing": price_list(),
+            "signup": onboarding.signup_config(settings),
+        }}
     templates = [
         {"template_key": key,
          "status": (await wq.get_template(shop_id, key) or {}).get("status", "missing")}
@@ -147,10 +152,27 @@ async def status(
         "display_name": sender["display_name"],
         "quality_rating": sender["quality_rating"],
         "messaging_limit": sender["messaging_limit"],
-        "daily_cap": sender["daily_cap"],
+        # Meta's own answer to "did the salon keep their WhatsApp Business
+        # App?" — the promise this whole migration is selling.
+        "coexistence": sender["platform_type"] == "COEXISTENCE",
+        # The binding ceiling — min(Meta's tier, our drip rate) — not the raw
+        # `daily_cap` column. Showing our number when Meta's is lower would
+        # promise the owner throughput we will refuse to deliver.
+        "daily_cap": meta_limits.effective_daily_cap(sender),
+        "configured_daily_cap": sender["daily_cap"],
+        "meta_tier": sender["messaging_limit"],
+        "meta_tier_daily": meta_limits.tier_daily_conversations(
+            sender["messaging_limit"]
+        ),
+        "recipient_cooldown_hours": settings.whatsapp_recipient_cooldown_hours,
         "offline_reason": sender["offline_reason"],
         "sent_today": await wq.sent_today(shop_id),
+        "sent_last_24h": await wq.sent_last_24h(shop_id),
+        "sent_this_month": await wq.sent_this_month(shop_id),
+        "monthly_quota": await wq.monthly_quota(shop_id),
+        "pricing": price_list(),
         "templates": templates,
+        "signup": onboarding.signup_config(settings),
     }}
 
 
@@ -160,7 +182,7 @@ async def ensure_templates(
     settings: Annotated[Settings, Depends(_get_settings)],
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict:
-    """Re-run template creation — after a rejection, or a catalogue addition."""
+    """Re-run template injection — after a rejection, or a catalogue addition."""
     result = await onboarding.ensure_templates(shop_id=shop_id, settings=settings)
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
@@ -175,11 +197,11 @@ async def campaign(
     settings: Annotated[Settings, Depends(_get_settings)],
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict:
-    """Queue a personalised campaign, spread across the salon's opening hours.
+    """Queue a personalised campaign, dripped across the salon's opening hours.
 
-    Returns immediately with the schedule. Nothing is sent inline: 50 sends
-    would be 50 serial Twilio calls with an owner watching a spinner, and the
-    whole point is that they land through the day, not at once.
+    Returns immediately with the schedule. Nothing is sent inline: a bulk send
+    is hundreds of serial Graph calls with an owner watching a spinner, and the
+    whole point is that they land through the day (or the week), not at once.
     """
     result = await enqueue_campaign(
         shop_id=payload.shop_id,
@@ -193,6 +215,18 @@ async def campaign(
     return {"data": result}
 
 
+@router.get("/campaigns/{shop_id}/{campaign_key}")
+async def campaign_status(
+    shop_id: UUID,
+    campaign_key: str,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Progress of a drip that may run for days. Polled by the bulk tile."""
+    return {"data": await wq.campaign_progress(
+        shop_id=shop_id, campaign_key=campaign_key
+    )}
+
+
 @router.delete("/campaigns/{shop_id}/{campaign_key}")
 async def cancel_campaign(
     shop_id: UUID,
@@ -204,90 +238,106 @@ async def cancel_campaign(
     return {"data": {"cancelled": cancelled}}
 
 
-# -------------------------------------------------------------------- webhooks
+# --------------------------------------------------------------------- webhook
 
-async def _verified_form(request: Request, settings: Settings, path: str) -> dict | None:
-    """Parse and signature-check a Twilio webhook, or None if it isn't genuine."""
-    form = dict(await request.form())
-    sender = await wq.get_sender_by_subaccount(form.get("AccountSid", ""))
-    token = (sender or {}).get("subaccount_auth_token")
-    if not twilio_signature_valid(
-        request, form, settings, path=path, auth_token=token
-    ):
-        return None
-    return form
+@router.get("/webhook")
+async def verify_webhook(
+    settings: Annotated[Settings, Depends(_get_settings)],
+    mode: Annotated[str, Query(alias="hub.mode")] = "",
+    token: Annotated[str, Query(alias="hub.verify_token")] = "",
+    challenge: Annotated[str, Query(alias="hub.challenge")] = "",
+) -> Response:
+    """Meta's one-time webhook handshake: echo the challenge, or refuse."""
+    if mode == "subscribe" and token and token == settings.meta_verify_token:
+        return PlainTextResponse(challenge)
+    return Response(status_code=403)
 
 
-@router.post("/webhook/status")
-async def status_webhook(
+@router.post("/webhook")
+async def webhook(
     request: Request,
     settings: Annotated[Settings, Depends(_get_settings)],
 ) -> Response:
-    form = await _verified_form(request, settings, "/api/v1/whatsapp/webhook/status")
-    if form is None:
+    """Every customer's WhatsApp traffic arrives here, on one app-level URL.
+
+    Meta identifies the tenant only by `entry[].id` — the WABA id — so that is
+    the sole route from a payload to a shop. Always answers 200 on a genuine
+    request: Meta retries on anything else and will disable a webhook that
+    keeps failing, which would silently cost us every delivery status and
+    every opt-out.
+    """
+    body = await request.body()
+    if not meta_signature_valid(
+        body, request.headers.get("X-Hub-Signature-256"), settings.meta_app_secret
+    ):
         return Response(status_code=403)
 
-    mapped = _STATUS_MAP.get(form.get("MessageStatus", ""))
-    if mapped:
-        price = form.get("Price")
-        error_code = form.get("ErrorCode") or None
-        row = await wq.update_status_by_sid(
-            provider_sid=form.get("MessageSid", ""),
-            status=mapped,
-            price_usd=abs(float(price)) if price else None,
-            error_code=error_code,
+    try:
+        payload = await request.json()
+    except ValueError:
+        return Response(status_code=200)
+
+    for entry in payload.get("entry") or []:
+        sender = await wq.get_sender_by_waba(entry.get("id", ""))
+        if not sender:
+            logger.info("whatsapp.webhook_unknown_waba waba=%s", entry.get("id"))
+            continue
+        for change in entry.get("changes") or []:
+            try:
+                await _handle_change(sender, change)
+            except Exception:  # noqa: BLE001 — one bad event must not 500 the batch
+                logger.exception(
+                    "whatsapp.webhook_change_failed shop=%s field=%s",
+                    sender["shop_id"], change.get("field"),
+                )
+    return Response(status_code=200)
+
+
+async def _handle_change(sender: dict, change: dict) -> None:
+    field = change.get("field")
+    value = change.get("value") or {}
+
+    if field == "message_template_status_update":
+        # Minutes instead of the next hourly tick. The tick's poll survives as
+        # a reconciler for the webhook Meta doesn't deliver.
+        await wq.set_template_status(
+            shop_id=sender["shop_id"],
+            name=value.get("message_template_name", ""),
+            status=onboarding.TEMPLATE_STATUS.get(
+                (value.get("event") or "").lower(), "pending"
+            ),
+            rejection_reason=value.get("reason") or None,
         )
-        # An opt-out is the customer using Meta's own "Stop promotions"
-        # button — the self-service opt-out the SMS channel doesn't have.
-        # Recording it in business_app_core keeps the webapp's consent UI
-        # honest and stops the next campaign burning a send on a certain
-        # failure.
-        if row and error_code in _OPT_OUT_CODES and row.get("customer_id"):
+        return
+
+    if field != "messages":
+        return
+
+    for status in value.get("statuses") or []:
+        mapped = _STATUS_MAP.get(status.get("status", ""))
+        if not mapped:
+            continue
+        errors = status.get("errors") or []
+        code = errors[0].get("code") if errors else None
+        row = await wq.update_status_by_sid(
+            provider_sid=status.get("id", ""),
+            status=mapped,
+            error_code=str(code) if code else None,
+        )
+        if row and code in _OPT_OUT_CODES and row.get("customer_id"):
+            # Recording it in business_app_core keeps the webapp's consent UI
+            # honest and stops the next campaign burning a send on a certain
+            # failure.
             await wq.withdraw_marketing_consent(row["customer_id"])
             logger.info(
                 "whatsapp.opt_out shop=%s customer=%s code=%s",
-                row["shop_id"], row["customer_id"], error_code,
+                row["shop_id"], row["customer_id"], code,
             )
-    return Response(content=_EMPTY_TWIML, media_type="application/xml")
 
-
-@router.post("/webhook/inbound")
-async def inbound_webhook(
-    request: Request,
-    settings: Annotated[Settings, Depends(_get_settings)],
-) -> Response:
-    """A customer replied. Logged only — the reply itself opens Meta's 24h
-    session window, which nothing in this repo uses yet."""
-    form = await _verified_form(request, settings, "/api/v1/whatsapp/webhook/inbound")
-    if form is None:
-        return Response(status_code=403)
-    logger.info(
-        "whatsapp.inbound from=%s account=%s",
-        form.get("From", ""), form.get("AccountSid", ""),
-    )
-    return Response(content=_EMPTY_TWIML, media_type="application/xml")
-
-
-@router.post("/webhook/otp")
-async def otp_webhook(
-    request: Request,
-    settings: Annotated[Settings, Depends(_get_settings)],
-) -> Response:
-    """Meta's ownership OTP, arriving as an SMS on a Kairo-owned number.
-
-    Signed with the *parent* token: the number lives in the parent account,
-    unlike the WhatsApp traffic above. Bound only while a sender is
-    verifying, and unbound again the moment it goes online.
-    """
-    form = dict(await request.form())
-    if not twilio_signature_valid(
-        request, form, settings, path="/api/v1/whatsapp/webhook/otp"
-    ):
-        return Response(status_code=403)
-    used = await onboarding.handle_otp_sms(
-        to_number=form.get("To", ""),
-        body=form.get("Body", ""),
-        settings=settings,
-    )
-    logger.info("whatsapp.otp_webhook used=%s", used)
-    return Response(content=_EMPTY_TWIML, media_type="application/xml")
+    for message in value.get("messages") or []:
+        # A reply opens Meta's 24h session window, inside which free-form
+        # messages are allowed. Nothing uses that yet.
+        logger.info(
+            "whatsapp.inbound shop=%s from=%s type=%s",
+            sender["shop_id"], message.get("from"), message.get("type"),
+        )

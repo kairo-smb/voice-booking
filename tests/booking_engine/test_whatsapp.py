@@ -1,12 +1,14 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.db import sms_queries
-from booking_engine.db import token_basket_queries as tbq
 from booking_engine.db import whatsapp_queries as wq
+from booking_engine.services.messaging import meta_limits
+from booking_engine.services.messaging import whatsapp_onboarding as wo
 from booking_engine.services.messaging import whatsapp_send as ws
 from booking_engine.services.messaging import whatsapp_templates as wt
 
@@ -15,11 +17,34 @@ ROME = ZoneInfo("Europe/Rome")
 
 
 class FakeSettings:
-    twilio_account_sid = "ACtest"
-    twilio_auth_token = "token"
     public_base_url = "https://example.test"
     whatsapp_send_start_hour = 9
     whatsapp_send_end_hour = 20
+    # 0 disables pacing: the scheduler is tested on its own in test_pacer.py,
+    # and real sleeps would make every send test slow for no extra coverage.
+    whatsapp_sends_per_minute = 0
+    whatsapp_recipient_cooldown_hours = 168
+    meta_access_verified = False
+    meta_app_id = "app"
+    meta_app_secret = "secret"
+    meta_config_id = "cfg"
+    meta_solution_id = "sol"
+    meta_verify_token = "verify"
+
+
+@pytest.fixture(autouse=True)
+def _quota_out_of_the_way(monkeypatch):
+    """The plan quota is a DB read on every send path.
+
+    Autouse so the tests that aren't about it don't reach for a database; the
+    ones that are override these two with their own numbers.
+    """
+    async def _quota(shop_id):
+        return 10_000
+    async def _used(shop_id):
+        return 0
+    monkeypatch.setattr(wq, "monthly_quota", _quota)
+    monkeypatch.setattr(wq, "sent_this_month", _used)
 
 
 def _consenting(**over):
@@ -78,6 +103,54 @@ def test_spread_of_zero_is_empty():
                      start_hour=9, end_hour=20) == []
 
 
+# ------------------------------------------------- scheduling: bulk, multi-day
+
+def test_spread_rolls_a_bulk_campaign_onto_following_days():
+    """400 recipients against a 50/day cap is eight days of drip, not one.
+
+    Laying them all on today would just hand send_due 350 rows to defer by an
+    hour, repeatedly, until nobody can read the queue.
+    """
+    now = datetime(2026, 8, 20, 9, 0, tzinfo=ROME)
+    times = ws.spread(400, now, start_hour=9, end_hour=20, daily_cap=50)
+
+    assert len(times) == 400
+    assert times == sorted(times)
+    per_day = {}
+    for when in times:
+        per_day[when.date()] = per_day.get(when.date(), 0) + 1
+    assert len(per_day) == 8
+    assert set(per_day.values()) == {50}
+
+
+def test_spread_respects_the_cap_on_a_partial_first_day():
+    """Enqueued at 18:00: today still takes a full day's worth, then rolls."""
+    now = datetime(2026, 8, 20, 18, 0, tzinfo=ROME)
+    times = ws.spread(70, now, start_hour=9, end_hour=20, daily_cap=50)
+
+    today = [t for t in times if t.date() == now.date()]
+    assert len(today) == 50
+    assert all(t < datetime(2026, 8, 20, 20, 0, tzinfo=ROME) for t in today)
+    assert len(times) == 70
+
+
+def test_spread_skips_a_day_whose_window_has_already_closed():
+    """Enqueued at 23:00 the whole campaign starts tomorrow, not at 23:00."""
+    now = datetime(2026, 8, 20, 23, 0, tzinfo=ROME)
+    times = ws.spread(60, now, start_hour=9, end_hour=20, daily_cap=50)
+
+    assert times[0] == datetime(2026, 8, 21, 9, 0, tzinfo=ROME)
+    assert {t.date() for t in times} == {
+        datetime(2026, 8, 21).date(), datetime(2026, 8, 22).date()
+    }
+
+
+def test_spread_never_schedules_outside_opening_hours():
+    now = datetime(2026, 8, 20, 9, 0, tzinfo=ROME)
+    for when in ws.spread(300, now, start_hour=9, end_hour=20, daily_cap=50):
+        assert 9 <= when.hour < 20
+
+
 # ------------------------------------------------------------------ templates
 
 def test_clean_variable_strips_what_meta_rejects():
@@ -106,11 +179,35 @@ def test_every_catalogue_template_has_a_sample_for_each_variable():
 
 # --------------------------------------------------------------------- gating
 
+def _online_sender(**over):
+    row = {"status": "online", "phone_number": "+393331110000",
+           "phone_number_id": "PN1", "access_token": "tok", "daily_cap": 50,
+           "messaging_limit": "TIER_1K", "platform_type": "COEXISTENCE"}
+    row.update(over)
+    return row
+
+
+def _approved_template(**over):
+    row = {"status": "approved", "name": "kairo_promo_v1", "language": "it"}
+    row.update(over)
+    return row
+
+
+def _patch_enqueue(monkeypatch, *, sender=None, template=None, cooled=()):
+    async def _sender(shop_id):
+        return sender if sender is not None else _online_sender()
+    async def _template(shop_id, key):
+        return template if template is not None else _approved_template()
+    async def _recent(*, shop_id, customer_ids, hours):
+        return {c for c in customer_ids if c in cooled}
+    monkeypatch.setattr(wq, "get_sender", _sender)
+    monkeypatch.setattr(wq, "get_template", _template)
+    monkeypatch.setattr(wq, "recently_contacted", _recent)
+
+
 @pytest.mark.asyncio
 async def test_enqueue_refuses_when_the_sender_is_not_online(monkeypatch):
-    async def sender(shop_id):
-        return {"status": "verifying"}
-    monkeypatch.setattr(wq, "get_sender", sender)
+    _patch_enqueue(monkeypatch, sender={"status": "verifying"})
 
     result = await ws.enqueue_campaign(
         shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
@@ -122,12 +219,7 @@ async def test_enqueue_refuses_when_the_sender_is_not_online(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enqueue_refuses_an_unapproved_template(monkeypatch):
-    async def sender(shop_id):
-        return {"status": "online", "phone_number": "+3721234567", "daily_cap": 50}
-    async def template(shop_id, key):
-        return {"status": "rejected", "content_sid": "HX1"}
-    monkeypatch.setattr(wq, "get_sender", sender)
-    monkeypatch.setattr(wq, "get_template", template)
+    _patch_enqueue(monkeypatch, template=_approved_template(status="rejected"))
 
     result = await ws.enqueue_campaign(
         shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
@@ -138,39 +230,46 @@ async def test_enqueue_refuses_an_unapproved_template(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_refuses_more_recipients_than_the_daily_cap(monkeypatch):
-    async def sender(shop_id):
-        return {"status": "online", "phone_number": "+3721234567", "daily_cap": 50}
-    async def template(shop_id, key):
-        return {"status": "approved", "content_sid": "HX1"}
-    monkeypatch.setattr(wq, "get_sender", sender)
-    monkeypatch.setattr(wq, "get_template", template)
+async def test_enqueue_spreads_past_the_daily_cap_instead_of_refusing(monkeypatch):
+    """The old `over_daily_cap` rejection made bulk impossible.
+
+    A campaign larger than one day's allowance is now a multi-day drip; only
+    the plan's monthly allowance is a hard ceiling.
+    """
+    rows = []
+    _patch_enqueue(monkeypatch)
+
+    async def customer(shop_id, customer_id):
+        return _consenting()
+    async def enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", customer)
+    monkeypatch.setattr(wq, "enqueue", enqueue)
 
     result = await ws.enqueue_campaign(
         shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
-        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(51)],
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(120)],
         settings=FakeSettings(),
     )
-    assert result == {"ok": False, "error": "over_daily_cap", "daily_cap": 50}
+
+    assert result["ok"] is True and result["queued"] == 120
+    scheduled = [r["scheduled_at"] for r in rows]
+    assert len({s.date() for s in scheduled}) == 3      # 120 / 50 -> 3 days
+    assert result["last_at"] > result["first_at"]
 
 
 @pytest.mark.asyncio
 async def test_enqueue_records_a_suppressed_row_for_no_consent(monkeypatch):
     """A refusal is a row, never silence: 'why did Giulia not get it?'"""
     rows = []
+    _patch_enqueue(monkeypatch)
 
-    async def sender(shop_id):
-        return {"status": "online", "phone_number": "+3721234567", "daily_cap": 50}
-    async def template(shop_id, key):
-        return {"status": "approved", "content_sid": "HX1"}
     async def customer(shop_id, customer_id):
         return _consenting(marketing_consent=False)
     async def enqueue(**kw):
         rows.append(kw)
         return uuid4()
-
-    monkeypatch.setattr(wq, "get_sender", sender)
-    monkeypatch.setattr(wq, "get_template", template)
     monkeypatch.setattr(sms_queries, "get_customer_for_send", customer)
     monkeypatch.setattr(wq, "enqueue", enqueue)
 
@@ -186,19 +285,37 @@ async def test_enqueue_records_a_suppressed_row_for_no_consent(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_enqueue_writes_the_template_name_meta_sends_by(monkeypatch):
+    """Meta addresses a template by name + language, never by an opaque id."""
+    rows = []
+    _patch_enqueue(monkeypatch)
+
+    async def customer(shop_id, customer_id):
+        return _consenting()
+    async def enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", customer)
+    monkeypatch.setattr(wq, "enqueue", enqueue)
+
+    await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {"1": "Giulia"}}],
+        settings=FakeSettings(),
+    )
+    assert rows[0]["template_name"] == "kairo_promo_v1"
+    assert rows[0]["template_language"] == "it"
+
+
+@pytest.mark.asyncio
 async def test_enqueue_counts_a_repeat_campaign_as_already_sent(monkeypatch):
     """The unique index is the idempotency: a double click is not two messages."""
-    async def sender(shop_id):
-        return {"status": "online", "phone_number": "+3721234567", "daily_cap": 50}
-    async def template(shop_id, key):
-        return {"status": "approved", "content_sid": "HX1"}
+    _patch_enqueue(monkeypatch)
+
     async def customer(shop_id, customer_id):
         return _consenting()
     async def enqueue(**kw):
         return None                       # ON CONFLICT DO NOTHING
-
-    monkeypatch.setattr(wq, "get_sender", sender)
-    monkeypatch.setattr(wq, "get_template", template)
     monkeypatch.setattr(sms_queries, "get_customer_for_send", customer)
     monkeypatch.setattr(wq, "enqueue", enqueue)
 
@@ -212,8 +329,12 @@ async def test_enqueue_counts_a_repeat_campaign_as_already_sent(monkeypatch):
 
 # ----------------------------------------------------------------- the drip
 
-def _patch_send_due(monkeypatch, *, claimed, sender, customer, balance=100000):
-    sent, suppressed, failed, deferred, debits = [], [], [], [], []
+def _patch_send_due(
+    monkeypatch, *, claimed, sender, customer, quota=10_000, sent_month=0,
+    cooled=(),
+):
+    spy = {"sent": [], "suppressed": [], "failed": [], "deferred": [],
+           "consent_withdrawn": []}
 
     async def _claim(limit):
         return claimed
@@ -221,78 +342,112 @@ def _patch_send_due(monkeypatch, *, claimed, sender, customer, balance=100000):
         return 0
     async def _get_sender(shop_id):
         return sender
-    async def _sent_today(shop_id):
+    async def _sent_24h(shop_id):
         return sender.get("_sent_today", 0)
+    async def _recent(*, shop_id, customer_ids, hours):
+        return {c for c in customer_ids if c in cooled}
+    async def _quota(shop_id):
+        return quota
+    async def _sent_month(shop_id):
+        return sent_month
     async def _customer(shop_id, customer_id):
         return customer
-    async def _balance(shop_id):
-        return balance
-    async def _debit(**kw):
-        debits.append(kw)
-        return True
     async def _mark_sent(**kw):
-        sent.append(kw)
+        spy["sent"].append(kw)
     async def _mark_suppressed(**kw):
-        suppressed.append(kw)
+        spy["suppressed"].append(kw)
     async def _mark_failed(**kw):
-        failed.append(kw)
+        spy["failed"].append(kw)
     async def _requeue_one(**kw):
-        deferred.append(kw)
+        spy["deferred"].append(kw)
+    async def _withdraw(customer_id):
+        spy["consent_withdrawn"].append(customer_id)
 
     monkeypatch.setattr(wq, "claim_due", _claim)
     monkeypatch.setattr(wq, "requeue_stuck", _requeue_stuck)
     monkeypatch.setattr(wq, "get_sender", _get_sender)
-    monkeypatch.setattr(wq, "sent_today", _sent_today)
+    monkeypatch.setattr(wq, "sent_last_24h", _sent_24h)
+    monkeypatch.setattr(wq, "recently_contacted", _recent)
+    monkeypatch.setattr(wq, "monthly_quota", _quota)
+    monkeypatch.setattr(wq, "sent_this_month", _sent_month)
     monkeypatch.setattr(sms_queries, "get_customer_for_send", _customer)
-    monkeypatch.setattr(tbq, "get_balance", _balance)
-    monkeypatch.setattr(tbq, "try_debit_for_message", _debit)
     monkeypatch.setattr(wq, "mark_sent", _mark_sent)
     monkeypatch.setattr(wq, "mark_suppressed", _mark_suppressed)
     monkeypatch.setattr(wq, "mark_failed", _mark_failed)
     monkeypatch.setattr(wq, "requeue_one", _requeue_one)
-    return {"sent": sent, "suppressed": suppressed, "failed": failed,
-            "deferred": deferred, "debits": debits}
+    monkeypatch.setattr(wq, "withdraw_marketing_consent", _withdraw)
+    return spy
+
+
+def _patch_meta_send(monkeypatch, fn):
+    monkeypatch.setattr(meta, "send_template", fn)
+
+
+def _ok_send(wamid="wamid.1"):
+    async def _send(**kw):
+        return wamid
+    return _send
+
+
+def _never_sends():
+    async def _send(**kw):
+        raise AssertionError("must not reach Meta")
+    return _send
 
 
 def _message(**over):
     row = {
         "id": uuid4(), "shop_id": SHOP, "customer_id": uuid4(),
-        "to_phone": "+393331112222", "from_number": "+3721234567",
-        "content_sid": "HX1", "variables": {"1": "Giulia"},
+        "to_phone": "+393331112222", "from_number": "+393331110000",
+        "template_name": "kairo_promo_v1", "template_language": "it",
+        "variables": {"1": "Giulia"},
     }
     row.update(over)
     return row
 
 
 @pytest.mark.asyncio
-async def test_send_due_sends_and_debits_after_twilio_accepts(monkeypatch):
+async def test_send_due_sends_via_meta_and_records_the_wamid(monkeypatch):
     spy = _patch_send_due(
-        monkeypatch,
-        claimed=[_message()],
-        sender={"subaccount_sid": "ACsub", "daily_cap": 50},
-        customer=_consenting(),
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(), customer=_consenting(),
     )
-    monkeypatch.setattr(ws, "_twilio_send", lambda **kw: ("SM1", 0.07))
+    _patch_meta_send(monkeypatch, _ok_send("wamid.abc"))
 
     counts = await ws.send_due(settings=FakeSettings())
 
     assert counts["sent"] == 1
-    assert spy["sent"][0]["provider_sid"] == "SM1"
-    assert spy["debits"][0]["credits"] > 0
+    assert spy["sent"][0]["provider_sid"] == "wamid.abc"
+
+
+@pytest.mark.asyncio
+async def test_send_due_never_debits_credits(monkeypatch):
+    """The salon's card is on the salon's WABA — Meta bills it, not us.
+
+    Debiting here would charge the same message twice. Guarded by asserting
+    the send path records no credits at all, rather than trusting that nobody
+    re-adds the import later.
+    """
+    spy = _patch_send_due(
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(), customer=_consenting(),
+    )
+    _patch_meta_send(monkeypatch, _ok_send())
+
+    await ws.send_due(settings=FakeSettings())
+
+    assert spy["sent"][0]["credits"] is None
+    assert spy["sent"][0]["price_usd"] > 0        # still quoted, never charged
 
 
 @pytest.mark.asyncio
 async def test_send_due_rechecks_consent_withdrawn_while_queued(monkeypatch):
-    """A row can sit in the queue for hours; consent can change in that window."""
+    """A row can sit in the queue for days now; consent can change in between."""
     spy = _patch_send_due(
-        monkeypatch,
-        claimed=[_message()],
-        sender={"subaccount_sid": "ACsub", "daily_cap": 50},
-        customer=_consenting(marketing_consent=False),
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(), customer=_consenting(marketing_consent=False),
     )
-    def _boom(**kw):
-        raise AssertionError("must not reach Twilio")
-    monkeypatch.setattr(ws, "_twilio_send", _boom)
+    _patch_meta_send(monkeypatch, _never_sends())
 
     counts = await ws.send_due(settings=FakeSettings())
 
@@ -304,14 +459,10 @@ async def test_send_due_rechecks_consent_withdrawn_while_queued(monkeypatch):
 async def test_send_due_defers_rather_than_drops_when_over_cap(monkeypatch):
     """Over the daily cap means later, not never — the owner scheduled it."""
     spy = _patch_send_due(
-        monkeypatch,
-        claimed=[_message()],
-        sender={"subaccount_sid": "ACsub", "daily_cap": 50, "_sent_today": 50},
-        customer=_consenting(),
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(_sent_today=50), customer=_consenting(),
     )
-    def _boom(**kw):
-        raise AssertionError("must not reach Twilio")
-    monkeypatch.setattr(ws, "_twilio_send", _boom)
+    _patch_meta_send(monkeypatch, _never_sends())
 
     counts = await ws.send_due(settings=FakeSettings())
 
@@ -323,12 +474,10 @@ async def test_send_due_defers_rather_than_drops_when_over_cap(monkeypatch):
 async def test_send_due_stops_at_the_cap_mid_batch(monkeypatch):
     """Three due, two left in today's allowance: two go, one is deferred."""
     spy = _patch_send_due(
-        monkeypatch,
-        claimed=[_message(), _message(), _message()],
-        sender={"subaccount_sid": "ACsub", "daily_cap": 50, "_sent_today": 48},
-        customer=_consenting(),
+        monkeypatch, claimed=[_message(), _message(), _message()],
+        sender=_online_sender(_sent_today=48), customer=_consenting(),
     )
-    monkeypatch.setattr(ws, "_twilio_send", lambda **kw: ("SM1", 0.07))
+    _patch_meta_send(monkeypatch, _ok_send())
 
     counts = await ws.send_due(settings=FakeSettings())
 
@@ -338,59 +487,660 @@ async def test_send_due_stops_at_the_cap_mid_batch(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_due_never_bills_for_a_message_twilio_rejected(monkeypatch):
+async def test_send_due_marks_an_unknown_meta_error_failed(monkeypatch):
     spy = _patch_send_due(
-        monkeypatch,
-        claimed=[_message()],
-        sender={"subaccount_sid": "ACsub", "daily_cap": 50},
-        customer=_consenting(),
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(), customer=_consenting(),
     )
-    def _reject(**kw):
-        raise RuntimeError("63016 template not approved")
-    monkeypatch.setattr(ws, "_twilio_send", _reject)
+
+    async def _reject(**kw):
+        raise meta.MetaError(132000, "template param count mismatch")
+    _patch_meta_send(monkeypatch, _reject)
 
     counts = await ws.send_due(settings=FakeSettings())
 
     assert counts["failed"] == 1
-    assert spy["debits"] == []          # nothing charged
-    assert "63016" in spy["failed"][0]["error_code"]
+    assert "132000" in spy["failed"][0]["error_code"]
+    assert spy["consent_withdrawn"] == []
 
 
 @pytest.mark.asyncio
-async def test_send_due_suppresses_when_credits_are_short(monkeypatch):
+async def test_send_due_treats_131050_as_a_permanent_opt_out(monkeypatch):
+    """Meta's native "Stop promotions" button — the opt-out SMS never had."""
+    message = _message()
     spy = _patch_send_due(
-        monkeypatch,
-        claimed=[_message()],
-        sender={"subaccount_sid": "ACsub", "daily_cap": 50},
-        customer=_consenting(),
-        balance=0,
+        monkeypatch, claimed=[message],
+        sender=_online_sender(), customer=_consenting(),
     )
-    def _boom(**kw):
-        raise AssertionError("must not reach Twilio")
-    monkeypatch.setattr(ws, "_twilio_send", _boom)
+
+    async def _opted_out(**kw):
+        raise meta.MetaError(131050, "user stopped marketing messages")
+    _patch_meta_send(monkeypatch, _opted_out)
 
     counts = await ws.send_due(settings=FakeSettings())
 
     assert counts["suppressed"] == 1
-    assert spy["suppressed"][0]["reason"] == "insufficient_credits"
+    assert spy["suppressed"][0]["reason"] == "opted_out"
+    assert spy["consent_withdrawn"] == [message["customer_id"]]
+    assert spy["deferred"] == []
+
+
+@pytest.mark.asyncio
+async def test_send_due_treats_131049_as_a_cooldown_not_an_opt_out(monkeypatch):
+    """The cross-brand frequency cap says "not today", not "never again".
+
+    Collapsing it into the opt-out branch — as the Twilio version's single
+    bucket would have — permanently silences customers who did nothing.
+    """
+    spy = _patch_send_due(
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(), customer=_consenting(),
+    )
+
+    async def _capped(**kw):
+        raise meta.MetaError(131049, "healthy ecosystem engagement")
+    _patch_meta_send(monkeypatch, _capped)
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["rate_capped"] == 1
+    assert counts["suppressed"] == 0 and counts["failed"] == 0
+    assert spy["consent_withdrawn"] == []
+    assert spy["deferred"][0]["minutes"] == ws.FREQUENCY_CAP_RETRY_MINUTES
 
 
 @pytest.mark.asyncio
 async def test_send_due_decodes_jsonb_variables_returned_as_text(monkeypatch):
-    """asyncpg hands jsonb back as a string; Twilio needs the real mapping."""
+    """asyncpg hands jsonb back as a string; Meta needs the real mapping."""
     seen = {}
     _patch_send_due(
-        monkeypatch,
-        claimed=[_message(variables='{"1": "Giulia"}')],
-        sender={"subaccount_sid": "ACsub", "daily_cap": 50},
-        customer=_consenting(),
+        monkeypatch, claimed=[_message(variables='{"1": "Giulia"}')],
+        sender=_online_sender(), customer=_consenting(),
     )
 
-    def _capture(**kw):
+    async def _capture(**kw):
         seen.update(kw)
-        return ("SM1", 0.07)
-    monkeypatch.setattr(ws, "_twilio_send", _capture)
+        return "wamid.1"
+    _patch_meta_send(monkeypatch, _capture)
 
     await ws.send_due(settings=FakeSettings())
 
     assert seen["variables"] == {"1": "Giulia"}
+    assert seen["name"] == "kairo_promo_v1"
+    assert seen["language"] == "it"
+
+
+# ------------------------------------------------------------- plan quota
+
+@pytest.mark.asyncio
+async def test_enqueue_refuses_a_campaign_bigger_than_the_plan_allowance(monkeypatch):
+    """Told at draft time, not discovered as suppressed rows tomorrow."""
+    _patch_enqueue(monkeypatch)
+
+    async def quota(shop_id):
+        return 300
+    async def used(shop_id):
+        return 290
+    monkeypatch.setattr(wq, "monthly_quota", quota)
+    monkeypatch.setattr(wq, "sent_this_month", used)
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(11)],
+        settings=FakeSettings(),
+    )
+
+    assert result["error"] == "over_monthly_quota"
+    assert result["remaining"] == 10
+
+
+@pytest.mark.asyncio
+async def test_enqueue_allows_a_campaign_that_exactly_fits_the_allowance(monkeypatch):
+    """Off-by-one guard: 10 left must mean 10 sendable, not 9."""
+    _patch_enqueue(monkeypatch)
+
+    async def quota(shop_id):
+        return 300
+    async def used(shop_id):
+        return 290
+    async def customer(shop_id, customer_id):
+        return _consenting()
+    async def enqueue(**kw):
+        return uuid4()
+    monkeypatch.setattr(wq, "monthly_quota", quota)
+    monkeypatch.setattr(wq, "sent_this_month", used)
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", customer)
+    monkeypatch.setattr(wq, "enqueue", enqueue)
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(10)],
+        settings=FakeSettings(),
+    )
+
+    assert result["ok"] is True and result["queued"] == 10
+
+
+@pytest.mark.asyncio
+async def test_enqueue_refuses_when_the_shop_has_no_plan(monkeypatch):
+    """Fails closed: no plan row means quota 0, not unlimited."""
+    _patch_enqueue(monkeypatch)
+
+    async def quota(shop_id):
+        return 0
+    monkeypatch.setattr(wq, "monthly_quota", quota)
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}}],
+        settings=FakeSettings(),
+    )
+    assert result["error"] == "over_monthly_quota"
+
+
+@pytest.mark.asyncio
+async def test_send_due_suppresses_rather_than_defers_over_the_monthly_quota(monkeypatch):
+    """Unlike the daily cap, this does not clear in an hour — don't reschedule."""
+    spy = _patch_send_due(
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(), customer=_consenting(),
+        quota=300, sent_month=300,
+    )
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["suppressed"] == 1 and counts["deferred"] == 0
+    assert spy["suppressed"][0]["reason"] == "over_monthly_quota"
+
+
+@pytest.mark.asyncio
+async def test_send_due_stops_at_the_quota_mid_batch(monkeypatch):
+    """The allowance is decremented in-loop, not re-read per message."""
+    spy = _patch_send_due(
+        monkeypatch, claimed=[_message(), _message(), _message()],
+        sender=_online_sender(), customer=_consenting(),
+        quota=300, sent_month=298,
+    )
+    _patch_meta_send(monkeypatch, _ok_send())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["sent"] == 2
+    assert counts["suppressed"] == 1
+    assert spy["suppressed"][0]["reason"] == "over_monthly_quota"
+
+
+# ------------------------------------------------------------------ onboarding
+
+def _patch_onboarding(monkeypatch, *, sender, calls):
+    async def _get_sender(shop_id):
+        return sender
+    async def _set_fields(shop_id, **fields):
+        calls.setdefault("fields", []).append(fields)
+        sender.update(fields)
+    async def _get_template(shop_id, key):
+        return None
+    async def _upsert_template(**kw):
+        calls.setdefault("templates", []).append(kw)
+        return kw
+    async def _onboarded(*a, **kw):
+        return calls.get("onboarded_last_7_days", 0)
+    monkeypatch.setattr(wq, "get_sender", _get_sender)
+    monkeypatch.setattr(wq, "set_sender_fields", _set_fields)
+    monkeypatch.setattr(wq, "get_template", _get_template)
+    monkeypatch.setattr(wq, "upsert_template", _upsert_template)
+    monkeypatch.setattr(wq, "onboarded_last_7_days", _onboarded)
+
+    async def _exchange(**kw):
+        calls.setdefault("exchange", []).append(kw)
+        return "customer-token"
+    async def _subscribe(**kw):
+        calls.setdefault("subscribe", []).append(kw)
+    async def _register(**kw):
+        calls.setdefault("register", []).append(kw)
+    async def _number(**kw):
+        return meta.PhoneNumber(
+            id="PN1", display_phone_number="+393331110000",
+            verified_name="Salone X", quality_rating="GREEN",
+            messaging_limit="TIER_1K", throughput_level="STANDARD",
+            platform_type="COEXISTENCE", is_on_biz_app=True,
+        )
+    async def _create_template(**kw):
+        calls.setdefault("create_template", []).append(kw)
+        return "TPL1", "pending"
+    monkeypatch.setattr(meta, "exchange_code", _exchange)
+    monkeypatch.setattr(meta, "subscribe_app", _subscribe)
+    monkeypatch.setattr(meta, "register_phone_number", _register)
+    monkeypatch.setattr(meta, "get_phone_number", _number)
+    monkeypatch.setattr(meta, "create_template", _create_template)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_complete_onboards_coexistence_in_one_round_trip(monkeypatch):
+    """No OTP, no subaccount, no second call: the popup already verified."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    result = await wo.complete(
+        shop_id=SHOP, code="c0de", waba_id="WABA1", phone_number_id="PN1",
+        pin=None, settings=FakeSettings(),
+    )
+
+    assert result["ok"] is True and result["status"] == "online"
+    assert result["coexistence"] is True
+    assert calls["subscribe"][0]["waba_id"] == "WABA1"
+    # The salon kept their WhatsApp Business App — the number was already
+    # registered and calling register would be wrong.
+    assert "register" not in calls
+
+
+@pytest.mark.asyncio
+async def test_complete_registers_the_number_only_for_a_brand_new_waba(monkeypatch):
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "new",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    result = await wo.complete(
+        shop_id=SHOP, code="c0de", waba_id="WABA1", phone_number_id="PN1",
+        pin="123456", settings=FakeSettings(),
+    )
+
+    assert result["ok"] is True
+    assert calls["register"][0]["pin"] == "123456"
+
+
+@pytest.mark.asyncio
+async def test_complete_subscribes_to_webhooks_before_anything_else(monkeypatch):
+    """Without the subscription every send succeeds and we hear nothing back.
+
+    No delivery status, no template verdicts, no opt-outs — broken in the one
+    way nothing surfaces, so ordering is asserted rather than assumed.
+    """
+    order = []
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "new",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    async def _subscribe(**kw):
+        order.append("subscribe")
+    async def _register(**kw):
+        order.append("register")
+    monkeypatch.setattr(meta, "subscribe_app", _subscribe)
+    monkeypatch.setattr(meta, "register_phone_number", _register)
+
+    await wo.complete(shop_id=SHOP, code="c0de", waba_id="W", phone_number_id="P",
+                      pin="123456", settings=FakeSettings())
+
+    assert order == ["subscribe", "register"]
+    del calls
+
+
+@pytest.mark.asyncio
+async def test_complete_persists_the_token_before_using_it(monkeypatch):
+    """A crash after the exchange must leave a resumable row.
+
+    Losing the token would leave a WABA we are subscribed to and can neither
+    reach nor unsubscribe from.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    async def _boom(**kw):
+        raise meta.MetaError(100, "subscribe failed")
+    monkeypatch.setattr(meta, "subscribe_app", _boom)
+
+    result = await wo.complete(
+        shop_id=SHOP, code="c0de", waba_id="WABA1", phone_number_id="PN1",
+        pin=None, settings=FakeSettings(),
+    )
+
+    assert result["ok"] is False
+    token_writes = [f for f in calls["fields"] if f.get("access_token")]
+    assert token_writes and token_writes[0]["access_token"] == "customer-token"
+
+
+@pytest.mark.asyncio
+async def test_complete_injects_the_catalogue_into_the_salons_waba(monkeypatch):
+    """The call Twilio structurally could not make — the point of the migration."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    await wo.complete(shop_id=SHOP, code="c0de", waba_id="WABA1",
+                      phone_number_id="PN1", pin=None, settings=FakeSettings())
+
+    created = calls["create_template"]
+    assert {c["name"] for c in created} == {
+        wo.template_name(k) for k in wt.CATALOGUE
+    }
+    assert all(c["waba_id"] == "WABA1" for c in created)
+    assert all(c["token"] == "customer-token" for c in created)
+
+
+@pytest.mark.asyncio
+async def test_complete_rejects_an_unknown_source(monkeypatch):
+    result = await wo.start(
+        shop_id=SHOP, display_name="Salone X", source="kairo",
+        settings=FakeSettings(),
+    )
+    assert result == {"ok": False, "error": "invalid_source"}
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_survives_one_rejected_template(monkeypatch):
+    """One bad template must not abort the rest of the catalogue."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+
+    async def _reject(**kw):
+        raise meta.MetaError(2388042, "invalid parameter")
+    monkeypatch.setattr(meta, "create_template", _reject)
+
+    result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
+
+    assert result["ok"] is True
+    assert result["created"] == 0
+    assert set(result["failed"]) == set(wt.CATALOGUE)
+    del calls
+
+
+def test_signup_config_asks_meta_for_the_coexistence_branch():
+    """Without this flag the popup offers only a brand-new WABA.
+
+    The salon would be told to delete their WhatsApp Business App — exactly
+    the Twilio behaviour this migration exists to avoid.
+    """
+    config = wo.signup_config(FakeSettings())
+    assert config["feature_type"] == "whatsapp_business_app_onboarding"
+    assert config["config_id"] == "cfg"
+    assert config["solution_id"] == "sol"
+
+
+def test_template_names_are_stable_across_shops():
+    """Meta scopes names per-WABA, so every salon carries the same one."""
+    assert wo.template_name("promo_v1") == "kairo_promo_v1"
+
+
+def test_unknown_meta_template_status_is_never_treated_as_approved():
+    """A new Meta state must not silently make a template sendable."""
+    assert wo.TEMPLATE_STATUS.get("some_future_state", "pending") == "pending"
+    assert wo.TEMPLATE_STATUS["approved"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_send_due_defers_rather_than_burns_a_sender_missing_credentials(monkeypatch):
+    """A config problem must not permanently fail the owner's messages.
+
+    Without the guard the missing column reaches the send as a KeyError, gets
+    caught as a provider error, and marks the row `failed` forever.
+    """
+    spy = _patch_send_due(
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(access_token=None), customer=_consenting(),
+    )
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["deferred"] == 1
+    assert counts["failed"] == 0 and spy["failed"] == []
+
+
+# ------------------------------------------------------- Meta limit safeguards
+
+@pytest.mark.asyncio
+async def test_enqueue_uses_metas_tier_when_our_cap_is_set_higher(monkeypatch):
+    """A daily_cap of 5000 on a Tier-250 sender must schedule at 250/day.
+
+    The commercial knob may only narrow the platform ceiling. Before this,
+    `daily_cap` was an unrelated hand-set number and nothing read the tier.
+    """
+    rows = []
+    _patch_enqueue(monkeypatch, sender=_online_sender(
+        daily_cap=5000, messaging_limit="TIER_250"))
+
+    async def customer(shop_id, customer_id):
+        return _consenting()
+    async def enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", customer)
+    monkeypatch.setattr(wq, "enqueue", enqueue)
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(600)],
+        settings=FakeSettings(),
+    )
+
+    assert result["ok"] is True
+    per_day = {}
+    for row in rows:
+        d = row["scheduled_at"].date()
+        per_day[d] = per_day.get(d, 0) + 1
+    assert max(per_day.values()) == 250          # Meta's tier, not our 5000
+
+
+@pytest.mark.asyncio
+async def test_enqueue_falls_back_to_the_unverified_floor_for_an_unknown_tier(monkeypatch):
+    """Meta telling us something we don't recognise must not widen anything."""
+    rows = []
+    _patch_enqueue(monkeypatch, sender=_online_sender(
+        daily_cap=5000, messaging_limit="TIER_5K"))
+
+    async def customer(shop_id, customer_id):
+        return _consenting()
+    async def enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", customer)
+    monkeypatch.setattr(wq, "enqueue", enqueue)
+
+    await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(400)],
+        settings=FakeSettings(),
+    )
+    first_day = rows[0]["scheduled_at"].date()
+    assert sum(1 for r in rows if r["scheduled_at"].date() == first_day) == 250
+
+
+@pytest.mark.asyncio
+async def test_enqueue_suppresses_a_customer_inside_the_cooldown(monkeypatch):
+    """Our guard against Meta's per-user cross-brand cap, applied *before* the send.
+
+    Reacting to 131049 costs the send and a quality-rating hit; not sending is
+    free.
+    """
+    rows = []
+    cooled = uuid4()
+    fresh = uuid4()
+    _patch_enqueue(monkeypatch, cooled={cooled})
+
+    async def customer(shop_id, customer_id):
+        return _consenting()
+    async def enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", customer)
+    monkeypatch.setattr(wq, "enqueue", enqueue)
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": cooled, "variables": {}},
+                    {"customer_id": fresh, "variables": {}}],
+        settings=FakeSettings(),
+    )
+
+    assert result["queued"] == 1 and result["suppressed"] == 1
+    by_customer = {r["customer_id"]: r for r in rows}
+    assert by_customer[cooled]["suppressed_reason"] == "recently_contacted"
+    assert by_customer[fresh]["suppressed_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_enqueue_refuses_a_us_recipient_before_meta_does(monkeypatch):
+    """Meta has not delivered marketing to +1 since 2025-04-01."""
+    rows = []
+    _patch_enqueue(monkeypatch)
+
+    async def customer(shop_id, customer_id):
+        return _consenting(phone="+12125550123")
+    async def enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", customer)
+    monkeypatch.setattr(wq, "enqueue", enqueue)
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}}],
+        settings=FakeSettings(),
+    )
+
+    assert result["suppressed"] == 1 and result["queued"] == 0
+    assert rows[0]["suppressed_reason"] == "marketing_blocked_destination"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_refuses_a_sender_with_no_allowance_at_all(monkeypatch):
+    _patch_enqueue(monkeypatch, sender=_online_sender(daily_cap=0))
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}}],
+        settings=FakeSettings(),
+    )
+    assert result == {"ok": False, "error": "sender_has_no_allowance"}
+
+
+@pytest.mark.asyncio
+async def test_send_due_counts_metas_rolling_window_not_the_calendar_day(monkeypatch):
+    """The tier is measured over a rolling 24h, so the check must be too.
+
+    A calendar-day count resets at midnight and would hand a sender sitting at
+    its ceiling a second full allowance ninety minutes later — nearly two
+    tiers' worth of traffic inside one of Meta's windows.
+    """
+    seen = {}
+    spy = _patch_send_due(
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(_sent_today=50), customer=_consenting(),
+    )
+
+    async def _calendar_day(shop_id):
+        seen["calendar_day_used"] = True
+        return 0
+    monkeypatch.setattr(wq, "sent_today", _calendar_day)
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["deferred"] == 1               # the rolling count bound it
+    assert "calendar_day_used" not in seen       # and sent_today was never asked
+    del spy
+
+
+@pytest.mark.asyncio
+async def test_send_due_clamps_the_configured_rate_to_metas_throughput(monkeypatch):
+    """A misconfigured WHATSAPP_SENDS_PER_MINUTE must not be able to burst.
+
+    Asserted on the Pacer the loop actually builds, so raising the env var to
+    something absurd cannot silently remove the ceiling.
+    """
+    built = {}
+    real_pacer = ws.Pacer
+
+    class SpyPacer(real_pacer):
+        def __init__(self, per_minute):
+            built["per_minute"] = per_minute
+            super().__init__(per_minute)
+
+    monkeypatch.setattr(ws, "Pacer", SpyPacer)
+    _patch_send_due(monkeypatch, claimed=[_message()],
+                    sender=_online_sender(), customer=_consenting())
+    _patch_meta_send(monkeypatch, _ok_send())
+
+    class Absurd(FakeSettings):
+        whatsapp_sends_per_minute = 10_000
+
+    await ws.send_due(settings=Absurd())
+
+    assert built["per_minute"] == meta_limits.MAX_SENDS_PER_MINUTE
+
+
+@pytest.mark.asyncio
+async def test_send_due_rechecks_the_cooldown_for_a_row_queued_days_ago(monkeypatch):
+    """A multi-day drip can be overtaken by another campaign in the meantime."""
+    message = _message()
+    spy = _patch_send_due(
+        monkeypatch, claimed=[message],
+        sender=_online_sender(), customer=_consenting(),
+        cooled={message["customer_id"]},
+    )
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["suppressed"] == 1
+    assert spy["suppressed"][0]["reason"] == "recently_contacted"
+
+
+@pytest.mark.asyncio
+async def test_complete_refuses_past_metas_onboarding_limit(monkeypatch):
+    """10 new customers per rolling 7 days until Access Verification.
+
+    The 11th otherwise fails at Meta with an opaque error, after the popup's
+    single-use code has already been spent.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={"onboarded_last_7_days": 10},
+    )
+
+    result = await wo.complete(
+        shop_id=SHOP, code="c0de", waba_id="WABA1", phone_number_id="PN1",
+        pin=None, settings=FakeSettings(),
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "onboarding_limit_reached"
+    assert result["limit"] == 10
+    assert "exchange" not in calls          # the code was not spent
+
+
+@pytest.mark.asyncio
+async def test_complete_allows_more_once_access_verification_is_done(monkeypatch):
+    _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={"onboarded_last_7_days": 10},
+    )
+
+    class Verified(FakeSettings):
+        meta_access_verified = True
+
+    result = await wo.complete(
+        shop_id=SHOP, code="c0de", waba_id="WABA1", phone_number_id="PN1",
+        pin=None, settings=Verified(),
+    )
+    assert result["ok"] is True

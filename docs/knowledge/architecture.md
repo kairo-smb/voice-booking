@@ -80,7 +80,7 @@ message or the send is refused, because the caller is a salon owner
 watching a modal, not a batch job. Bulk/scheduled sends (`sms.campaigns`)
 are a later phase — nothing writes that table yet.
 
-## WhatsApp marketing (one sender per salon)
+## WhatsApp marketing (one WABA per salon)
 
 Personalised promotions over WhatsApp instead of SMS, ~50/day/salon dripped
 across opening hours. Durable record: this section, [Database → `whatsapp`
@@ -95,37 +95,44 @@ WhatsApp](api/whatsapp.md), and `CLAUDE.md` §2026-08-21.
    the SMS flow sends cannot be sent on WhatsApp as-is — personalisation
    happens *inside variables*, in a fixed approved skeleton
    (`services/messaging/whatsapp_templates.py`).
-2. **One WABA per Twilio account.** A salon's WhatsApp Business Account
-   therefore cannot share Kairo's account with every other salon, so each
-   gets its own Twilio **subaccount** — the same audited "don't reuse your own
-   business identity for a customer" rule as the regulatory bundles.
+2. **A WABA can only be created or connected by the salon**, inside Meta's
+   browser popup. There is no server-side API that does it on a customer's
+   behalf.
+
+Kairo is a Meta **Tech Provider** talking to `graph.facebook.com` directly.
+There is no BSP: Twilio cannot register a WABA it did not create
+(error 63103) and its migration path deletes the salon's WhatsApp Business
+App — a non-starter for a hairdresser who runs the business from that app.
 
 ```
 Kairo = Meta Tech Provider (one Meta app + Embedded Signup, in the webapp)
-  └── per salon: Twilio subaccount ──> the salon's own WABA
-                                   ──> 1 sender (whatsapp:+…)
-                                   ──> its own approved templates (HX…)
+  └── per salon: the salon's OWN WABA, owned and paid for by the salon
+                                   ──> 1 business phone number (Cloud API)
+                                   ──> Kairo's templates, injected by us
 ```
 
-Onboarding is necessarily two round-trips, because a WABA can only be created
-by the salon itself inside Meta's browser popup:
+**Coexistence is the point.** The salon's existing WhatsApp Business App
+number stays live on their phone — they keep chatting with clients from the
+app — while the same number also sends templates through Cloud API. Enabled
+with `featureType: "whatsapp_business_app_onboarding"` in the popup config.
+
+Onboarding is **one round trip**; the popup performs verification itself, so
+there is no OTP to relay and no inbound-SMS webhook:
 
 ```
-POST /whatsapp/onboarding/start   → create subaccount, return Embedded Signup config
-   (salon completes Meta's popup in the webapp; the webapp gets a waba_id back)
-POST /whatsapp/onboarding/waba    → register the sender (Twilio Senders API, ISVSubAccount)
-   Meta sends an ownership OTP:
-     source='kairo' → it lands on a number WE own → /whatsapp/webhook/otp submits it
-     source='salon' → it lands on THEIR phone     → POST /whatsapp/onboarding/verify
-   → sender ONLINE → template catalogue created + submitted to Meta automatically
+POST /whatsapp/onboarding/start     → record intent, return Embedded Signup config
+   (salon completes Meta's popup; the browser gets code + waba_id + phone_number_id)
+POST /whatsapp/onboarding/complete  → exchange code for the salon's business token
+                                    → subscribe our app to their WABA  (before anything else)
+                                    → register the number (source='new' only)
+                                    → confirm coexistence from Meta, not from the popup
+                                    → inject the template catalogue
 ```
 
-**The number is not a new purchase.** `source='kairo'` (the default) reuses
-`voice_agent.shop_telephony.kairo_number` — the Estonian mobile the salon
-already answers calls on, already SMS-capable, already under the salon's own
-regulatory bundle. No second number, no second ~$3/mo, and no bundle needed
-inside the subaccount. `source='salon'` imports the salon's own number
-instead (they must first delete its WhatsApp/WhatsApp Business App account).
+**Nothing here debits AI credits.** A Tech Provider has no Meta credit line to
+share, so the salon's own card sits on the salon's own WABA and Meta charges
+it directly. Debiting on top would bill one message twice. The plan allowance
+still caps volume; the SMS path is unchanged and still debits 2×.
 
 **Sending is queued, not synchronous** — the opposite of `/sms/send`, and for
 the reason that motivates the feature:
@@ -140,7 +147,7 @@ webapp (LLM writes the per-customer offer line, i.e. the template's {{3}})
   → POST /api/v1/messaging/tick              (hourly cron)
       whatsapp_send.py::send_due
         claim due rows atomically → RE-check consent → balance check
-        → Twilio send → debit credits → mark sent
+        → Meta Cloud API send (paced) → mark sent
 ```
 
 **Consent is re-read at send time, not trusted from enqueue.** A queued row
@@ -150,14 +157,23 @@ not receive the message scheduled for 15:00. Same trust-boundary reasoning as
 
 **WhatsApp restores the self-service opt-out SMS gave up.** Meta puts a
 native "Stop promotions" button on every marketing template; a refusal comes
-back as error `63033`/`63050` on the status webhook, which writes
+back as error **`131050`** on the status webhook, which writes
 `marketing_consent = false` into `business_app_core.customers`. That is a
 materially stronger position under Italian marketing rules than the SMS path
 (see `CLAUDE.md`'s STOP-removal entry), and it comes from Meta, not from us.
 
-**Billing reuses the SMS path exactly** — `send_credits()` (2× pass-through,
-not the webapp's 10× LLM margin), debited only *after* Twilio accepts, and
-recorded on `ai_token_log.whatsapp_message_id`.
+**`131049` is a different thing and must not be conflated with it.** That is
+Meta's per-user *cross-brand* marketing cap — the recipient has had enough
+marketing today, from anyone — so the message is requeued 24h later, not
+suppressed. Treating it as an opt-out permanently silences customers who did
+nothing wrong.
+
+**Bulk campaigns drip across days, not hours.** `spread()` chunks a campaign
+by the sender's `daily_cap` and rolls onto following days, so a 400-recipient
+send against a 50/day sender is an eight-day schedule the owner is shown at
+enqueue time — rather than 350 rows the tick defers by an hour, over and over.
+Within a tick, sends are paced (`services/messaging/pacer.py`) against the
+Graph API's app-level limit, which every tenant shares.
 
 ## Alternate entrypoint (testing only)
 

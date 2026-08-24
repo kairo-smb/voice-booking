@@ -1,13 +1,32 @@
 # Messaging: SMS marketing + WhatsApp booking & reminders — design draft
 
-**Status:** draft, not approved, nothing built.
+**Status (2026-08-24): PARTLY SHIPPED, and every WhatsApp section below is
+SUPERSEDED.** Kept for §8 and §9 alone — WhatsApp reminders and self-booking,
+still unbuilt, and this is their only design record.
+
+| Section | State |
+|---|---|
+| §1–§3, §4.1, §4.3, §5.2, §5.3, §7, §10 (SMS) | **shipped** 2026-08-12/15 — the truth is `docs/knowledge/api/sms.md` |
+| §4.2, §5, §6 (WhatsApp on Twilio) | **dead.** WhatsApp left Twilio on 2026-08-24 |
+| §8, §9 (WhatsApp reminders, self-booking) | **still the design.** Not built. Read these. |
+
+**What changed under the WhatsApp sections and why they can't just be
+patched:** Twilio cannot register a WABA it did not create (error 63103) and
+its migration path deletes the salon's WhatsApp Business App, so the whole
+subaccount/Senders/Content-API shape in §4.2 and §6 is gone. Kairo is a Meta
+Tech Provider talking to `graph.facebook.com` directly. The billing model in
+§5 inverted too: the salon's own card is on the salon's own WABA and Meta
+charges it directly, so nothing debits AI credits on this channel.
+
+**Read instead:** `CLAUDE.md` §2026-08-24 (both entries),
+[api/whatsapp.md](knowledge/api/whatsapp.md),
+[providers.md](knowledge/providers.md#whatsapp-meta-cloud-api-tech-provider).
+
 **Date:** 2026-08-11. Supersedes the first cut of the same day (shared-sender model).
 
-> Working document, not durable history. When this ships, the decisions land in
-> `CLAUDE.md` and the shipped reality in `docs/knowledge/*.md` (here) and
-> `docs/knowledge/{features,providers,architecture,decisions}.md` (webapp);
-> delete this file then. Deliberately not under `docs/superpowers/specs/` —
-> that directory was removed on 2026-07-24 by owner decision.
+> Working document, not durable history. Delete it once §8 and §9 ship.
+> Deliberately not under `docs/superpowers/specs/` — that directory was removed
+> on 2026-07-24 by owner decision.
 
 Spans two repos: **voice-booking** (schemas, sending, webhooks, billing) and
 **webapp** (all salon-facing UI). No `marketing-engine` changes.
@@ -269,6 +288,20 @@ send_credits(twilio_usd) = twilio_usd <= 0 ? 0 : ceil(twilio_usd * 2 * 1000)
 | WhatsApp Utility template (IT, approx.) | ~$0.045 | **~90** |
 | WhatsApp free-form inside 24h session | $0 | **0** |
 
+> **The WhatsApp rows here are dead (2026-08-24), and so is the correction that
+> used to sit in this box.** On 2026-08-22 this said a free-form reply costs
+> ~$0.005 because Twilio charged a flat per-message platform fee on every
+> category. That was true of Twilio and is no longer true of anything: WhatsApp
+> now goes direct to Meta, the platform fee is gone, and a free-form reply
+> inside the 24h window really is **$0** — the original table above was right
+> by accident. More importantly **no WhatsApp send debits AI credits at all**,
+> because the salon's card is on the salon's own WABA and Meta bills it
+> directly. The shipped table is
+> `booking_engine/services/messaging/whatsapp_pricing.py`, documented in
+> [providers.md](knowledge/providers.md#whatsapp-meta-cloud-api-tech-provider).
+> §5.1's SMS reasoning still holds in full: the 2× margin, the separate
+> converter, and the reason not to floor at 1 credit.
+
 Reality check: Base (€39, 40 000 granted credits/mo) buys ~107 two-segment
 marketing SMS *if the shop spends nothing else* — and the generation is charged
 separately at 10× LLM. Surface the cost in the UI before the click (§7); an
@@ -331,8 +364,8 @@ New package `booking_engine/services/messaging/`:
 | `POST /sms/send` | control-plane token | synchronous one-off send (webapp "Invia SMS") |
 | `POST /sms/webhook/inbound` | `X-Twilio-Signature` | STOP handling |
 | `POST /sms/webhook/status` | `X-Twilio-Signature` | delivery receipts + real price |
-| `POST /whatsapp/webhook/inbound` | `X-Twilio-Signature` | customer message → agent |
-| `POST /whatsapp/webhook/status` | `X-Twilio-Signature` | delivery/read receipts |
+| ~~`POST /whatsapp/webhook/inbound`~~ | — | **gone.** One Meta webhook now: `POST /whatsapp/webhook`, `X-Hub-Signature-256` |
+| ~~`POST /whatsapp/webhook/status`~~ | — | **gone.** Same endpoint, same signature |
 
 `/sms/send` is synchronous on purpose: the owner clicks Invia in a modal and
 needs "Inviato" or "Credito insufficiente" now, not within the hour. Bulk and

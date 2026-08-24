@@ -49,35 +49,80 @@ and `services/number_health.py::decide_health` checks `voice_url` only.
 
 **Billing: 2× Twilio cost via AI credits, a dedicated converter.** `send_credits.py` — deliberately not the webapp's `rawToUserCredits()` (10× LLM margin, floors at 1 credit). Full reasoning: `CLAUDE.md` §2026-08-12.
 
-### WhatsApp (Meta Tech Provider + Twilio)
+### WhatsApp (Meta Cloud API, Tech Provider)
 
-**Purpose:** personalised marketing to consenting customers, ~50/day/salon.
-Added 2026-08-21. See [Architecture → WhatsApp marketing](architecture.md#whatsapp-marketing-one-sender-per-salon)
-and `CLAUDE.md` §2026-08-21.
+**Purpose:** personalised marketing to consenting customers, ~50/day/salon,
+plus bulk campaigns dripped over days. Added 2026-08-21 on Twilio; **migrated
+off Twilio onto Meta direct 2026-08-24**. See
+[Architecture → WhatsApp marketing](architecture.md#whatsapp-marketing-one-waba-per-salon)
+and `CLAUDE.md` §2026-08-24.
 
-**Key files:** `booking_engine/clients/twilio_whatsapp.py` (subaccounts +
-Senders API + Content API), `booking_engine/services/messaging/{whatsapp_onboarding,whatsapp_send,whatsapp_templates}.py`,
-`booking_engine/db/whatsapp_queries.py`, `booking_engine/api/routes/whatsapp.py`.
+> **Twilio is not in this path.** Twilio must attach a WABA to *its own* Meta
+> credit line during registration and Meta only lets a payment method be
+> revoked, never removed — so a WABA created outside Twilio fails with
+> [63103](https://www.twilio.com/docs/api/errors/63103). Twilio's own docs say
+> *"Don't select a WABA that's been created outside of Twilio"*, and its
+> migration path warns *"You won't be able to continue using WhatsApp or
+> WhatsApp Business App with the same phone number."* Hairdressers run their
+> business from that app. Twilio keeps voice and SMS.
 
-**Env vars:** `META_APP_ID`, `META_CONFIG_ID` (public Meta app identifiers,
+**Key files:** `booking_engine/clients/meta_whatsapp.py` (Graph client),
+`booking_engine/services/meta_signature.py`,
+`booking_engine/services/messaging/{whatsapp_onboarding,whatsapp_send,whatsapp_templates,whatsapp_pricing,pacer,meta_limits}.py`,
+`booking_engine/db/whatsapp_queries.py`, `booking_engine/api/routes/whatsapp.py`,
+`scripts/kairo_waba.py` (drives Kairo's *own* WABA — App Review evidence and
+template validation).
+
+**Coexistence is the feature.** Meta's Embedded Signup (May 2025) can connect a
+number that is already live on the WhatsApp Business App to Cloud API, keeping
+both active: the salon keeps chatting from their phone while Kairo sends
+templates through the API. Enabled with
+`featureType: "whatsapp_business_app_onboarding"` in the popup config — no
+allowlist request, but it does require Advanced access to
+`whatsapp_business_management`. Constraints: fixed 20 msg/s throughput, one
+number per coexistence account, not available for NG/ZA numbers, and the
+onboarding must be finished within 24h of the popup or the salon starts over.
+
+**What a message costs (`whatsapp_pricing.py`, Italy, 2026-08):** Meta's rate,
+and nothing else. Going direct removed Twilio's flat per-message platform fee.
+
+| Kind | Meta | Who is billed |
+|---|---|---|
+| Marketing template | $0.0691 | the salon, by Meta, directly |
+| Utility template (reminders) | $0.0341 | " |
+| Free-form inside the 24h window | $0 | — genuinely free now |
+
+That last row restores what `docs/messaging-design.md` §5.1 originally claimed
+and the 2026-08-22 entry corrected: under Twilio it cost the platform fee;
+under Meta direct it does not.
+
+**Billing: Kairo debits nothing for a WhatsApp send.** A Tech Provider (unlike
+a Solution Partner) has no credit line to share, so each salon attaches its own
+card to its own WABA. `try_debit_for_message` is gone from this path;
+`price_usd` is a send-time estimate that is never corrected, because Meta
+reports no amount on send or on the webhook. The plan allowance
+(`subscription_plans.whatsapp_monthly_messages`) still applies — it is a
+product limit, not cost recovery. **SMS is unchanged and still debits 2×.**
+
+**Env vars:** `META_APP_ID`, `META_CONFIG_ID`, `META_SOLUTION_ID` (public,
 served to the webapp so Embedded Signup has one source of truth),
+`META_APP_SECRET` (verifies `X-Hub-Signature-256` *and* signs the code
+exchange), `META_VERIFY_TOKEN` (webhook handshake),
 `WHATSAPP_SEND_START_HOUR`/`WHATSAPP_SEND_END_HOUR` (default 9/20,
-Europe/Rome). Twilio credentials are unchanged — a subaccount is addressed
-with the **subaccount SID as the basic-auth username and the parent's auth
-token as the password**, so there is no per-salon secret for API calls. The
-subaccount's *own* token is stored anyway (`whatsapp.senders.subaccount_auth_token`)
-because webhook signatures need it.
+Europe/Rome), `WHATSAPP_SENDS_PER_MINUTE` (default 60).
 
-**Two APIs, three endpoints, none of them the ones you'd guess:**
+**The Graph calls, in the order onboarding makes them** (all `v25.0`, pinned —
+Graph changes shape across versions):
 
 | What | Endpoint |
 |---|---|
-| Create the salon's subaccount | `POST api.twilio.com/2010-04-01/Accounts.json` |
-| Register the sender | `POST messaging.twilio.com/v2/Channels/Senders` — `sender_id: "whatsapp:+…"`, `configuration.waba_id`, `configuration.account_type: "ISVSubAccount"` |
-| Submit the ownership OTP | `POST …/v2/Channels/Senders/{sid}` with `configuration.verification_code` |
-| Create a template | `POST content.twilio.com/v1/Content` → `HX…` |
-| Submit it to Meta | `POST content.twilio.com/v1/Content/{HX}/ApprovalRequests/whatsapp` — `{name, category: "MARKETING"}` |
-| Send | `Messages.create(content_sid=…, content_variables=…)`, `To`/`From` prefixed `whatsapp:` |
+| Exchange the popup's code for the salon's token | `GET /oauth/access_token?client_id&client_secret&code` |
+| Subscribe our app to their WABA | `POST /{waba_id}/subscribed_apps` |
+| Register the number (**`source='new'` only**) | `POST /{phone_number_id}/register` `{messaging_product, pin}` |
+| Confirm coexistence | `GET /{phone_number_id}?fields=platform_type,is_on_biz_app` |
+| Inject a template | `POST /{waba_id}/message_templates` |
+| Template verdict (reconciler) | `GET /{waba_id}/message_templates?name=…` |
+| Send | `POST /{phone_number_id}/messages` `{type: "template", template: {...}}` |
 
 **The constraints that decide the product, not just the code:**
 
@@ -90,44 +135,54 @@ because webhook signatures need it.
 - **Variable values must be single-line.** Meta rejects parameters containing
   newlines, tabs, or 4+ consecutive spaces; `clean_variable()` enforces that
   locally rather than letting the send fail at the provider.
-- **Templates are per-WABA, so per-salon.** The same skeleton is a different
-  `HX` SID for every shop and needs its own approval. Meta also blocks reusing
-  a deleted template's name for 30 days, so `ensure_templates` skips rather
-  than recreates.
+- **Templates are per-WABA, so per-salon**, and must be *created* in each
+  salon's WABA — the call Twilio structurally could not make. Meta blocks
+  reusing a deleted template's name for 30 days, so `ensure_templates` skips
+  rather than recreates.
 - **Messaging limit tiers.** An unverified WABA is capped at 250
   business-initiated conversations per 24h — 50/day/salon sits well inside it,
-  which is why Meta Business Verification is *not* a prerequisite for this
-  feature (it is for higher tiers and for WhatsApp Business Calling).
+  which is why Meta Business Verification is *not* a prerequisite for a
+  *salon* (it is for Kairo, to pass App Review at all).
 - **Marketing to US recipients is dead** (Meta, since 2025-04-01). Irrelevant
   for Italian salons; relevant the day anyone tries this elsewhere.
-- **Delivery isn't guaranteed even when everything is right.** Meta
-  temporarily limits marketing delivery to recipients unlikely to engage —
-  error `63049`. Retry later with growing delays, don't hammer.
+- **Every ceiling above is enforced in `meta_limits.py`, and fails closed.**
+  `effective_daily_cap()` is `min(Meta's tier, our `daily_cap`)`, so a
+  commercial knob can only narrow the platform limit, never widen it; an
+  unrecognised tier is treated as the unverified 250. The tier check uses a
+  **rolling 24h** count, not the calendar day — the two differ by nearly a
+  full tier around midnight.
+- **`131049` is not `131050`.** `131049` is Meta's per-user *cross-brand*
+  marketing cap — the recipient has had enough marketing today, from anyone —
+  and must be retried after 24h, not treated as an opt-out. `131050` is the
+  real opt-out and is permanent. Conflating them silences customers who did
+  nothing wrong.
 - **Templates can be paused for negative feedback**: 3h, then 6h, then
   permanently deactivated. Sends on a paused template fail.
-- **ISV onboarding limit:** 200 new WhatsApp customers per rolling 7 days.
+- **Tech Provider onboarding limit:** 10 new customers per rolling 7 days,
+  raised to 200 by completing Access Verification.
 
-**Two Twilio-side surprises worth knowing before debugging:**
+**Two Meta-side surprises worth knowing before debugging:**
 
-- **Webhooks are signed with the *subaccount's* auth token**, not the
-  parent's, because the subaccount owns the resource. `twilio_signature_valid`
-  grew an `auth_token` override for exactly this.
-- **Registering the sender is not the last step.** Meta verifies phone-number
-  ownership by OTP, and neither that nor template approval has a webhook we
-  receive — both are polled by the hourly tick.
+- **Webhook signatures cover the raw body, not the parsed JSON.**
+  Re-serialising changes whitespace and key order and every genuine request
+  starts failing. One app secret, all tenants — the opposite of Twilio's
+  per-account signing.
+- **Forgetting `subscribed_apps` fails silently in the worst direction.**
+  Sends keep succeeding; you just never hear about delivery, template
+  verdicts or opt-outs. Hence its position before everything else in
+  `complete()`.
 
 **Manual, out-of-band prerequisites (not automatable from this repo):** create
-a Meta app, get it approved by Meta and linked to Twilio as a Partner
-Solution (~3–4 weeks), complete 2FA + Meta business verification on Kairo's
-own Meta Business Portfolio, and register a WhatsApp sender for Kairo itself
-via Self Sign-up first. See Twilio's
-[Tech Provider integration guide](https://www.twilio.com/docs/whatsapp/isv/tech-provider-program/integration-guide).
-
-**Billing:** identical to SMS — `send_credits()`, 2× pass-through, debited
-only after Twilio accepts. A marketing template to an Italian recipient is a
-Meta per-message fee (category- and country-based) plus Twilio's fee;
-`whatsapp_send.py`'s `_ESTIMATED_USD_PER_MESSAGE` is a list-price estimate
-used only to pre-check the balance, reconciled by the status callback.
+a Meta app (type Business), complete 2FA + Business Verification on Kairo's
+Meta Business Portfolio, stand up Kairo's own WABA (`scripts/kairo_waba.py`),
+pass **App Review** for Advanced access to `whatsapp_business_management` +
+`whatsapp_business_messaging` (two screen-recordings of the *business-facing*
+UI: one sending a message, one creating a template), then complete Tech
+Provider onboarding ("Onboard without a partner") for the Solution ID and
+Access Verification. **Embedded Signup v2 is deprecated 2026-10-15 — build on
+v4.** See Meta's
+[Become a Tech Provider](https://developers.facebook.com/documentation/business-messaging/whatsapp/solution-providers/get-started-for-tech-providers)
+and [Onboard WhatsApp Business app users](https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/onboarding-business-app-users/).
 
 ## OpenAI Realtime
 

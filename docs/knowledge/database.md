@@ -109,24 +109,28 @@ and `ai_token_log` must not depend on a schema it doesn't own.
 
 ## `whatsapp` schema — authoritative here
 
-Added 2026-08-21 (`booking_engine/db/sql/14_whatsapp_schema.sql`), owned by
-this repo. See [Architecture → WhatsApp marketing](architecture.md#whatsapp-marketing-one-sender-per-salon),
-[Providers → WhatsApp](providers.md#whatsapp-meta-tech-provider--twilio),
-[API → WhatsApp](api/whatsapp.md), and `CLAUDE.md` §2026-08-21.
+Added 2026-08-21 (`14_whatsapp_schema.sql`), reshaped for Meta Cloud API on
+2026-08-24 (`15_whatsapp_meta.sql`). Owned by this repo. See
+[Architecture → WhatsApp marketing](architecture.md#whatsapp-marketing-one-waba-per-salon),
+[Providers → WhatsApp](providers.md#whatsapp-meta-cloud-api-tech-provider),
+[API → WhatsApp](api/whatsapp.md), and `CLAUDE.md` §2026-08-24.
 
 | Table | Purpose |
 |---|---|
-| `senders` | one row per shop: the salon's Twilio **subaccount**, its Meta WABA id, the registered sender, display name, Meta's `quality_rating`/`messaging_limit` read back from Twilio, and `daily_cap` (default 50). `status` is `pending_signup → verifying → online` (or `offline`/`failed`). |
-| `templates` | one row per (shop, template_key). A template is per-WABA, so the same skeleton has a **different `content_sid` for every salon** and needs its own Meta approval. `status` tracks Meta's verdict (`unsubmitted`/`pending`/`approved`/`rejected`/`paused`/`disabled`). |
-| `outbound_messages` | queue **and** log in one table. A row is written the moment a send is planned and never deleted: `queued → sending → sent → delivered/read`, or `suppressed`/`failed`/`cancelled`. `variables` (jsonb) is what Twilio substitutes; `preview` is the rendered body, stored so a row says what the customer actually read rather than an opaque `HX` SID. |
+| `senders` | one row per shop: the salon's `waba_id`, `phone_number_id`, the customer-scoped `access_token` from Embedded Signup, `platform_type` (`COEXISTENCE` when the number is also live on the WhatsApp Business App), display name, `quality_rating`, and **two different Meta ceilings**: `messaging_limit` (the volume tier — conversations per *rolling* 24h) and `throughput_level` (messages per second). `daily_cap` is Kairo's own drip rate and only ever narrows the tier — see `meta_limits.effective_daily_cap()`. `source` is `coexistence`/`new`; `status` is `pending_signup → online` (or `verifying`/`offline`/`failed`). |
+| `templates` | one row per (shop, template_key). A template is per-WABA, so the same skeleton must be **created separately in every salon's WABA** and approved separately. `name` (`kairo_promo_v1`) is deliberately the same across shops — Meta scopes names per-WABA — so status updates key on `(shop_id, name)`, never on name alone. `status` tracks Meta's verdict. |
+| `outbound_messages` | queue **and** log in one table. A row is written the moment a send is planned and never deleted: `queued → sending → sent → delivered/read`, or `suppressed`/`failed`/`cancelled`. `template_name` + `template_language` are how Meta addresses a template; `variables` (jsonb) are its parameters; `preview` is the rendered body, stored so a row says what the customer actually read. `provider_sid` is Meta's `wamid`. `price_usd` is our **send-time estimate** — Meta never reports an amount — and `credits_charged` is unused: the salon pays Meta directly. |
 
 **Three things in this schema are load-bearing and easy to undo by accident:**
 
-- **`senders.subaccount_auth_token`.** Twilio signs a webhook with the auth
-  token of the account that *owns* the resource. WhatsApp traffic belongs to
-  the salon's subaccount, so validating those webhooks against
-  `TWILIO_AUTH_TOKEN` rejects every genuine request — and those webhooks
-  withdraw marketing consent, so failing open is not an option either.
+- **`senders.access_token` is the whole credential.** Unlike the Twilio
+  subaccount model there is no shared parent secret: this per-customer
+  business token is the complete authority over one salon's WhatsApp. Lose it
+  and we hold a WABA we can neither reach nor unsubscribe from, which is why
+  `complete()` persists it *before* making any call that uses it.
+- **`senders.waba_id` is the only tenant router.** Meta posts every
+  customer's traffic to one app-level webhook and identifies the shop solely
+  by `entry[].id`. Hence the unique index on it.
 - **`outbound_messages.status = 'sending'` is a claim, not a provider state.**
   The drip sweep flips rows into it in the same statement that selects them
   (`whatsapp_queries.claim_due`, `FOR UPDATE … SKIP LOCKED`), so two
@@ -140,6 +144,17 @@ this repo. See [Architecture → WhatsApp marketing](architecture.md#whatsapp-ma
 `business_app_core.ai_token_log.whatsapp_message_id` — the column the SMS
 work added and left unused — is now written, by
 `token_basket_queries.try_debit_for_message`.
+
+**One read reaches out of this schema entirely.** `whatsapp_queries.monthly_quota`
+joins `business_app_core.shops → subscription_plans` for
+`whatsapp_monthly_messages` (webapp migration 54, added 2026-08-22): the plan's
+monthly send allowance, enforced at enqueue and again at send. It is a
+webapp-owned column — this repo reads it and never writes it, and the column
+exists before we query it because `migrate-all.yml` runs the parent's
+migrations first. A shop with no plan joins to nothing and gets 0, which is the
+intended answer, not a missing-data case. Counted against it:
+`sent_this_month`, which counts `sent_at` — a message that never left doesn't
+spend an allowance.
 
 ## Cross-schema references
 

@@ -1,84 +1,117 @@
 # WhatsApp API
 
-`booking_engine/api/routes/whatsapp.py`, mounted at `/api/v1`. Onboards a salon onto WhatsApp with its own sender, and queues personalised marketing that drips out across the day.
+`booking_engine/api/routes/whatsapp.py`, mounted at `/api/v1`. Onboards a salon onto WhatsApp with its own WABA, injects Kairo's approved templates into it, and queues personalised marketing that drips out across the day — or across a week, for a bulk campaign.
 
-**Read [Providers → WhatsApp](../providers.md#whatsapp-meta-tech-provider--twilio) first** if you're new to this: the constraints (approved templates only, one WABA per Twilio account, per-recipient marketing caps) explain why these endpoints exist in this shape.
+**Read [Providers → WhatsApp](../providers.md#whatsapp-meta-cloud-api-tech-provider) first** if you're new to this: the constraints (approved templates only, per-recipient marketing caps, coexistence) explain why these endpoints exist in this shape.
+
+> **This channel does not go through Twilio.** Twilio cannot register a WABA it did not create ([error 63103](https://www.twilio.com/docs/api/errors/63103) — it must attach the WABA to *Twilio's* Meta credit line, and Meta won't release an existing payment method), and its migration path deletes the salon's WhatsApp Business App. Kairo is a Meta **Tech Provider** and talks to `graph.facebook.com` directly. Twilio still owns voice and SMS.
 
 ## Auth
 
 | Routes | Scheme |
 |---|---|
 | `/whatsapp/onboarding/*`, `/whatsapp/status/*`, `/whatsapp/templates/*`, `/whatsapp/campaigns*` | Control-plane bearer (`CONTROL_PLANE_SECRET`) — the webapp is the only caller |
-| `/whatsapp/webhook/status`, `/whatsapp/webhook/inbound` | `X-Twilio-Signature`, validated against **the salon's subaccount auth token** (`whatsapp.senders.subaccount_auth_token`), not `TWILIO_AUTH_TOKEN` |
-| `/whatsapp/webhook/otp` | `X-Twilio-Signature`, validated against `TWILIO_AUTH_TOKEN` — the number is in the parent account |
+| `GET /whatsapp/webhook` | Meta's handshake: `hub.verify_token` must equal `META_VERIFY_TOKEN` |
+| `POST /whatsapp/webhook` | `X-Hub-Signature-256`, HMAC-SHA256 of the **raw body** with `META_APP_SECRET` |
 
-The subaccount distinction is not cosmetic. Twilio signs a webhook with the auth token of the account that *owns the resource*; validating a subaccount's WhatsApp traffic against the parent token rejects every genuine request.
+One app secret covers every customer's traffic — unlike Twilio, which signs with the token of the account owning the resource. `booking_engine/services/meta_signature.py` verifies the bytes as received; re-serialising the parsed JSON changes whitespace and key order and the digest stops matching.
 
 ---
 
 ## Onboarding
 
-Three calls, because Meta's Embedded Signup is a browser popup with no server-side equivalent — a WABA can only be created by the salon itself.
+**Two calls.** Meta's Embedded Signup is a browser popup with no server-side equivalent — a WABA can only be created (or connected) by the salon itself — but the popup also performs verification, so there is no OTP round trip and no inbound-SMS webhook.
 
 ### `POST /whatsapp/onboarding/start`
 
 ```json
-{ "shop_id": "…", "display_name": "Salone Bellezza", "source": "kairo", "phone_number": null }
+{ "shop_id": "…", "display_name": "Salone Bellezza", "source": "coexistence" }
 ```
 
 `source`:
-- `"kairo"` (default) — reuse `voice_agent.shop_telephony.kairo_number`, the number the salon already answers calls on. No second number, no second $3/mo, no regulatory bundle inside the subaccount. Requires the shop to already have a provisioned number ([Number Provisioning](number-provisioning.md)).
-- `"salon"` — the salon's own number, in `phone_number`. It must not already be active on WhatsApp or WhatsApp Business App; they have to delete that account first.
+- `"coexistence"` (default) — the salon's **existing WhatsApp Business App number**. It stays live on their phone: they keep chatting with clients from the app while Kairo sends templates through Cloud API. This is what the whole channel is sold on, and what Twilio cannot offer.
+- `"new"` — a fresh WABA on a number not yet on WhatsApp. The only path that registers a number for Cloud API. A branch inside Meta's popup, not a second integration.
 
-Creates the salon's Twilio subaccount (idempotent — an existing one is reused) and returns the Embedded Signup config the webapp needs:
-
-```json
-{"data": {"ok": true, "status": "pending_signup", "phone_number": "+372…",
-          "signup": {"app_id": "…", "config_id": "…",
-                     "phone_number": "+372…", "business_name": "Salone Bellezza"}}}
-```
-
-Errors (HTTP 409): `no_kairo_number`, `invalid_phone`, `invalid_source`.
-
-### `POST /whatsapp/onboarding/waba`
+Creates nothing provider-side; it records intent and returns the popup config:
 
 ```json
-{ "shop_id": "…", "waba_id": "1234567890" }
+{"data": {"ok": true, "status": "pending_signup",
+          "signup": {"app_id": "…", "config_id": "…", "solution_id": "…",
+                     "feature_type": "whatsapp_business_app_onboarding",
+                     "session_info_version": "3"}}}
 ```
 
-Called once the salon closes Meta's popup. Registers the sender via Twilio's Senders API (`account_type: ISVSubAccount`) and returns `status: "verifying"`.
+`feature_type` is what turns the popup's first question into *"connect your existing WhatsApp Business App account?"*. Without it the salon is offered only a brand-new WABA — i.e. told to delete their app.
 
-For `source="kairo"` this also temporarily binds the number's inbound-SMS webhook to `/whatsapp/webhook/otp`, so Meta's ownership code is caught automatically. It is unbound again the moment the sender goes online.
+Errors (409): `invalid_source`.
 
-Errors: `not_started`.
-
-### `POST /whatsapp/onboarding/verify`
+### `POST /whatsapp/onboarding/complete`
 
 ```json
-{ "shop_id": "…", "code": "123456" }
+{ "shop_id": "…", "code": "AQD…", "waba_id": "1234567890",
+  "phone_number_id": "9876543210", "pin": null }
 ```
 
-`source="salon"` only — the salon types the code Meta sent them. Returns `status: "online"` on success, at which point the template catalogue is created and submitted automatically.
+Everything Meta's popup hands back to the browser. `pin` is required only for `source="new"`.
 
-Errors: `not_registered`.
+Server-side, in this order — and the order is load-bearing:
+
+1. Exchange the one-time `code` for the salon's business token, and **persist it before using it**. A crash after this point leaves a resumable row; losing the token leaves a WABA we can neither reach nor unsubscribe from.
+2. `POST /{waba_id}/subscribed_apps`. Without it every send still succeeds while we receive no delivery status, no template verdicts and no opt-outs — broken in the one way nothing surfaces.
+3. `POST /{phone_number_id}/register` — **skipped for coexistence**, where the number is already registered and Meta's own guidance is not to call it.
+4. Read the number back (`is_on_biz_app`, `platform_type`) rather than trusting what the popup told the browser.
+5. Inject the template catalogue.
+
+```json
+{"data": {"ok": true, "status": "online", "phone_number": "+39…",
+          "coexistence": true, "templates": 1}}
+```
+
+Errors (409): `not_started`, `code_exchange_failed`, `pin_required`, `meta_error`.
 
 ### `GET /whatsapp/status/{shop_id}`
 
-Everything the webapp needs to render the waiting/ready state:
-
 ```json
-{"data": {"status": "online", "source": "kairo", "phone_number": "+372…",
-          "display_name": "Salone Bellezza", "quality_rating": "HIGH",
-          "messaging_limit": "1K Customers/24hr", "daily_cap": 50,
-          "offline_reason": null, "sent_today": 12,
-          "templates": [{"template_key": "promo_v1", "status": "approved"}]}}
+{"data": {"status": "online", "source": "coexistence", "phone_number": "+39…",
+          "display_name": "Salone Bellezza", "quality_rating": "GREEN",
+          "messaging_limit": "TIER_1K", "coexistence": true,
+          "daily_cap": 50, "configured_daily_cap": 50,
+          "meta_tier": "TIER_1K", "meta_tier_daily": 1000,
+          "recipient_cooldown_hours": 168,
+          "offline_reason": null, "sent_today": 12, "sent_last_24h": 47,
+          "sent_this_month": 87, "monthly_quota": 150,
+          "pricing": [{"kind": "marketing", "usd": 0.0691},
+                      {"kind": "utility",   "usd": 0.0341},
+                      {"kind": "service",   "usd": 0.0}],
+          "templates": [{"template_key": "promo_v1", "status": "approved"}],
+          "signup": {"…": "…"}}}
 ```
 
-`status` is `not_started | pending_signup | verifying | online | offline | failed`. A salon is only able to send when `status == "online"` **and** at least one template is `approved`.
+`status` is `not_started | pending_signup | verifying | online | offline | failed`. A salon can send only when `status == "online"` **and** the template is `approved`.
+
+`monthly_quota` and `pricing` are returned even for `not_started`: they're plan facts, not sender facts, and the webapp shows "what this would cost you" before onboarding begins.
+
+**Three different ceilings, don't conflate them.**
+
+| Field | Whose limit | What happens at it |
+|---|---|---|
+| `meta_tier_daily` | **Meta's** volume tier, per *rolling* 24h | hard: never crossed, by construction |
+| `daily_cap` | the binding rate = `min(meta_tier_daily, configured_daily_cap)` | a campaign takes more days |
+| `monthly_quota` | what the salon **bought** (`subscription_plans.whatsapp_monthly_messages`, 0 with no plan) | the campaign is refused |
+
+`daily_cap` is deliberately the *effective* number, not the raw column — showing our 5000 when Meta allows 250 would promise throughput we refuse to deliver. The raw value is `configured_daily_cap`. See [Meta's limits are a floor](#metas-limits-are-a-floor-nothing-may-cross).
+
+`sent_today` is the calendar-day counter the owner reads; `sent_last_24h` is the rolling one the Meta tier is checked against. They are not interchangeable.
+
+`pricing` is an estimate from `services/messaging/whatsapp_pricing.py` — Meta's Italian per-category rate, and nothing else. `service` is genuinely **$0** now that Twilio's flat per-message fee is out of the path. No `credits` field: see [Billing](#billing).
 
 ### `POST /whatsapp/templates/ensure/{shop_id}`
 
-Re-runs template creation for anything missing. Use after a rejection or after the catalogue (`services/messaging/whatsapp_templates.py`) gains an entry. Already-created templates are skipped — Meta blocks reusing a deleted template's name for 30 days.
+Re-runs template injection — after a rejection, or after the catalogue (`services/messaging/whatsapp_templates.py`) gains an entry. Already-created templates are skipped: Meta blocks reusing a deleted template's name for 30 days.
+
+Returns `{"created": N, "failed": ["key", …]}`. One rejected template never aborts the rest of the catalogue.
+
+Templates carry the **same name in every salon's WABA** (`kairo_promo_v1`): the catalogue is Kairo's, Meta scopes names per-WABA, and a per-shop name would make "is promo_v1 approved for this salon?" unanswerable without a lookup.
 
 ---
 
@@ -87,61 +120,160 @@ Re-runs template creation for anything missing. Use after a rejection or after t
 ### `POST /whatsapp/campaigns`
 
 ```json
-{
-  "shop_id": "…",
-  "campaign_key": "agosto-winback",
-  "template_key": "promo_v1",
-  "recipients": [
-    {"customer_id": "…", "variables": {"1": "Giulia", "2": "Salone Bellezza",
-                                        "3": "questa settimana taglio e piega a 35€."}}
-  ]
-}
+{ "shop_id": "…", "campaign_key": "bulk_at_risk_2026-08-24", "template_key": "promo_v1",
+  "recipients": [{"customer_id": "…", "variables": {"1": "Giulia", "2": "Salone X",
+                                                     "3": "taglio e piega a 35€."}}] }
 ```
 
-There is **no `body` field, and there cannot be one.** A business-initiated WhatsApp marketing message is an approved template plus variable values — the caller supplies the values, the template supplies everything else. The webapp's LLM copy generator writes `{{3}}`, not the message.
+Up to **2000** recipients (was 500 — bulk sends to the whole consenting book are the point of the Touchpoint tile).
+
+There is **no `body` field, and there cannot be one.** A business-initiated WhatsApp marketing message is an approved template plus variable values; the caller supplies the values, the template supplies everything else. The webapp's LLM copy generator writes `{{3}}`, not the message.
 
 Returns immediately with the schedule; nothing is sent inline:
 
 ```json
-{"data": {"ok": true, "queued": 48, "suppressed": 2, "already_sent": 0,
-          "first_at": "2026-08-21T09:00:00+02:00",
-          "last_at": "2026-08-21T19:47:00+02:00"}}
+{"data": {"ok": true, "queued": 380, "suppressed": 18, "already_sent": 2,
+          "first_at": "2026-08-24T09:00:00+02:00",
+          "last_at": "2026-08-31T19:47:00+02:00"}}
 ```
 
-- `suppressed` — a row was written with `suppressed_reason` (`no_consent`, `no_phone`, `customer_not_found`). Refusals are recorded, never silent.
-- `already_sent` — this `campaign_key` already reached that customer; the unique index made the retry a no-op.
+- `suppressed` — a row written with a `suppressed_reason` (`no_consent`, `no_phone`, `customer_not_found`). Refusals are recorded, never silent.
+- `already_sent` — this `campaign_key` already reached that customer; the unique index made the retry a no-op. That guard earns its keep here, where "invia a 400 clienti" is exactly the button someone double-clicks.
 
-Errors (409): `sender_not_online`, `unknown_template`, `template_rejected` / `template_pending` / `template_paused`, `over_daily_cap`.
+`spread()` lays the campaign across the salon's opening hours (`WHATSAPP_SEND_START_HOUR`–`WHATSAPP_SEND_END_HOUR`, Europe/Rome), rolling onto **following days** once a day's `daily_cap` is used. A 400-recipient campaign against a 50/day sender is eight days of drip, and the owner is told so at enqueue time.
+
+There is **no `over_daily_cap` rejection any more**: exceeding a day's allowance is a longer schedule, not an error. Keeping it would have made bulk impossible, and piling everything onto today just hands `send_due` hundreds of rows to defer by an hour, repeatedly, until nobody can read the queue.
+
+Errors (409): `sender_not_online`, `unknown_template`, `template_pending`/`template_rejected`/…, `over_monthly_quota`.
+
+**Only the code crosses the wire.** `enqueue_campaign` returns richer refusals — `over_monthly_quota` carries `monthly_quota`, `sent_this_month` and `remaining` — but the route flattens them into `HTTPException(detail=<code>)`. The webapp reads the numbers from `GET /whatsapp/status/{shop_id}` instead.
+
+### `GET /whatsapp/campaigns/{shop_id}/{campaign_key}`
+
+Counts per status plus `last_due_at`. A drip that runs for days is otherwise invisible between "inviata" and whatever arrives later. Polled by the bulk tile.
 
 ### `DELETE /whatsapp/campaigns/{shop_id}/{campaign_key}`
 
-Cancels whatever hasn't gone out yet (`queued`/`sending` → `cancelled`). Already-sent rows are untouched history.
+Cancels whatever hasn't gone out (`queued`/`sending` → `cancelled`). Already-sent rows are untouched history.
 
 ---
 
-## Webhooks
+## `POST /whatsapp/webhook`
 
-### `POST /whatsapp/webhook/status`
+One app-level URL for every customer. Meta identifies the tenant only by `entry[].id` — the WABA id — so `whatsapp.senders.waba_id` is the sole route from a payload to a shop.
 
-Twilio delivery status. Maps `sent|delivered|read|failed|undelivered`; `read` is a signal SMS never had.
+Always answers **200** on a genuine request. Meta retries on anything else and disables a webhook that keeps failing, which would silently cost every delivery status and every opt-out.
 
-**It is also the opt-out sink.** `ErrorCode` `63033` or `63050` means the recipient used Meta's native "Stop promotions" button, so the handler writes `marketing_consent = false` back to `business_app_core.customers`. This is the self-service opt-out the SMS channel gave up on 2026-08-15 — see [Decisions](../decisions.md).
+| `field` | Effect |
+|---|---|
+| `messages` → `statuses[]` | `sent`/`delivered`/`read`/`failed` written to `outbound_messages` by `wamid` |
+| `messages` → `messages[]` | Inbound reply: logged and discarded |
+| `message_template_status_update` | Meta's verdict, applied to `(shop_id, name)` — **never by name alone**, since every salon's copy carries the same name |
 
-### `POST /whatsapp/webhook/inbound`
+Template verdicts arrive here within minutes instead of on the next hourly tick. The tick's poll survives as a **reconciler**: a missed webhook would otherwise leave a template `pending` forever, blocking every send for that shop and looking like nothing at all.
 
-A customer replied. Logged only. The reply opens Meta's 24-hour session window (inside which free-form messages *are* allowed); nothing in this repo uses that yet.
+### Opt-out vs. frequency cap
 
-### `POST /whatsapp/webhook/otp`
+Two error codes that look alike and must not behave alike:
 
-Meta's ownership-verification SMS, landing on a Kairo-owned number. Matches a 6-digit run and submits it, and only for a shop actually mid-verification. Bound only while verifying, unbound on success.
+| Code | Meaning | Action |
+|---|---|---|
+| `131050` | the recipient used Meta's native **"Stop promotions"** button | permanent — clears `business_app_core.customers.marketing_consent` |
+| `131049` | Meta's per-user, **cross-brand** marketing cap ("healthy ecosystem engagement") | *not* an opt-out — requeued 24h later by `whatsapp_send` |
 
-This is **not** a reintroduction of STOP handling (removed 2026-08-15): nothing here parses message content beyond a numeric code, and the hook does not survive onboarding.
+Collapsing them, as the Twilio version's single `63033`/`63050` bucket effectively did, permanently silences customers who did nothing wrong. Meta's native opt-out button is why this channel has the self-service opt-out that SMS gave up on 2026-08-15 — see [Decisions](../decisions.md).
+
+---
+
+## Billing
+
+**Nothing here debits AI credits.** As a Meta Tech Provider (unlike a Solution Partner) Kairo has no credit line to share: the salon's own card sits on the salon's own WABA and Meta charges it directly. Debiting `send_credits()` on top would bill the same message twice.
+
+`outbound_messages.price_usd` is our own send-time estimate and is never corrected — Meta reports no amount on send or on the webhook. `credits_charged` is unused on this channel.
+
+The plan allowance still applies: it is a product limit, not cost recovery.
+
+The SMS path is unchanged and still debits at 2× — there Kairo really does pay Twilio.
+
+---
+
+## Meta's limits are a floor nothing may cross
+
+`services/messaging/meta_limits.py` is the single home of every Meta-imposed
+ceiling, and the layering is deliberate:
+
+```
+Meta's limits    — platform facts. Never exceeded, by construction.
+    ↓  min()
+Kairo's limits   — commercial knobs: daily_cap, the plan allowance.
+    ↓
+the queue
+```
+
+**A commercial knob can only ever make us send less.** `effective_daily_cap()`
+returns `min(Meta's tier, our daily_cap)`, so setting `senders.daily_cap` to
+5000 on a Tier-250 sender buys nothing rather than getting the WABA
+rate-limited and downgraded. `GET /whatsapp/status` returns that binding number
+as `daily_cap`, with the raw column exposed separately as
+`configured_daily_cap`.
+
+**Everything fails closed.** An unrecognised tier is treated as the unverified
+250, an unknown throughput as the slowest rate that exists. If Meta invents
+`TIER_5K` we under-send until someone adds the row — the harmless direction.
+
+| Meta limit | Where it's enforced | How |
+|---|---|---|
+| Volume tier (business-initiated conversations / **rolling 24h**) | `enqueue_campaign`, `send_due` | `effective_daily_cap()` against `sent_last_24h()` |
+| Throughput (mps, per number) | `send_due` | global pacer clamped to `MAX_SENDS_PER_MINUTE` |
+| Graph API app-level rate | `send_due` | `Pacer`, `WHATSAPP_SENDS_PER_MINUTE` |
+| Per-user cross-brand marketing cap (131049) | `enqueue_campaign` + `send_due` | `WHATSAPP_RECIPIENT_COOLDOWN_HOURS` (default 168) |
+| Marketing to +1 recipients (paused since 2025-04-01) | `enqueue_campaign` | `marketing_allowed()` |
+| Tech Provider onboarding, 10 (or 200) per rolling 7 days | `complete()` | `onboarded_last_7_days()`, checked *before* spending the popup's single-use code |
+
+### The rolling window is not the calendar day
+
+Meta measures the tier over a **rolling 24 hours**. `sent_today` resets at
+midnight, so using it for the tier check would hand a sender sitting at its
+ceiling at 23:00 a second full allowance ninety minutes later — nearly two
+tiers' worth of traffic inside one of Meta's windows. `sent_last_24h()` is the
+Meta check; `sent_today()` survives only for the owner-facing counter, where
+"quanti ne ho mandati oggi" is what the number means.
+
+### Why there is no per-number pacer
+
+`MAX_SENDS_PER_MINUTE` is `COEXISTENCE_MPS × 60` = 1200. Below that, no single
+number can be over-driven however the claimed batch happens to fall across
+shops, because 20 mps is the slowest per-number throughput Meta grants. The
+invariant is enforced once, by clamping the global rate, instead of with a
+second mechanism that would be dead machinery at any sane configuration.
+`send_due` clamps rather than trusts `WHATSAPP_SENDS_PER_MINUTE`, so raising
+the env var to something absurd cannot silently remove the ceiling.
+
+### The cooldown is the by-design half of 131049
+
+Reacting to `131049` costs the send and a quality-rating hit; not sending
+costs nothing. The cooldown (7 days by default) means we stay under Meta's
+undisclosed per-user ceiling instead of discovering it. It is checked at
+enqueue *and* re-checked at send, for the same reason consent is: a row on a
+multi-day drip can be overtaken by another campaign. It counts `sent_at`, so a
+message that never left never starts a cooldown.
+
+New `suppressed_reason` values: `recently_contacted`,
+`marketing_blocked_destination`.
 
 ---
 
 ## The hourly tick
 
-`POST /messaging/tick` ([Number Provisioning](number-provisioning.md)) gained two WhatsApp stages, each independently wrapped so one failure can't suppress the others:
+`POST /messaging/tick` ([Number Provisioning](number-provisioning.md)) has two WhatsApp stages, each independently wrapped so one failure can't suppress the others:
 
-- `whatsapp` — polls Twilio/Meta for sender verification and template approval verdicts. Neither has a webhook we receive today, so polling is the only way a salon's status ever stops saying "in attesa".
-- `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed`, `failed`, `deferred` (over daily cap, retried in an hour), `requeued` (claimed but never sent, recovered from a crashed tick).
+- `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver.
+- `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed` (`no_consent`, `opted_out`, `over_monthly_quota`), `failed`, `deferred` (over daily cap, retried in an hour), `rate_capped` (Meta 131049, retried in 24h), `requeued` (claimed but never sent, recovered from a crashed tick).
+
+---
+
+## Out of scope
+
+- Inbound replies are logged and discarded. A reply opens Meta's 24h session window, inside which free-form messages *are* allowed — the obvious next phase, and the only path to genuinely free-form personalised copy.
+- Contact / chat-history sync (`POST /{phone_number_id}/smb_app_data`). One-shot and irreversible per onboarding, and there is nowhere to put the data yet.
+- One template in the catalogue (`promo_v1`). The machinery takes N; the LLM template-picker that would make N worth having isn't built.
