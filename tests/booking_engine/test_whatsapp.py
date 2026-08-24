@@ -32,21 +32,6 @@ class FakeSettings:
     meta_verify_token = "verify"
 
 
-@pytest.fixture(autouse=True)
-def _quota_out_of_the_way(monkeypatch):
-    """The plan quota is a DB read on every send path.
-
-    Autouse so the tests that aren't about it don't reach for a database; the
-    ones that are override these two with their own numbers.
-    """
-    async def _quota(shop_id):
-        return 10_000
-    async def _used(shop_id):
-        return 0
-    monkeypatch.setattr(wq, "monthly_quota", _quota)
-    monkeypatch.setattr(wq, "sent_this_month", _used)
-
-
 def _consenting(**over):
     row = {
         "id": uuid4(), "full_name": "Giulia", "phone": "+393331112222",
@@ -330,7 +315,7 @@ async def test_enqueue_counts_a_repeat_campaign_as_already_sent(monkeypatch):
 # ----------------------------------------------------------------- the drip
 
 def _patch_send_due(
-    monkeypatch, *, claimed, sender, customer, quota=10_000, sent_month=0,
+    monkeypatch, *, claimed, sender, customer,
     cooled=(),
 ):
     spy = {"sent": [], "suppressed": [], "failed": [], "deferred": [],
@@ -346,10 +331,6 @@ def _patch_send_due(
         return sender.get("_sent_today", 0)
     async def _recent(*, shop_id, customer_ids, hours):
         return {c for c in customer_ids if c in cooled}
-    async def _quota(shop_id):
-        return quota
-    async def _sent_month(shop_id):
-        return sent_month
     async def _customer(shop_id, customer_id):
         return customer
     async def _mark_sent(**kw):
@@ -368,8 +349,6 @@ def _patch_send_due(
     monkeypatch.setattr(wq, "get_sender", _get_sender)
     monkeypatch.setattr(wq, "sent_last_24h", _sent_24h)
     monkeypatch.setattr(wq, "recently_contacted", _recent)
-    monkeypatch.setattr(wq, "monthly_quota", _quota)
-    monkeypatch.setattr(wq, "sent_this_month", _sent_month)
     monkeypatch.setattr(sms_queries, "get_customer_for_send", _customer)
     monkeypatch.setattr(wq, "mark_sent", _mark_sent)
     monkeypatch.setattr(wq, "mark_suppressed", _mark_suppressed)
@@ -573,102 +552,33 @@ async def test_send_due_decodes_jsonb_variables_returned_as_text(monkeypatch):
 # ------------------------------------------------------------- plan quota
 
 @pytest.mark.asyncio
-async def test_enqueue_refuses_a_campaign_bigger_than_the_plan_allowance(monkeypatch):
-    """Told at draft time, not discovered as suppressed rows tomorrow."""
+async def test_enqueue_has_no_kairo_side_monthly_allowance(monkeypatch):
+    """The plan quota was removed on 2026-08-24 and must not come back.
+
+    Under the Meta Tech Provider model the salon's own card is on their own
+    WABA, so a Kairo-side ceiling recovers no cost of ours and only suppresses
+    the usage that makes the product stick. Meta's tier is the real limit, it
+    is enforced separately (effective_daily_cap), and it is one we can read.
+
+    A campaign far larger than any plan allowance ever was must queue.
+    """
     _patch_enqueue(monkeypatch)
 
-    async def quota(shop_id):
-        return 300
-    async def used(shop_id):
-        return 290
-    monkeypatch.setattr(wq, "monthly_quota", quota)
-    monkeypatch.setattr(wq, "sent_this_month", used)
-
-    result = await ws.enqueue_campaign(
-        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
-        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(11)],
-        settings=FakeSettings(),
-    )
-
-    assert result["error"] == "over_monthly_quota"
-    assert result["remaining"] == 10
-
-
-@pytest.mark.asyncio
-async def test_enqueue_allows_a_campaign_that_exactly_fits_the_allowance(monkeypatch):
-    """Off-by-one guard: 10 left must mean 10 sendable, not 9."""
-    _patch_enqueue(monkeypatch)
-
-    async def quota(shop_id):
-        return 300
-    async def used(shop_id):
-        return 290
     async def customer(shop_id, customer_id):
         return _consenting()
     async def enqueue(**kw):
         return uuid4()
-    monkeypatch.setattr(wq, "monthly_quota", quota)
-    monkeypatch.setattr(wq, "sent_this_month", used)
     monkeypatch.setattr(sms_queries, "get_customer_for_send", customer)
     monkeypatch.setattr(wq, "enqueue", enqueue)
 
     result = await ws.enqueue_campaign(
         shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
-        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(10)],
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(200)],
         settings=FakeSettings(),
     )
 
-    assert result["ok"] is True and result["queued"] == 10
-
-
-@pytest.mark.asyncio
-async def test_enqueue_refuses_when_the_shop_has_no_plan(monkeypatch):
-    """Fails closed: no plan row means quota 0, not unlimited."""
-    _patch_enqueue(monkeypatch)
-
-    async def quota(shop_id):
-        return 0
-    monkeypatch.setattr(wq, "monthly_quota", quota)
-
-    result = await ws.enqueue_campaign(
-        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
-        recipients=[{"customer_id": uuid4(), "variables": {}}],
-        settings=FakeSettings(),
-    )
-    assert result["error"] == "over_monthly_quota"
-
-
-@pytest.mark.asyncio
-async def test_send_due_suppresses_rather_than_defers_over_the_monthly_quota(monkeypatch):
-    """Unlike the daily cap, this does not clear in an hour — don't reschedule."""
-    spy = _patch_send_due(
-        monkeypatch, claimed=[_message()],
-        sender=_online_sender(), customer=_consenting(),
-        quota=300, sent_month=300,
-    )
-    _patch_meta_send(monkeypatch, _never_sends())
-
-    counts = await ws.send_due(settings=FakeSettings())
-
-    assert counts["suppressed"] == 1 and counts["deferred"] == 0
-    assert spy["suppressed"][0]["reason"] == "over_monthly_quota"
-
-
-@pytest.mark.asyncio
-async def test_send_due_stops_at_the_quota_mid_batch(monkeypatch):
-    """The allowance is decremented in-loop, not re-read per message."""
-    spy = _patch_send_due(
-        monkeypatch, claimed=[_message(), _message(), _message()],
-        sender=_online_sender(), customer=_consenting(),
-        quota=300, sent_month=298,
-    )
-    _patch_meta_send(monkeypatch, _ok_send())
-
-    counts = await ws.send_due(settings=FakeSettings())
-
-    assert counts["sent"] == 2
-    assert counts["suppressed"] == 1
-    assert spy["suppressed"][0]["reason"] == "over_monthly_quota"
+    assert result["ok"] is True
+    assert "over_monthly_quota" not in str(result)
 
 
 # ------------------------------------------------------------------ onboarding
@@ -1144,3 +1054,40 @@ async def test_complete_allows_more_once_access_verification_is_done(monkeypatch
         pin=None, settings=Verified(),
     )
     assert result["ok"] is True
+
+
+# ------------------------------------------------- marketing-only counting
+
+def test_owner_counters_and_the_cooldown_count_marketing_only():
+    """The change with no failure mode: nothing breaks, the numbers just lie.
+
+    A utility template (an appointment reminder) must not appear in the
+    owner's campaign counter, and must not block next week's promotion. This
+    asserts on the SQL text because the filter is pure SQL — there is nothing
+    to monkeypatch and no assertion a mocked DB could make.
+    """
+    import inspect
+    from booking_engine.db import whatsapp_queries as q
+
+    for fn in (q.sent_today, q.sent_this_month, q.recently_contacted):
+        source = inspect.getsource(fn)
+        assert "_MARKETING_JOIN" in source, (
+            f"{fn.__name__} counts every send, including reminders"
+        )
+
+    assert "category = 'MARKETING'" in q._MARKETING_JOIN
+    # Joined on the name, because migration 15 dropped content_sid.
+    assert "t.name = om.template_name" in q._MARKETING_JOIN
+
+
+def test_metas_tier_window_counts_every_business_initiated_message():
+    """The other half, and the one that must NOT be narrowed.
+
+    Meta's messaging-limit tier counts every business-initiated conversation,
+    utility included. Filtering this to marketing would let a salon send its
+    marketing allowance *on top of* its reminders and blow through the tier.
+    """
+    import inspect
+    from booking_engine.db import whatsapp_queries as q
+
+    assert "_MARKETING_JOIN" not in inspect.getsource(q.sent_last_24h)

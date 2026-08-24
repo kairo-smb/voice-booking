@@ -79,7 +79,7 @@ Errors (409): `not_started`, `code_exchange_failed`, `pin_required`, `meta_error
           "meta_tier": "TIER_1K", "meta_tier_daily": 1000,
           "recipient_cooldown_hours": 168,
           "offline_reason": null, "sent_today": 12, "sent_last_24h": 47,
-          "sent_this_month": 87, "monthly_quota": 150,
+          "sent_this_month": 87,
           "pricing": [{"kind": "marketing", "usd": 0.0691},
                       {"kind": "utility",   "usd": 0.0341},
                       {"kind": "service",   "usd": 0.0}],
@@ -89,15 +89,32 @@ Errors (409): `not_started`, `code_exchange_failed`, `pin_required`, `meta_error
 
 `status` is `not_started | pending_signup | verifying | online | offline | failed`. A salon can send only when `status == "online"` **and** the template is `approved`.
 
-`monthly_quota` and `pricing` are returned even for `not_started`: they're plan facts, not sender facts, and the webapp shows "what this would cost you" before onboarding begins.
+`pricing` is returned even for `not_started`: it is not a sender fact, and the webapp shows "what this would cost you" before onboarding begins.
 
-**Three different ceilings, don't conflate them.**
+**Two different ceilings, don't conflate them.**
 
 | Field | Whose limit | What happens at it |
 |---|---|---|
 | `meta_tier_daily` | **Meta's** volume tier, per *rolling* 24h | hard: never crossed, by construction |
 | `daily_cap` | the binding rate = `min(meta_tier_daily, configured_daily_cap)` | a campaign takes more days |
-| `monthly_quota` | what the salon **bought** (`subscription_plans.whatsapp_monthly_messages`, 0 with no plan) | the campaign is refused |
+
+**`monthly_quota` was removed on 2026-08-24.** The plan allowance added on
+2026-08-22 is gone from the payload and from both send gates: as a Meta Tech
+Provider we have no credit line to share, so the salon's own card is on their
+own WABA and Meta bills them directly. A Kairo-side ceiling recovered no cost
+of ours and only suppressed the usage that makes the product stick. Meta's tier
+is the real limit and we can read it.
+
+**Counters are marketing-only; the tier window is not.** `sent_today`,
+`sent_this_month` and `recently_contacted` (the 131049 cooldown) join
+`whatsapp.templates` on `(shop_id, name)` and count `category = 'MARKETING'` —
+an appointment reminder is not a promotion, must not appear in the owner's
+campaign counter, and must not block next week's offer. `sent_last_24h`
+deliberately counts **everything**, because Meta's tier is measured in
+business-initiated conversations including utility; narrowing it would let a
+salon send its marketing on top of its reminders and blow through the tier.
+This split has no failure mode — nothing breaks when it is wrong, the numbers
+are just silently incorrect — so two tests in `test_whatsapp.py` pin it.
 
 `daily_cap` is deliberately the *effective* number, not the raw column — showing our 5000 when Meta allows 250 would promise throughput we refuse to deliver. The raw value is `configured_daily_cap`. See [Meta's limits are a floor](#metas-limits-are-a-floor-nothing-may-cross).
 
@@ -144,9 +161,9 @@ Returns immediately with the schedule; nothing is sent inline:
 
 There is **no `over_daily_cap` rejection any more**: exceeding a day's allowance is a longer schedule, not an error. Keeping it would have made bulk impossible, and piling everything onto today just hands `send_due` hundreds of rows to defer by an hour, repeatedly, until nobody can read the queue.
 
-Errors (409): `sender_not_online`, `unknown_template`, `template_pending`/`template_rejected`/…, `over_monthly_quota`.
+Errors (409): `sender_not_online`, `unknown_template`, `template_pending`/`template_rejected`/…, `sender_has_no_allowance`.
 
-**Only the code crosses the wire.** `enqueue_campaign` returns richer refusals — `over_monthly_quota` carries `monthly_quota`, `sent_this_month` and `remaining` — but the route flattens them into `HTTPException(detail=<code>)`. The webapp reads the numbers from `GET /whatsapp/status/{shop_id}` instead.
+**Only the code crosses the wire.** `enqueue_campaign` returns richer refusals than the route can carry — `HTTPException(detail=<code>)` flattens them to the bare string. The webapp translates it (`mapWaError`) and reads any numbers from `GET /whatsapp/status/{shop_id}` instead.
 
 ### `GET /whatsapp/campaigns/{shop_id}/{campaign_key}`
 
@@ -268,7 +285,7 @@ New `suppressed_reason` values: `recently_contacted`,
 `POST /messaging/tick` ([Number Provisioning](number-provisioning.md)) has two WhatsApp stages, each independently wrapped so one failure can't suppress the others:
 
 - `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver.
-- `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed` (`no_consent`, `opted_out`, `over_monthly_quota`), `failed`, `deferred` (over daily cap, retried in an hour), `rate_capped` (Meta 131049, retried in 24h), `requeued` (claimed but never sent, recovered from a crashed tick).
+- `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed` (`no_consent`, `opted_out`, `recently_contacted`), `failed`, `deferred` (over daily cap, retried in an hour), `rate_capped` (Meta 131049, retried in 24h), `requeued` (claimed but never sent, recovered from a crashed tick).
 
 ---
 

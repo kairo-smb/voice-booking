@@ -146,15 +146,11 @@ async def enqueue_campaign(
     if cap <= 0:
         return {"ok": False, "error": "sender_has_no_allowance"}
 
-    # The plan's monthly allowance. Checked here as well as at send time so the
-    # owner is told "you have 30 left of 300" while the campaign is still a
-    # draft, rather than discovering it as 200 suppressed rows tomorrow.
-    quota = await wq.monthly_quota(shop_id)
-    used = await wq.sent_this_month(shop_id)
-    if len(recipients) > quota - used:
-        return {"ok": False, "error": "over_monthly_quota",
-                "monthly_quota": quota, "sent_this_month": used,
-                "remaining": max(0, quota - used)}
+    # No Kairo-side monthly allowance. As a Meta Tech Provider we have no
+    # credit line to share, so Meta bills the salon's own card directly — a
+    # ceiling here would protect no margin of ours and only suppress the usage
+    # that makes the product stick. Meta's tier (above) is the real limit, and
+    # it is one we can read. See the 2026-08-24 campaigns spec §7.3.
 
     when = spread(
         len(recipients),
@@ -238,7 +234,6 @@ async def send_due(*, settings) -> dict:
 
     senders: dict[UUID, dict] = {}
     remaining: dict[UUID, int] = {}
-    remaining_month: dict[UUID, int] = {}
     # Clamped, not trusted: below MAX_SENDS_PER_MINUTE no single number can be
     # driven past even the slowest per-number throughput Meta grants (20 mps,
     # coexistence), however the claimed batch happens to fall across shops.
@@ -257,20 +252,7 @@ async def send_due(*, settings) -> dict:
                 0, meta_limits.effective_daily_cap(sender or {})
                 - await wq.sent_last_24h(shop_id)
             )
-            remaining_month[shop_id] = max(
-                0, await wq.monthly_quota(shop_id) - await wq.sent_this_month(shop_id)
-            )
         sender = senders[shop_id]
-
-        # Out of plan allowance is suppressed, not deferred: unlike the daily
-        # cap it will not clear in an hour, and a row that keeps rescheduling
-        # itself until the 1st of next month is a queue nobody can read.
-        if remaining_month[shop_id] <= 0:
-            await wq.mark_suppressed(
-                message_id=msg["id"], reason="over_monthly_quota"
-            )
-            counts["suppressed"] += 1
-            continue
 
         if remaining[shop_id] <= 0:
             # Over cap: later, not never. Dropping it would silently lose a
@@ -358,7 +340,6 @@ async def send_due(*, settings) -> dict:
             price_usd=_ESTIMATED_USD_PER_MESSAGE, credits=None,
         )
         remaining[shop_id] -= 1
-        remaining_month[shop_id] -= 1
         counts["sent"] += 1
 
     return counts

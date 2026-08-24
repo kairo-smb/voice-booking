@@ -266,16 +266,40 @@ async def sent_last_24h(shop_id: UUID) -> int:
     return int(row["n"]) if row else 0
 
 
+# Marketing-only counting.
+#
+# **The distinction that must not be collapsed:** Meta's messaging-limit tier
+# counts *every* business-initiated conversation, utility templates included —
+# so `sent_last_24h`, which enforces that ceiling, deliberately does NOT use
+# this filter. Everything below is either an owner-facing counter or the
+# per-recipient marketing cooldown, and for those a reminder is not a
+# promotion: an appointment confirmation must never consume the campaign
+# counter, nor block next week's offer.
+#
+# Nothing fails when this is wrong. The numbers are just quietly incorrect,
+# which is why it is spelled out here rather than inlined three times.
+# Joined on (shop_id, name): migration 15 dropped content_sid, and Meta
+# addresses a template by name + language, so the name is the load-bearing
+# column. Every salon's copy of the catalogue shares the same name, hence the
+# shop_id in the join.
+_MARKETING_JOIN = """
+    JOIN whatsapp.templates t
+      ON t.shop_id = om.shop_id AND t.name = om.template_name
+     AND t.category = 'MARKETING'
+"""
+
+
 async def sent_today(shop_id: UUID) -> int:
-    """Messages that left today, for Kairo's own drip rate and the UI counter.
+    """Marketing messages that left today, for the owner's counter.
 
     Calendar-day on purpose — "quanti ne ho mandati oggi" is what the owner
     means. Never use this for a Meta ceiling; see `sent_last_24h`.
     """
     row = await execute_one(
-        """
-        SELECT count(*) AS n FROM whatsapp.outbound_messages
-        WHERE shop_id = $1 AND sent_at >= date_trunc('day', now())
+        f"""
+        SELECT count(*) AS n FROM whatsapp.outbound_messages om
+        {_MARKETING_JOIN}
+        WHERE om.shop_id = $1 AND om.sent_at >= date_trunc('day', now())
         """,
         shop_id,
     )
@@ -295,11 +319,12 @@ async def recently_contacted(
     if not customer_ids:
         return set()
     rows = await execute(
-        """
-        SELECT DISTINCT customer_id FROM whatsapp.outbound_messages
-        WHERE shop_id = $1
-          AND customer_id = ANY($2::uuid[])
-          AND sent_at >= now() - make_interval(hours => $3)
+        f"""
+        SELECT DISTINCT om.customer_id FROM whatsapp.outbound_messages om
+        {_MARKETING_JOIN}
+        WHERE om.shop_id = $1
+          AND om.customer_id = ANY($2::uuid[])
+          AND om.sent_at >= now() - make_interval(hours => $3)
         """,
         shop_id, customer_ids, hours,
     )
@@ -323,36 +348,16 @@ async def onboarded_last_7_days() -> int:
 
 
 async def sent_this_month(shop_id: UUID) -> int:
-    """Messages that actually left this calendar month, for the plan quota.
+    """Marketing messages that left this calendar month, for the owner's counter.
 
     Counts `sent_at`, not `created_at`: a queued row that never went out (no
-    consent, cancelled, out of credit) must not consume the shop's allowance.
+    consent, cancelled, cooled off) is not something the owner sent.
     """
     row = await execute_one(
-        """
-        SELECT count(*) AS n FROM whatsapp.outbound_messages
-        WHERE shop_id = $1 AND sent_at >= date_trunc('month', now())
-        """,
-        shop_id,
-    )
-    return int(row["n"]) if row else 0
-
-
-async def monthly_quota(shop_id: UUID) -> int:
-    """How many WhatsApp messages this shop's plan allows per month.
-
-    The number lives on `business_app_core.subscription_plans` (webapp-owned,
-    migration 54) so support can change an allowance with an UPDATE instead of
-    a deploy. Fails closed: a shop with no plan, or a plan row predating the
-    column's backfill, gets 0 and sends nothing — matching the §5.3 rule that
-    messaging requires an active paid plan.
-    """
-    row = await execute_one(
-        """
-        SELECT COALESCE(p.whatsapp_monthly_messages, 0) AS n
-        FROM business_app_core.shops s
-        JOIN business_app_core.subscription_plans p ON p.id = s.plan_id
-        WHERE s.id = $1
+        f"""
+        SELECT count(*) AS n FROM whatsapp.outbound_messages om
+        {_MARKETING_JOIN}
+        WHERE om.shop_id = $1 AND om.sent_at >= date_trunc('month', now())
         """,
         shop_id,
     )

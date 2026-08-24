@@ -131,12 +131,11 @@ async def status(
     """Everything the webapp needs to render the onboarding/waiting state."""
     sender = await wq.get_sender(shop_id)
     if not sender:
-        # The quota and the price list are plan facts, not sender facts: the
-        # webapp shows "what this would cost you" before onboarding starts.
+        # The price list is not a sender fact: the webapp shows "what this
+        # would cost you" before onboarding starts.
         return {"data": {
             "status": "not_started", "templates": [],
             "sent_this_month": 0,
-            "monthly_quota": await wq.monthly_quota(shop_id),
             "pricing": price_list(),
             "signup": onboarding.signup_config(settings),
         }}
@@ -168,8 +167,9 @@ async def status(
         "offline_reason": sender["offline_reason"],
         "sent_today": await wq.sent_today(shop_id),
         "sent_last_24h": await wq.sent_last_24h(shop_id),
+        # Marketing only, both of them: an appointment reminder is not a
+        # promotion and must not show up in the owner's campaign counter.
         "sent_this_month": await wq.sent_this_month(shop_id),
-        "monthly_quota": await wq.monthly_quota(shop_id),
         "pricing": price_list(),
         "templates": templates,
         "signup": onboarding.signup_config(settings),

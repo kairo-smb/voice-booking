@@ -145,16 +145,21 @@ Added 2026-08-21 (`14_whatsapp_schema.sql`), reshaped for Meta Cloud API on
 work added and left unused — is now written, by
 `token_basket_queries.try_debit_for_message`.
 
-**One read reaches out of this schema entirely.** `whatsapp_queries.monthly_quota`
-joins `business_app_core.shops → subscription_plans` for
-`whatsapp_monthly_messages` (webapp migration 54, added 2026-08-22): the plan's
-monthly send allowance, enforced at enqueue and again at send. It is a
-webapp-owned column — this repo reads it and never writes it, and the column
-exists before we query it because `migrate-all.yml` runs the parent's
-migrations first. A shop with no plan joins to nothing and gets 0, which is the
-intended answer, not a missing-data case. Counted against it:
-`sent_this_month`, which counts `sent_at` — a message that never left doesn't
-spend an allowance.
+**No read reaches out of this schema for a limit any more (2026-08-24).**
+`whatsapp_queries.monthly_quota` used to join
+`business_app_core.shops → subscription_plans` for `whatsapp_monthly_messages`
+(webapp migration 54). It is deleted: Meta bills the salon's own card under the
+Tech Provider model, so a Kairo-side ceiling recovered no cost of ours. The
+webapp column survives, unread — dropping it would be destructive and it is
+harmless. Meta's own tier (`senders.messaging_limit` → `meta_limits`) is now
+the only volume ceiling, and it is one this repo already reads.
+
+**`sent_today`, `sent_this_month` and `recently_contacted` count marketing
+only**, joining `whatsapp.templates` on `(shop_id, name)` for
+`category = 'MARKETING'`. `sent_last_24h` counts everything, because Meta's
+tier is measured in business-initiated conversations including utility. Getting
+this backwards breaks nothing and silently corrupts every number, so the split
+is pinned by tests rather than left to a comment.
 
 ## Cross-schema references
 
