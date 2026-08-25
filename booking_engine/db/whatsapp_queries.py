@@ -482,6 +482,78 @@ async def campaign_progress(*, shop_id: UUID, campaign_key: str) -> dict:
     return dict(row) if row else {}
 
 
+async def customer_campaign_messages(*, shop_id: UUID, customer_id: UUID) -> list[dict]:
+    """Everything a customer was part of: every message actually sent to them,
+    plus the campaigns they were assigned to but never received (holdout arm).
+
+    This is the read behind the webapp's Anagrafiche → "Campagne" tab, which
+    doubles as the GDPR subject-access artifact: "what did you send me, and
+    when". The goal lives in market_intel.campaigns — the campaign data owner —
+    and is linked through campaign_key = campaign id, which is the campaign_key
+    the webapp passes when it enqueues a campaign. Marketing-engine's schema is
+    a read here, exactly as this repo already reads business_app_core.
+    """
+    messages = await execute(
+        """
+        SELECT
+          om.id AS message_id,
+          om.campaign_key,
+          om.preview,
+          om.status AS delivery_status,
+          om.sent_at,
+          om.created_at,
+          om.suppressed_reason,
+          c.goal,
+          c.personalization,
+          'send' AS arm
+        FROM whatsapp.outbound_messages om
+        LEFT JOIN market_intel.campaigns c
+          ON c.shop_id = om.shop_id AND c.id::text = om.campaign_key
+        WHERE om.shop_id = $1 AND om.customer_id = $2
+        """,
+        shop_id, customer_id,
+    )
+    holdout = await execute(
+        """
+        SELECT
+          NULL::uuid AS message_id,
+          cr.campaign_id::text AS campaign_key,
+          cr.preview,
+          NULL::text AS delivery_status,
+          NULL::timestamptz AS sent_at,
+          c.created_at,
+          NULL::text AS suppressed_reason,
+          c.goal,
+          c.personalization,
+          cr.arm
+        FROM market_intel.campaign_recipients cr
+        JOIN market_intel.campaigns c ON c.id = cr.campaign_id
+        WHERE cr.customer_id = $1 AND c.shop_id = $2 AND cr.arm = 'holdout'
+        """,
+        customer_id, shop_id,
+    )
+    rows = messages + holdout
+    rows.sort(key=lambda r: (r.get("created_at") or ""), reverse=True)
+    return rows
+
+
+async def record_inbound(*, shop_id: UUID, from_phone: str, body: str, message_type: str) -> None:
+    """Persist one inbound reply.
+
+    The webhook previously logged and discarded these; campaign measurement
+    (design §9, "replies within 72h") needs them as a queryable signal. A reply
+    is linked back to the message it answers by phone — from_phone of the reply
+    equals to_phone of the sent message — so no sender identity is needed here.
+    """
+    await execute_void(
+        """
+        INSERT INTO whatsapp.inbound_messages (shop_id, from_phone, body, message_type)
+        VALUES ($1, $2, $3, $4)
+        """,
+        shop_id, from_phone, body, message_type,
+    )
+
+
 async def withdraw_marketing_consent(customer_id: UUID) -> None:
     """Write a WhatsApp opt-out back to the shared consent column.
 

@@ -6,6 +6,39 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-08-25 — Per-customer history: campaign_key is the market_intel campaign id
+
+**Decision:** the WhatsApp campaigns feature (webapp design
+`2026-08-24-whatsapp-campaigns-design.md`) links what was *sent* here to what
+was *decided* in marketing-engine by the text `campaign_key`. When the webapp
+enqueues an AI-built campaign it passes `campaign_key = market_intel.campaigns.id`,
+so `whatsapp.outbound_messages` joins back to `market_intel.campaigns` on
+`id::text = campaign_key` for the goal. Hand-made keys from the older
+Touchpoint tile (`bulk_...`) have no `market_intel` row and come back with a
+null goal — accepted: the per-customer tab is about AI campaigns.
+
+**New read:** `GET /whatsapp/messages/{shop_id}?customer_id=` — the first
+reader of `outbound_messages` (previously flagged as "no reader" in
+providers.md). It returns every message sent to a person plus the campaigns
+they were assigned to but never received (the holdout arm, from
+`market_intel.campaign_recipients`), and doubles as the GDPR subject-access
+artifact. Reads `market_intel` across schemas — the same shared-DB pattern as
+this repo's existing `business_app_core` reads, and `market_intel` already
+reads this repo's `whatsapp.outbound_messages` for the audience cooldown, so
+the two schemas are already mutually dependent in the read direction.
+
+**Second signal needed, second change:** campaign measurement's "replies within
+72h" had nothing to read — the inbound webhook logged and discarded replies.
+Migration `17_whatsapp_inbound.sql` adds `whatsapp.inbound_messages` and the
+webhook persists each reply there. A reply is matched back to the message it
+answers by phone (`from_phone` == the sent message's `to_phone`), no sender
+identity required. Still nothing *answers* the reply — the 24h session window
+it opens stays a future phase.
+
+**Verification:** full non-`live_db` suite green (469 passed, 15 skipped).
+
+---
+
 ## 2026-08-24 — Meta's limits become a floor nothing may cross; our counters sit on top
 
 **Follow-up to the migration entry below, same day.** That change moved

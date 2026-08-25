@@ -240,6 +240,20 @@ async def cancel_campaign(
 
 # --------------------------------------------------------------------- webhook
 
+@router.get("/messages/{shop_id}")
+async def messages(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+    customer_id: UUID = Query(...),
+) -> dict:
+    """Per-customer history: every message sent to this person, plus the
+    campaigns they were holdout of. Feeds the webapp's Anagrafiche "Campagne"
+    tab, which doubles as the GDPR subject-access artifact. Owner-only in the
+    webapp (the /whatsapp prefix is in OWNER_ONLY_PREFIXES)."""
+    rows = await wq.customer_campaign_messages(shop_id=shop_id, customer_id=customer_id)
+    return {"data": rows}
+
+
 @router.get("/webhook")
 async def verify_webhook(
     settings: Annotated[Settings, Depends(_get_settings)],
@@ -335,8 +349,16 @@ async def _handle_change(sender: dict, change: dict) -> None:
             )
 
     for message in value.get("messages") or []:
-        # A reply opens Meta's 24h session window, inside which free-form
-        # messages are allowed. Nothing uses that yet.
+        # A reply opens Meta's 24h session window. Persisted (not just logged)
+        # because campaign measurement needs "did this recipient reply within
+        # 72h" as a queryable signal; a reply is matched back to the message it
+        # answers by phone number.
+        await wq.record_inbound(
+            shop_id=sender["shop_id"],
+            from_phone=str(message.get("from") or ""),
+            body=str(message.get("text", {}).get("body") if isinstance(message.get("text"), dict) else (message.get("text") or "")),
+            message_type=str(message.get("type") or "text"),
+        )
         logger.info(
             "whatsapp.inbound shop=%s from=%s type=%s",
             sender["shop_id"], message.get("from"), message.get("type"),

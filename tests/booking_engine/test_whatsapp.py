@@ -1091,3 +1091,39 @@ def test_metas_tier_window_counts_every_business_initiated_message():
     from booking_engine.db import whatsapp_queries as q
 
     assert "_MARKETING_JOIN" not in inspect.getsource(q.sent_last_24h)
+
+
+@pytest.mark.asyncio
+async def test_webhook_persists_inbound_replies(monkeypatch):
+    """Campaign measurement needs "did this recipient reply within 72h" as a
+    queryable signal, so the webhook must store a reply, not just log it.
+
+    The reply is matched back to the message it answers by phone: the reply's
+    `from_phone` equals the sent message's `to_phone`. Only the phone, body and
+    shop travel — no sender identity is required or expected here.
+    """
+    from booking_engine.api.routes import whatsapp as wa_routes
+
+    captured = {}
+    async def _fake_record_inbound(**kw):
+        captured.update(kw)
+    monkeypatch.setattr(wa_routes.wq, "record_inbound", _fake_record_inbound)
+
+    await wa_routes._handle_change(
+        sender={"shop_id": SHOP},
+        change={
+            "field": "messages",
+            "value": {
+                "messages": [{
+                    "from": "+393331112222",
+                    "type": "text",
+                    "text": {"body": "Certo, prenoto per giovedì!"},
+                }],
+            },
+        },
+    )
+
+    assert captured["shop_id"] == SHOP
+    assert captured["from_phone"] == "+393331112222"
+    assert captured["body"] == "Certo, prenoto per giovedì!"
+    assert captured["message_type"] == "text"

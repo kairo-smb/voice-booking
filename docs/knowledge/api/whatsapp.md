@@ -10,7 +10,7 @@
 
 | Routes | Scheme |
 |---|---|
-| `/whatsapp/onboarding/*`, `/whatsapp/status/*`, `/whatsapp/templates/*`, `/whatsapp/campaigns*` | Control-plane bearer (`CONTROL_PLANE_SECRET`) — the webapp is the only caller |
+| `/whatsapp/onboarding/*`, `/whatsapp/status/*`, `/whatsapp/templates/*`, `/whatsapp/campaigns*`, `/whatsapp/messages/*` | Control-plane bearer (`CONTROL_PLANE_SECRET`) — the webapp is the only caller |
 | `GET /whatsapp/webhook` | Meta's handshake: `hub.verify_token` must equal `META_VERIFY_TOKEN` |
 | `POST /whatsapp/webhook` | `X-Hub-Signature-256`, HMAC-SHA256 of the **raw body** with `META_APP_SECRET` |
 
@@ -173,6 +173,24 @@ Counts per status plus `last_due_at`. A drip that runs for days is otherwise inv
 
 Cancels whatever hasn't gone out (`queued`/`sending` → `cancelled`). Already-sent rows are untouched history.
 
+### `GET /whatsapp/messages/{shop_id}?customer_id=`
+
+Everything one customer was part of: every `outbound_messages` row actually
+sent to them **plus** the campaigns they were assigned to but never received
+(the holdout arm). The webapp's Anagrafiche → "Campagne" tab renders this, and
+it doubles as the GDPR subject-access artifact — "what did you send me, and
+when".
+
+The campaign `goal` and `personalization` come from `market_intel.campaigns`,
+linked through `outbound_messages.campaign_key = campaign id` — the campaign_key
+the webapp passes when it enqueues a campaign built by the AI flow. Campaigns
+enqueued with a hand-made key (the older Touchpoint tile's `bulk_...`) have no
+`market_intel` row and come back with a null goal.
+
+Each row: `message_id` (null for holdout), `campaign_key`, `goal`,
+`personalization`, `preview` (the rendered message), `delivery_status`,
+`sent_at`, `suppressed_reason`, `arm` (`send`/`holdout`), `created_at`.
+
 ---
 
 ## `POST /whatsapp/webhook`
@@ -184,7 +202,7 @@ Always answers **200** on a genuine request. Meta retries on anything else and d
 | `field` | Effect |
 |---|---|
 | `messages` → `statuses[]` | `sent`/`delivered`/`read`/`failed` written to `outbound_messages` by `wamid` |
-| `messages` → `messages[]` | Inbound reply: logged and discarded |
+| `messages` → `messages[]` | Inbound reply persisted to `whatsapp.inbound_messages` (migration 17) — campaign measurement ("replied within 72h", design §9) reads it; a reply is matched back by phone (`from_phone` == the sent message's `to_phone`) |
 | `message_template_status_update` | Meta's verdict, applied to `(shop_id, name)` — **never by name alone**, since every salon's copy carries the same name |
 
 Template verdicts arrive here within minutes instead of on the next hourly tick. The tick's poll survives as a **reconciler**: a missed webhook would otherwise leave a template `pending` forever, blocking every send for that shop and looking like nothing at all.
@@ -291,6 +309,6 @@ New `suppressed_reason` values: `recently_contacted`,
 
 ## Out of scope
 
-- Inbound replies are logged and discarded. A reply opens Meta's 24h session window, inside which free-form messages *are* allowed — the obvious next phase, and the only path to genuinely free-form personalised copy.
+- Inbound replies are **persisted** (migration 17) and read by campaign measurement, but nothing answers them. A reply opens Meta's 24h session window, inside which free-form messages *are* allowed — the obvious next phase, and the only path to genuinely free-form personalised copy.
 - Contact / chat-history sync (`POST /{phone_number_id}/smb_app_data`). One-shot and irreversible per onboarding, and there is nowhere to put the data yet.
 - One template in the catalogue (`promo_v1`). The machinery takes N; the LLM template-picker that would make N worth having isn't built.
