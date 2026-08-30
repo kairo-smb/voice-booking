@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     # the shared string Meta echoes back when it first registers the webhook.
     meta_app_secret: str = ""
     meta_verify_token: str = ""
+    # Kairo's own WABA (scripts/kairo_waba.py sets it up) — templates are
+    # created here by hand and reviewed by Meta before ensure_templates will
+    # push them into any customer's WABA. Empty means "not configured yet",
+    # which fails closed: nothing propagates until these are set.
+    meta_kairo_waba_id: str = ""
+    meta_kairo_token: str = ""
     # Marketing sends are dripped across this local window (Europe/Rome) so a
     # salon's promotions arrive during opening hours, not at 03:00.
     whatsapp_send_start_hour: int = 9

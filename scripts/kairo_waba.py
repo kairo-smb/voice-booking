@@ -30,7 +30,7 @@ import httpx
 
 # ponytail: pinned, not discovered. Graph is versioned and silently changes
 # shape across versions; bump this deliberately when Meta's changelog says so.
-GRAPH = "https://graph.facebook.com/v25.0"
+GRAPH = "https://graph.facebook.com/v26.0"
 
 _CODE = re.compile(r"\b(\d{3})[- ]?(\d{3})\b")
 

@@ -30,6 +30,8 @@ class FakeSettings:
     meta_config_id = "cfg"
     meta_solution_id = "sol"
     meta_verify_token = "verify"
+    meta_kairo_waba_id = "KAIRO_WABA"
+    meta_kairo_token = "kairo-token"
 
 
 def _consenting(**over):
@@ -619,11 +621,15 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
     async def _create_template(**kw):
         calls.setdefault("create_template", []).append(kw)
         return "TPL1", "pending"
+    async def _fetch_template(**kw):
+        calls.setdefault("fetch_template", []).append(kw)
+        return meta.TemplateStatus(status="approved", rejection_reason=None)
     monkeypatch.setattr(meta, "exchange_code", _exchange)
     monkeypatch.setattr(meta, "subscribe_app", _subscribe)
     monkeypatch.setattr(meta, "register_phone_number", _register)
     monkeypatch.setattr(meta, "get_phone_number", _number)
     monkeypatch.setattr(meta, "create_template", _create_template)
+    monkeypatch.setattr(meta, "fetch_template", _fetch_template)
     return calls
 
 
@@ -770,6 +776,49 @@ async def test_ensure_templates_survives_one_rejected_template(monkeypatch):
     assert result["created"] == 0
     assert set(result["failed"]) == set(wt.CATALOGUE)
     del calls
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_skips_a_template_not_yet_approved_on_kairo_waba(monkeypatch):
+    """Test on Kairo's own WABA first; a customer WABA only sees what passed."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+
+    async def _pending(**kw):
+        return meta.TemplateStatus(status="pending", rejection_reason=None)
+    monkeypatch.setattr(meta, "fetch_template", _pending)
+
+    result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
+
+    assert result["created"] == 0
+    assert set(result["not_ready"]) == set(wt.CATALOGUE)
+    assert "create_template" not in calls
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_fails_closed_without_kairo_waba_configured(monkeypatch):
+    """No Kairo WABA set up yet means nothing propagates — not "propagate unchecked"."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+
+    class NoKairoWaba(FakeSettings):
+        meta_kairo_waba_id = ""
+        meta_kairo_token = ""
+
+    result = await wo.ensure_templates(shop_id=SHOP, settings=NoKairoWaba())
+
+    assert result["created"] == 0
+    assert set(result["not_ready"]) == set(wt.CATALOGUE)
+    assert "create_template" not in calls
+    assert "fetch_template" not in calls
 
 
 def test_signup_config_asks_meta_for_the_coexistence_branch():

@@ -200,16 +200,37 @@ async def ensure_templates(*, shop_id: UUID, settings) -> dict:
     own is closed to it — and the reason the whole channel moved to Meta
     direct. Already-created templates are skipped: Meta blocks reusing a
     deleted template's name for 30 days, so resubmitting is not free.
+
+    **Gated on Kairo's own copy being approved first.** A template is created
+    by hand on Kairo's WABA (`scripts/kairo_waba.py push-templates`) and
+    reviewed there before this function will push it to any salon — a
+    rejection is a Meta judgment on the *content*, identical whatever WABA it's
+    submitted to, so testing on one WABA before N customer WABAs avoids
+    burning the same rejection N times (and the quality-rating hit that comes
+    with it). Fails closed: no `meta_kairo_waba_id`/`meta_kairo_token`
+    configured means nothing propagates, not "propagate unchecked."
     """
     row = await wq.get_sender(shop_id)
     if not row or not row.get("waba_id") or not row.get("access_token"):
         return {"ok": False, "error": "not_started"}
 
-    created, failed = 0, []
+    created, failed, not_ready = 0, [], []
     for key, tpl in CATALOGUE.items():
         if await wq.get_template(shop_id, key):
             continue
         name = template_name(key)
+
+        if not settings.meta_kairo_waba_id or not settings.meta_kairo_token:
+            not_ready.append(key)
+            continue
+        kairo_verdict = await meta.fetch_template(
+            waba_id=settings.meta_kairo_waba_id, name=name,
+            token=settings.meta_kairo_token,
+        )
+        if not kairo_verdict or kairo_verdict.status != "approved":
+            not_ready.append(key)
+            continue
+
         try:
             meta_id, status = await meta.create_template(
                 waba_id=row["waba_id"], token=row["access_token"],
@@ -229,7 +250,7 @@ async def ensure_templates(*, shop_id: UUID, settings) -> dict:
             variable_count=tpl.variables,
         )
         created += 1
-    return {"ok": True, "created": created, "failed": failed}
+    return {"ok": True, "created": created, "failed": failed, "not_ready": not_ready}
 
 
 async def sweep(*, settings) -> dict:

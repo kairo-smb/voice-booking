@@ -23,7 +23,7 @@ from httpx import AsyncClient, HTTPStatusError
 
 # ponytail: pinned, not discovered. Graph is versioned and changes shape across
 # versions; bump deliberately when Meta's changelog says to.
-GRAPH = "https://graph.facebook.com/v25.0"
+GRAPH = "https://graph.facebook.com/v26.0"
 _TIMEOUT = 30.0
 
 

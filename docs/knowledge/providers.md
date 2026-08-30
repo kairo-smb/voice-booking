@@ -108,10 +108,12 @@ product limit, not cost recovery. **SMS is unchanged and still debits 2×.**
 served to the webapp so Embedded Signup has one source of truth),
 `META_APP_SECRET` (verifies `X-Hub-Signature-256` *and* signs the code
 exchange), `META_VERIFY_TOKEN` (webhook handshake),
+`META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN` (Kairo's own WABA — the template
+approval gate reads these; unset means `ensure_templates` propagates nothing),
 `WHATSAPP_SEND_START_HOUR`/`WHATSAPP_SEND_END_HOUR` (default 9/20,
 Europe/Rome), `WHATSAPP_SENDS_PER_MINUTE` (default 60).
 
-**The Graph calls, in the order onboarding makes them** (all `v25.0`, pinned —
+**The Graph calls, in the order onboarding makes them** (all `v26.0`, pinned —
 Graph changes shape across versions):
 
 | What | Endpoint |
@@ -120,6 +122,7 @@ Graph changes shape across versions):
 | Subscribe our app to their WABA | `POST /{waba_id}/subscribed_apps` |
 | Register the number (**`source='new'` only**) | `POST /{phone_number_id}/register` `{messaging_product, pin}` |
 | Confirm coexistence | `GET /{phone_number_id}?fields=platform_type,is_on_biz_app` |
+| Check Kairo's own copy is approved (gate, before injecting) | `GET /{kairo_waba_id}/message_templates?name=…` |
 | Inject a template | `POST /{waba_id}/message_templates` |
 | Template verdict (reconciler) | `GET /{waba_id}/message_templates?name=…` |
 | Send | `POST /{phone_number_id}/messages` `{type: "template", template: {...}}` |
@@ -139,6 +142,11 @@ Graph changes shape across versions):
   salon's WABA — the call Twilio structurally could not make. Meta blocks
   reusing a deleted template's name for 30 days, so `ensure_templates` skips
   rather than recreates.
+- **A rejection is content, not per-WABA luck.** `ensure_templates` only
+  pushes a catalogue entry into a salon's WABA once the same-named template is
+  `approved` on Kairo's own WABA (`scripts/kairo_waba.py push-templates`,
+  reviewed by hand). One rejection there is cheaper than N of them, and avoids
+  the quality-rating hit of rejecting on every salon's WABA independently.
 - **Messaging limit tiers.** An unverified WABA is capped at 250
   business-initiated conversations per 24h — 50/day/salon sits well inside it,
   which is why Meta Business Verification is *not* a prerequisite for a

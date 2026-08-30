@@ -126,7 +126,9 @@ are just silently incorrect — so two tests in `test_whatsapp.py` pin it.
 
 Re-runs template injection — after a rejection, or after the catalogue (`services/messaging/whatsapp_templates.py`) gains an entry. Already-created templates are skipped: Meta blocks reusing a deleted template's name for 30 days.
 
-Returns `{"created": N, "failed": ["key", …]}`. One rejected template never aborts the rest of the catalogue.
+**Gated on Kairo's own WABA.** A template is created by hand on Kairo's own WABA first (`scripts/kairo_waba.py push-templates`, then `scripts/kairo_waba.py templates` to watch it move to `approved`) — this endpoint only pushes a catalogue entry into a *customer's* WABA once that same template is `approved` there, checked live via `GET {waba_id}/message_templates?name=...`. Rejection is a Meta judgment on the content, identical on every WABA, so this avoids burning the same rejection (and its quality-rating hit) once per salon. Requires `META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN`; unset means nothing propagates, not "propagate unchecked."
+
+Returns `{"created": N, "failed": ["key", …], "not_ready": ["key", …]}`. `not_ready` is not approved on Kairo's WABA yet (or Kairo's WABA isn't configured) — expected right after adding a new catalogue entry, before you've pushed and gotten it approved on Kairo's own WABA. One rejected template never aborts the rest of the catalogue.
 
 Templates carry the **same name in every salon's WABA** (`kairo_promo_v1`): the catalogue is Kairo's, Meta scopes names per-WABA, and a per-shop name would make "is promo_v1 approved for this salon?" unanswerable without a lookup.
 

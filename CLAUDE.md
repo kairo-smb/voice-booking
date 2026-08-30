@@ -6,6 +6,69 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-08-30 — Template propagation gated on Kairo's own WABA approving it first
+
+**Decision:** `ensure_templates` (`services/messaging/whatsapp_onboarding.py`)
+no longer pushes a catalogue entry into a salon's WABA unconditionally. It now
+checks, live via Graph, that the same-named template is `approved` on **Kairo's
+own WABA** first — the one `scripts/kairo_waba.py push-templates` submits to
+by hand, for App Review evidence. Two new settings,
+`META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN`; unset means the gate fails closed —
+every catalogue entry comes back in a new `not_ready` list, nothing is created
+on any customer WABA — rather than falling back to the old unchecked behavior.
+
+**Why:** a template rejection is Meta's judgment on the *content* — identical
+whichever WABA it's submitted to. Pushing an unvetted catalogue entry straight
+into every salon's WABA meant a bad template got rejected once per salon
+instead of once, each rejection also costing that WABA's quality rating. Owner
+wants the actual workflow to be: add/edit a template by hand on Kairo's own
+WABA, watch it get approved there, and only then let `ensure_templates`
+(already running at onboarding and hourly via `sweep()`) submit it — for
+approval, independently — to every customer's WABA. That per-customer
+submission was already the entire mechanism; the only change is refusing to
+attempt it before Kairo's own copy is a known-good template.
+
+**Not built: syncing template *content* from Kairo's WABA.** The gate only
+reads a status (`approved`/not), not the template body — `whatsapp_templates.py`'s
+`CATALOGUE` stays the one place body text and variable positions
+(`{{1}}`=name, `{{2}}`=salon, `{{3}}`=offer) are defined, since
+`whatsapp_send.py`/the webapp need to know what each variable *means*, not
+just what text Meta currently has on file. Kairo's WABA is the approval gate,
+not a content source.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — 472 passed, 14 skipped, 0 failed (up from
+471/14/0 the same day, from the two new gate tests). No live Meta call made —
+same as every WhatsApp entry below, this is unverified against a real Kairo
+WABA, which doesn't exist yet (see the standing "Still needed" list on the
+2026-08-24 entry).
+
+---
+
+## 2026-08-29 — Graph API pinned v25.0 → v26.0
+
+**Decision:** bump the pinned `GRAPH` base URL from `v25.0` to `v26.0` in both
+callers (`booking_engine/clients/meta_whatsapp.py`, `scripts/kairo_waba.py`),
+plus the `docs/knowledge/providers.md` note that says "all v25.0, pinned".
+
+**Why now:** owner-requested. The webhook verification mechanism (verify token
+on `GET`, HMAC `X-Hub-Signature-256` with the app secret on `POST`) is
+version-independent — nothing there changes with the Graph version, so this
+touches only the REST base URL, not the tokens. None of the endpoints in use
+(`oauth/access_token`, `subscribed_apps`, `register`, `message_templates`,
+`messages`) showed a breaking change in v26.0 when checked; they are the
+stable core of the Cloud API and have carried shape across many versions.
+
+**Unverified, flagged:** Meta's own changelog pages are JS-rendered and not
+readable via plain fetch, and no secondary source turned up a v26.0
+breaking-change list for these endpoints — so this is a pin bump on the
+"no change found" evidence, not a verified upgrade. As before (2026-08-24
+entry), **no live Meta call has been made**, so the bump cannot be exercised
+against a real WABA from this repo; the first real onboarding/send is the
+effective test.
+
+---
+
 ## 2026-08-25 — Per-customer history: campaign_key is the market_intel campaign id
 
 **Decision:** the WhatsApp campaigns feature (webapp design
