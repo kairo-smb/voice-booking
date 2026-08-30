@@ -6,6 +6,70 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-08-30 — WhatsApp is BYO WABA only; the `source='new'` provisioning path is removed
+
+**Decision:** dropped the second onboarding path entirely — owner's call, "we
+will stick with the solely customer BYO WABA." Every sender is now
+`coexistence`: the salon connects a WABA it already has, full stop. There is
+no longer a path where Kairo provisions a brand-new WABA on a number the
+salon doesn't yet have on WhatsApp.
+
+**What came out, together:** `whatsapp_onboarding.py::SOURCES` and its
+validation (source is no longer a caller-supplied input at all — `start()`
+hardcodes `"coexistence"`); the `if row["source"] == "new": register…` branch
+and the `pin` parameter threading through `complete()` and `CompleteRequest`;
+`meta.register_phone_number()` in the Graph client, now fully dead (no
+remaining caller — `scripts/kairo_waba.py`'s own `register` command talks to
+Graph directly for Kairo's *own* number and was never this function).
+Migration `18_whatsapp_coexistence_only.sql` narrows
+`senders_source_check` from `IN ('coexistence','new')` to `= 'coexistence'`,
+following migration 15's own drop-constraint/backfill/re-add shape — safe
+because, per the 2026-08-24 entry, no live Meta call has ever gone through
+this path, so the backfill `UPDATE` has nothing real to touch.
+
+**Why removing it is safe to do outright, not just deprecate:** `source='new'`
+was flagged as a rare, unexercised path from the day it shipped (2026-08-24:
+*"one template per shop and a rare `source='new'` path"*) and never had a
+UI — the webapp's `WhatsAppPanel.tsx` only ever offered a disabled "Bring your
+own number (coming soon)" teaser button for it, never a working control. There
+was nothing live depending on it in either repo.
+
+**Kept, deliberately:** `whatsapp.senders.source` the column, and
+`GET /whatsapp/status`'s `source` field — even at one legal value, it is
+still meaningful provenance on the row, and dropping the column outright would
+be schema churn for no behavioural gain. The `list_verifying_senders`
+reconciler also survives untouched: it was never really about `source='new'`
+availability polling (nothing sets `status='verifying'` anywhere in this
+codebase, on either path) — it is what catches `complete()` crashing after
+persisting the token/waba/phone_number_id but before flipping to `online`,
+which can happen on a coexistence onboarding too.
+
+**Webapp (own repo, own commit): the disabled BYON teaser came out too.**
+`WhatsAppPanel.tsx`'s "Bring your own number (coming soon)" button never
+called the removed path — it was inert, disabled from the start — but leaving
+dead-end UI for a permanently removed capability is worse than no button, so
+it's deleted along with its `byon_label`/`byon_teaser` i18n keys (all three
+locales) and the now-meaningless `source`/`pin` plumbing in the two onboarding
+proxy routes and `lib/whatsapp/client.ts` (Pydantic ignores unknown fields by
+default, so these weren't breaking anything — just sending values the
+`source`/`pin` upstream no longer looks at).
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **470 passed, 14 skipped, 0 failed** (down
+from 472/14/0: two tests deleted outright —
+`test_complete_registers_the_number_only_for_a_brand_new_waba` and
+`test_complete_rejects_an_unknown_source`, both asserting behaviour that no
+longer exists — and `test_complete_subscribes_to_webhooks_before_anything_else`
+was rewritten to assert subscribe-before-read-the-number instead of
+subscribe-before-register, since register no longer exists to order against).
+Migration 18 not applied against a live/scratch Postgres in this pass — no
+live Meta call has been made on this feature at all yet, per every WhatsApp
+entry above, so there's no real `source='new'` row anywhere to backfill; the
+`UPDATE … WHERE source <> 'coexistence'` is exercised only by migration 15's
+own test coverage of the identical pattern, not re-verified here.
+
+---
+
 ## 2026-08-30 — Template propagation gated on Kairo's own WABA approving it first
 
 **Decision:** `ensure_templates` (`services/messaging/whatsapp_onboarding.py`)

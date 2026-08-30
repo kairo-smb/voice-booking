@@ -7,19 +7,18 @@ Kairo-owned number. All of it is gone. Meta's Embedded Signup popup does the
 verification itself and hands the browser back a WABA id, a phone number id
 and a one-time code; `complete()` turns those into a sender that can send.
 
-The two paths, both branches inside Meta's own popup rather than two
-integrations:
+**Coexistence only — BYO WABA, nothing else.** The salon's existing WhatsApp
+Business App number stays live on their phone: they keep chatting with
+clients from the app while we send templates through Cloud API. This is the
+path the feature exists for, and the one Twilio cannot offer at all (its
+migration path requires deleting the WhatsApp Business App account on that
+number). An earlier version also supported `source='new'` — a fresh WABA on a
+number not yet on WhatsApp, provisioned through us rather than brought by the
+salon — removed 2026-08-30: every sender is BYO WABA now, so there is no
+second path to keep in sync, and `register_phone_number` (only ever called for
+that path) is gone with it.
 
-- `coexistence` — the salon's existing WhatsApp Business App number. It stays
-  live on their phone: they keep chatting with clients from the app while we
-  send templates through Cloud API. This is the path the feature exists for,
-  and the one Twilio cannot offer at all (its migration path requires deleting
-  the WhatsApp Business App account on that number).
-- `new` — a fresh WABA on a number not yet on WhatsApp. The only path that
-  calls `register_phone_number`; a coexistence number is already registered
-  and Meta's guidance is explicitly not to call it.
-
-See CLAUDE.md §2026-08-24 and docs/knowledge/api/whatsapp.md.
+See CLAUDE.md §2026-08-24, §2026-08-30 and docs/knowledge/api/whatsapp.md.
 """
 from __future__ import annotations
 
@@ -32,8 +31,6 @@ from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging.whatsapp_templates import CATALOGUE
 
 logger = logging.getLogger(__name__)
-
-SOURCES = ("coexistence", "new")
 
 # Meta's template statuses -> ours. Anything unrecognised stays 'pending' so a
 # new Meta state can never silently mark a template sendable.
@@ -72,29 +69,25 @@ def signup_config(settings) -> dict:
     }
 
 
-async def start(*, shop_id: UUID, display_name: str, source: str, settings) -> dict:
+async def start(*, shop_id: UUID, display_name: str, settings) -> dict:
     """Record intent and hand back the Embedded Signup config.
 
     Nothing is created provider-side here — unlike the Twilio version, which
     had to create a subaccount before the salon had done anything, and leaked
     one on every abandoned onboarding.
     """
-    if source not in SOURCES:
-        return {"ok": False, "error": "invalid_source"}
-
     existing = await wq.get_sender(shop_id)
     if existing and existing.get("status") == "online":
         return {"ok": True, "status": "online",
                 "phone_number": existing["phone_number"]}
 
-    await wq.upsert_sender(shop_id=shop_id, display_name=display_name, source=source)
+    await wq.upsert_sender(shop_id=shop_id, display_name=display_name, source="coexistence")
     await wq.set_sender_fields(shop_id, status="pending_signup")
     return {"ok": True, "status": "pending_signup", "signup": signup_config(settings)}
 
 
 async def complete(
-    *, shop_id: UUID, code: str, waba_id: str, phone_number_id: str,
-    pin: str | None, settings,
+    *, shop_id: UUID, code: str, waba_id: str, phone_number_id: str, settings,
 ) -> dict:
     """The salon finished Meta's popup. Turn its output into a live sender.
 
@@ -105,11 +98,12 @@ async def complete(
     2. **Subscribe to webhooks before anything else provider-side.** Without
        the subscription we receive no delivery status, no template verdicts
        and no opt-outs, while every send still succeeds — broken in the one
-       way nothing would surface.
-    3. Register the number, but only for `source='new'`.
-    4. Read the number back rather than trusting the popup, which told the
+       way nothing would surface. No registration step follows it: a
+       coexistence number is already registered, and Meta's guidance is
+       explicitly not to call `/register` on one.
+    3. Read the number back rather than trusting the popup, which told the
        *browser* what happened.
-    5. Templates last: they are the only step that is safely re-runnable, and
+    4. Templates last: they are the only step that is safely re-runnable, and
        `ensure_templates` is exposed separately for exactly that reason.
     """
     row = await wq.get_sender(shop_id)
@@ -149,14 +143,6 @@ async def complete(
 
     try:
         await meta.subscribe_app(waba_id=waba_id, token=token)
-
-        if row["source"] == "new":
-            if not pin:
-                return {"ok": False, "error": "pin_required"}
-            await meta.register_phone_number(
-                phone_number_id=phone_number_id, pin=pin, token=token
-            )
-
         number = await meta.get_phone_number(
             phone_number_id=phone_number_id, token=token
         )
@@ -168,7 +154,7 @@ async def complete(
 
     # A coexistence onboarding that didn't actually land on the Business App
     # is worth knowing about: the salon believes they kept their app.
-    if row["source"] == "coexistence" and not number.is_on_biz_app:
+    if not number.is_on_biz_app:
         logger.warning(
             "whatsapp.coexistence_not_confirmed shop=%s platform=%s",
             shop_id, number.platform_type,

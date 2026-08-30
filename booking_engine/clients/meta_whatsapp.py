@@ -147,20 +147,6 @@ async def get_phone_number(*, phone_number_id: str, token: str) -> PhoneNumber:
     )
 
 
-async def register_phone_number(*, phone_number_id: str, pin: str, token: str) -> None:
-    """Enable a number for Cloud API.
-
-    Skipped for coexistence — that number is already registered, and Meta's
-    own guidance is not to call this. Kept for the `source='new'` branch,
-    where nothing else performs registration: neither WhatsApp Manager nor the
-    App Dashboard do it, only this endpoint.
-    """
-    await _request(
-        "POST", f"{phone_number_id}/register", token=token,
-        json_body={"messaging_product": "whatsapp", "pin": pin},
-    )
-
-
 # ------------------------------------------------------------------- templates
 
 async def create_template(

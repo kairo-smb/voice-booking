@@ -49,7 +49,6 @@ _OPT_OUT_CODES = {131050}
 class StartRequest(BaseModel):
     shop_id: UUID
     display_name: str = Field(min_length=1, max_length=120)
-    source: str = "coexistence"
 
 
 class CompleteRequest(BaseModel):
@@ -59,8 +58,6 @@ class CompleteRequest(BaseModel):
     code: str = Field(min_length=1, max_length=512)
     waba_id: str = Field(min_length=1, max_length=64)
     phone_number_id: str = Field(min_length=1, max_length=64)
-    # Only used for source='new'; a coexistence number is already registered.
-    pin: str | None = Field(default=None, min_length=6, max_length=6)
 
 
 class Recipient(BaseModel):
@@ -94,7 +91,7 @@ async def start(
     """
     result = await onboarding.start(
         shop_id=payload.shop_id, display_name=payload.display_name,
-        source=payload.source, settings=settings,
+        settings=settings,
     )
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
@@ -114,8 +111,7 @@ async def complete(
     """
     result = await onboarding.complete(
         shop_id=payload.shop_id, code=payload.code, waba_id=payload.waba_id,
-        phone_number_id=payload.phone_number_id, pin=payload.pin,
-        settings=settings,
+        phone_number_id=payload.phone_number_id, settings=settings,
     )
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))

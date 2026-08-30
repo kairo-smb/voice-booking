@@ -609,8 +609,6 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
         return "customer-token"
     async def _subscribe(**kw):
         calls.setdefault("subscribe", []).append(kw)
-    async def _register(**kw):
-        calls.setdefault("register", []).append(kw)
     async def _number(**kw):
         return meta.PhoneNumber(
             id="PN1", display_phone_number="+393331110000",
@@ -626,7 +624,6 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
         return meta.TemplateStatus(status="approved", rejection_reason=None)
     monkeypatch.setattr(meta, "exchange_code", _exchange)
     monkeypatch.setattr(meta, "subscribe_app", _subscribe)
-    monkeypatch.setattr(meta, "register_phone_number", _register)
     monkeypatch.setattr(meta, "get_phone_number", _number)
     monkeypatch.setattr(meta, "create_template", _create_template)
     monkeypatch.setattr(meta, "fetch_template", _fetch_template)
@@ -644,36 +641,16 @@ async def test_complete_onboards_coexistence_in_one_round_trip(monkeypatch):
 
     result = await wo.complete(
         shop_id=SHOP, code="c0de", waba_id="WABA1", phone_number_id="PN1",
-        pin=None, settings=FakeSettings(),
+        settings=FakeSettings(),
     )
 
     assert result["ok"] is True and result["status"] == "online"
     assert result["coexistence"] is True
     assert calls["subscribe"][0]["waba_id"] == "WABA1"
-    # The salon kept their WhatsApp Business App — the number was already
-    # registered and calling register would be wrong.
-    assert "register" not in calls
 
 
 @pytest.mark.asyncio
-async def test_complete_registers_the_number_only_for_a_brand_new_waba(monkeypatch):
-    calls = _patch_onboarding(
-        monkeypatch, sender={"shop_id": SHOP, "source": "new",
-                             "status": "pending_signup", "display_name": "Salone X"},
-        calls={},
-    )
-
-    result = await wo.complete(
-        shop_id=SHOP, code="c0de", waba_id="WABA1", phone_number_id="PN1",
-        pin="123456", settings=FakeSettings(),
-    )
-
-    assert result["ok"] is True
-    assert calls["register"][0]["pin"] == "123456"
-
-
-@pytest.mark.asyncio
-async def test_complete_subscribes_to_webhooks_before_anything_else(monkeypatch):
+async def test_complete_subscribes_to_webhooks_before_reading_the_number(monkeypatch):
     """Without the subscription every send succeeds and we hear nothing back.
 
     No delivery status, no template verdicts, no opt-outs — broken in the one
@@ -681,22 +658,28 @@ async def test_complete_subscribes_to_webhooks_before_anything_else(monkeypatch)
     """
     order = []
     calls = _patch_onboarding(
-        monkeypatch, sender={"shop_id": SHOP, "source": "new",
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
                              "status": "pending_signup", "display_name": "Salone X"},
         calls={},
     )
 
     async def _subscribe(**kw):
         order.append("subscribe")
-    async def _register(**kw):
-        order.append("register")
+    async def _number(**kw):
+        order.append("get_phone_number")
+        return meta.PhoneNumber(
+            id="PN1", display_phone_number="+393331110000",
+            verified_name="Salone X", quality_rating="GREEN",
+            messaging_limit="TIER_1K", throughput_level="STANDARD",
+            platform_type="COEXISTENCE", is_on_biz_app=True,
+        )
     monkeypatch.setattr(meta, "subscribe_app", _subscribe)
-    monkeypatch.setattr(meta, "register_phone_number", _register)
+    monkeypatch.setattr(meta, "get_phone_number", _number)
 
     await wo.complete(shop_id=SHOP, code="c0de", waba_id="W", phone_number_id="P",
-                      pin="123456", settings=FakeSettings())
+                      settings=FakeSettings())
 
-    assert order == ["subscribe", "register"]
+    assert order == ["subscribe", "get_phone_number"]
     del calls
 
 
@@ -719,7 +702,7 @@ async def test_complete_persists_the_token_before_using_it(monkeypatch):
 
     result = await wo.complete(
         shop_id=SHOP, code="c0de", waba_id="WABA1", phone_number_id="PN1",
-        pin=None, settings=FakeSettings(),
+        settings=FakeSettings(),
     )
 
     assert result["ok"] is False
@@ -737,7 +720,7 @@ async def test_complete_injects_the_catalogue_into_the_salons_waba(monkeypatch):
     )
 
     await wo.complete(shop_id=SHOP, code="c0de", waba_id="WABA1",
-                      phone_number_id="PN1", pin=None, settings=FakeSettings())
+                      phone_number_id="PN1", settings=FakeSettings())
 
     created = calls["create_template"]
     assert {c["name"] for c in created} == {
@@ -745,15 +728,6 @@ async def test_complete_injects_the_catalogue_into_the_salons_waba(monkeypatch):
     }
     assert all(c["waba_id"] == "WABA1" for c in created)
     assert all(c["token"] == "customer-token" for c in created)
-
-
-@pytest.mark.asyncio
-async def test_complete_rejects_an_unknown_source(monkeypatch):
-    result = await wo.start(
-        shop_id=SHOP, display_name="Salone X", source="kairo",
-        settings=FakeSettings(),
-    )
-    assert result == {"ok": False, "error": "invalid_source"}
 
 
 @pytest.mark.asyncio
@@ -1078,7 +1052,7 @@ async def test_complete_refuses_past_metas_onboarding_limit(monkeypatch):
 
     result = await wo.complete(
         shop_id=SHOP, code="c0de", waba_id="WABA1", phone_number_id="PN1",
-        pin=None, settings=FakeSettings(),
+        settings=FakeSettings(),
     )
 
     assert result["ok"] is False
@@ -1100,7 +1074,7 @@ async def test_complete_allows_more_once_access_verification_is_done(monkeypatch
 
     result = await wo.complete(
         shop_id=SHOP, code="c0de", waba_id="WABA1", phone_number_id="PN1",
-        pin=None, settings=Verified(),
+        settings=Verified(),
     )
     assert result["ok"] is True
 

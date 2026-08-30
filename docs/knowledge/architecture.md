@@ -124,10 +124,15 @@ POST /whatsapp/onboarding/start     → record intent, return Embedded Signup co
    (salon completes Meta's popup; the browser gets code + waba_id + phone_number_id)
 POST /whatsapp/onboarding/complete  → exchange code for the salon's business token
                                     → subscribe our app to their WABA  (before anything else)
-                                    → register the number (source='new' only)
                                     → confirm coexistence from Meta, not from the popup
                                     → inject the template catalogue
 ```
+
+**BYO WABA only.** Every sender is coexistence — the salon's own, already-
+existing WABA. There is no path where Kairo provisions a brand-new one (that
+`source='new'` branch was removed 2026-08-30), so `/register` is never called:
+a coexistence number is already registered, and Meta's guidance is explicitly
+not to call it on one.
 
 **Nothing here debits AI credits.** A Tech Provider has no Meta credit line to
 share, so the salon's own card sits on the salon's own WABA and Meta charges

@@ -63,8 +63,10 @@ async def set_sender_fields(shop_id: UUID, **fields) -> None:
 async def list_verifying_senders() -> list[dict]:
     """Senders not yet online — polled by the tick to pick up Meta's verdict.
 
-    Only reachable for `source='new'`, where Meta may still be reviewing the
-    number. A coexistence onboarding lands `online` in one round trip.
+    A normal coexistence onboarding lands `online` in one round trip and never
+    shows up here. This catches the one abnormal case: `complete()` crashed
+    after persisting the token/waba/phone_number_id but before flipping status
+    to `online` (or `failed`) — the row it left behind is exactly this shape.
     """
     return await execute(
         "SELECT * FROM whatsapp.senders WHERE status IN ('verifying','pending_signup') "

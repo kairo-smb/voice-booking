@@ -25,12 +25,10 @@ One app secret covers every customer's traffic — unlike Twilio, which signs wi
 ### `POST /whatsapp/onboarding/start`
 
 ```json
-{ "shop_id": "…", "display_name": "Salone Bellezza", "source": "coexistence" }
+{ "shop_id": "…", "display_name": "Salone Bellezza" }
 ```
 
-`source`:
-- `"coexistence"` (default) — the salon's **existing WhatsApp Business App number**. It stays live on their phone: they keep chatting with clients from the app while Kairo sends templates through Cloud API. This is what the whole channel is sold on, and what Twilio cannot offer.
-- `"new"` — a fresh WABA on a number not yet on WhatsApp. The only path that registers a number for Cloud API. A branch inside Meta's popup, not a second integration.
+**BYO WABA only — coexistence, always.** The salon's **existing WhatsApp Business App number** stays live on their phone: they keep chatting with clients from the app while Kairo sends templates through Cloud API. This is what the whole channel is sold on, and what Twilio cannot offer. An earlier `source` parameter also accepted `"new"` — provisioning a fresh WABA through Kairo, on a number not yet on WhatsApp — removed 2026-08-30: there is no second path any more, so there is nothing to select.
 
 Creates nothing provider-side; it records intent and returns the popup config:
 
@@ -43,31 +41,28 @@ Creates nothing provider-side; it records intent and returns the popup config:
 
 `feature_type` is what turns the popup's first question into *"connect your existing WhatsApp Business App account?"*. Without it the salon is offered only a brand-new WABA — i.e. told to delete their app.
 
-Errors (409): `invalid_source`.
-
 ### `POST /whatsapp/onboarding/complete`
 
 ```json
 { "shop_id": "…", "code": "AQD…", "waba_id": "1234567890",
-  "phone_number_id": "9876543210", "pin": null }
+  "phone_number_id": "9876543210" }
 ```
 
-Everything Meta's popup hands back to the browser. `pin` is required only for `source="new"`.
+Everything Meta's popup hands back to the browser.
 
 Server-side, in this order — and the order is load-bearing:
 
 1. Exchange the one-time `code` for the salon's business token, and **persist it before using it**. A crash after this point leaves a resumable row; losing the token leaves a WABA we can neither reach nor unsubscribe from.
-2. `POST /{waba_id}/subscribed_apps`. Without it every send still succeeds while we receive no delivery status, no template verdicts and no opt-outs — broken in the one way nothing surfaces.
-3. `POST /{phone_number_id}/register` — **skipped for coexistence**, where the number is already registered and Meta's own guidance is not to call it.
-4. Read the number back (`is_on_biz_app`, `platform_type`) rather than trusting what the popup told the browser.
-5. Inject the template catalogue.
+2. `POST /{waba_id}/subscribed_apps`. Without it every send still succeeds while we receive no delivery status, no template verdicts and no opt-outs — broken in the one way nothing surfaces. No `/register` call follows it: a coexistence number is already registered, and Meta's own guidance is not to call it on one.
+3. Read the number back (`is_on_biz_app`, `platform_type`) rather than trusting what the popup told the browser.
+4. Inject the template catalogue.
 
 ```json
 {"data": {"ok": true, "status": "online", "phone_number": "+39…",
           "coexistence": true, "templates": 1}}
 ```
 
-Errors (409): `not_started`, `code_exchange_failed`, `pin_required`, `meta_error`.
+Errors (409): `not_started`, `onboarding_limit_reached`, `code_exchange_failed`, `meta_error`.
 
 ### `GET /whatsapp/status/{shop_id}`
 

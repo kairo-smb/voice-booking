@@ -120,7 +120,6 @@ Graph changes shape across versions):
 |---|---|
 | Exchange the popup's code for the salon's token | `GET /oauth/access_token?client_id&client_secret&code` |
 | Subscribe our app to their WABA | `POST /{waba_id}/subscribed_apps` |
-| Register the number (**`source='new'` only**) | `POST /{phone_number_id}/register` `{messaging_product, pin}` |
 | Confirm coexistence | `GET /{phone_number_id}?fields=platform_type,is_on_biz_app` |
 | Check Kairo's own copy is approved (gate, before injecting) | `GET /{kairo_waba_id}/message_templates?name=…` |
 | Inject a template | `POST /{waba_id}/message_templates` |
