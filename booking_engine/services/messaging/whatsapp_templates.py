@@ -40,6 +40,12 @@ class Template:
     # is a fact the webapp already holds, which is both cheaper and unable to
     # hallucinate a service the customer never had.
     generated_slot: int | None = None
+    # Who writes the generated slot. 'llm' for templates whose variable is
+    # composed by the model; 'owner' when the shop types it verbatim (the
+    # Campagna Promo tile); None when there is no such slot at all, which is
+    # what makes a template UTILITY. `generated_slot` says WHICH variable is
+    # filled; this says BY WHOM, and the two are no longer the same question.
+    filled_by: str | None = None
     max_chars: int = 90
     # Passed to the model as-is. Never sent to Meta, so both can be retuned
     # freely after a template is approved.
@@ -63,6 +69,7 @@ CATALOGUE: dict[str, Template] = {
             "3": "un taglio con piega a 35€ questa settimana",
         },
         generated_slot=3,
+        filled_by="llm",
         intent="promo",
         guidance=(
             "Una proposta concreta, basata su un servizio che il cliente fa già "
@@ -85,6 +92,7 @@ CATALOGUE: dict[str, Template] = {
             "4": "un ritocco colore con piega a 45€",
         },
         generated_slot=4,
+        filled_by="llm",
         intent="winback",
         guidance=(
             "Scrivi solo il complemento oggetto di «ti proponiamo»: un sintagma "
@@ -107,12 +115,36 @@ CATALOGUE: dict[str, Template] = {
             "4": "un taglio e piega a 35€",
         },
         generated_slot=4,
+        filled_by="llm",
         intent="rebook",
         guidance=(
             "Il cliente è regolare: tono di continuità, non di recupero. Frammento "
             "che completa «il momento giusto per», minuscolo, senza punteggiatura "
             "finale. Nessun invito a prenotare o rispondere: sono già nel testo fisso."
         ),
+    ),
+
+    # Owner-written, not model-written: the Campagna Promo tile takes a line
+    # the shop types and sends it verbatim. A separate template rather than a
+    # mode of promo_v1 because Meta approves bodies, and owner-written copy
+    # reads as an announcement where promo_v1's frame ("per proporti …")
+    # expects a fragment the model completes.
+    "promo_manual_v1": Template(
+        body=(
+            "Ciao {{1}}, ti scriviamo da {{2}} con una novità: {{3}}. "
+            "Rispondi a questo messaggio o chiamaci per prenotare."
+        ),
+        variables=3,
+        sample={
+            "1": "Giulia",
+            "2": "Salone Bellezza",
+            "3": "da lunedì trovi la nuova linea di trattamenti ristrutturanti",
+        },
+        generated_slot=3,
+        filled_by="owner",
+        max_chars=300,
+        intent="promo_manual",
+        guidance="",
     ),
 
     # ── UTILITY ──────────────────────────────────────────────────────────────

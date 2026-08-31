@@ -1342,3 +1342,13 @@ def test_utility_descriptor_reports_no_generated_slot():
     from booking_engine.api.routes.whatsapp import _template_descriptor
 
     assert _template_descriptor("feedback_v1")["generated_slot"] is None
+
+
+def test_descriptor_reports_who_fills_the_slot():
+    """The webapp picks its UI from this: an LLM-filled template gets a
+    generate button, an owner-filled one gets a textarea."""
+    from booking_engine.api.routes.whatsapp import _template_descriptor
+
+    assert _template_descriptor("promo_v1")["filled_by"] == "llm"
+    assert _template_descriptor("promo_manual_v1")["filled_by"] == "owner"
+    assert _template_descriptor("feedback_v1")["filled_by"] is None

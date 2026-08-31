@@ -61,6 +61,7 @@ def _template_descriptor(key: str) -> dict:
         "language": tpl.language,
         "variables": tpl.variables,
         "generated_slot": tpl.generated_slot,
+        "filled_by": tpl.filled_by,
         "max_chars": tpl.max_chars,
         "intent": tpl.intent,
         "guidance": tpl.guidance,

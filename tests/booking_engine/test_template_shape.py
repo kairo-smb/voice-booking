@@ -93,4 +93,26 @@ def test_marketing_templates_generate_exactly_one_slot():
             continue
         assert tpl.generated_slot is not None, f"{key}: MARKETING must generate"
         assert 1 <= tpl.generated_slot <= tpl.variables, f"{key}: slot out of range"
-        assert tpl.guidance, f"{key}: no guidance for the model"
+        if tpl.filled_by == "llm":
+            assert tpl.guidance, f"{key}: no guidance for the model"
+
+
+def test_fill_source_agrees_with_the_slot():
+    """`generated_slot` says which variable is filled; `filled_by` says by whom.
+    A template with a slot and no fill source is one nothing can send, and a
+    fill source with no slot is a template with nowhere to put the text —
+    both are silent failures, since the send path just renders whatever it has."""
+    for key, tpl in CATALOGUE.items():
+        if tpl.generated_slot is None:
+            assert tpl.filled_by is None, f"{key}: fill source but no slot"
+        else:
+            assert tpl.filled_by in {"llm", "owner"}, f"{key}: {tpl.filled_by!r}"
+
+
+def test_owner_written_templates_carry_no_model_guidance():
+    """Guidance is prompt text. On an owner-written template it would be dead
+    config that a later reader mistakes for something the product honours."""
+    for key, tpl in CATALOGUE.items():
+        if tpl.filled_by == "owner":
+            assert not tpl.guidance, f"{key}: guidance on an owner-written template"
+            assert not tpl.intent.startswith("winback"), f"{key}: intent looks LLM-ish"
