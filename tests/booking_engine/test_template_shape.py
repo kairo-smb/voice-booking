@@ -65,3 +65,32 @@ def test_samples_avoid_characters_meta_rejects_in_parameters():
         for slot, value in tpl.sample.items():
             assert not re.search(r"[#$%\r\n\t]", value), f"{key}.{slot}: {value!r}"
             assert "    " not in value, f"{key}.{slot}: 4+ spaces"
+
+
+_PROMO_WORDS = re.compile(r"scont|offert|promo|gratis|omagg|saldo|%", re.I)
+
+
+def test_utility_templates_stay_utility():
+    """UTILITY needs BOTH non-promotional intent AND user-specific content.
+    Mixed content is MARKETING — and Meta recategorises rather than rejects, so
+    the failure is silent: same template, double the price, consent and cooldown
+    quietly back in force. This test is the only thing standing between a
+    well-meaning copy edit and that outcome."""
+    for key, tpl in CATALOGUE.items():
+        if tpl.category != "UTILITY":
+            continue
+        assert tpl.generated_slot is None, f"{key}: UTILITY must not generate"
+        assert not _PROMO_WORDS.search(tpl.body), f"{key}: promotional language"
+        for slot, value in tpl.sample.items():
+            assert not _PROMO_WORDS.search(value), f"{key}.{slot}: promotional sample"
+
+
+def test_marketing_templates_generate_exactly_one_slot():
+    """The invariant the send path, the preview renderer and the prompt all
+    rely on: one generated slot, and it is a real variable of that template."""
+    for key, tpl in CATALOGUE.items():
+        if tpl.category != "MARKETING":
+            continue
+        assert tpl.generated_slot is not None, f"{key}: MARKETING must generate"
+        assert 1 <= tpl.generated_slot <= tpl.variables, f"{key}: slot out of range"
+        assert tpl.guidance, f"{key}: no guidance for the model"
