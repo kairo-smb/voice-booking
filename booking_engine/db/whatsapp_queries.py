@@ -280,6 +280,11 @@ async def claim_due(limit: int) -> list[dict]:
     purpose: two overlapping ticks, or two Fly machines, must never both send
     the same row. SKIP LOCKED means the loser takes different work rather
     than blocking.
+
+    The template's category rides along so send_due can re-apply consent and
+    the cooldown only to MARKETING. A LEFT JOIN (not inner) so a row whose
+    template can't be resolved is still claimed — and fails closed to the
+    stricter MARKETING checks when category is missing.
     """
     return await execute(
         """
@@ -288,6 +293,8 @@ async def claim_due(limit: int) -> list[dict]:
             FROM whatsapp.outbound_messages m
             JOIN whatsapp.senders s
               ON s.shop_id = m.shop_id AND s.status = 'online'
+            LEFT JOIN whatsapp.templates t
+              ON t.shop_id = m.shop_id AND t.name = m.template_name
             WHERE m.status = 'queued' AND m.scheduled_at <= now()
             ORDER BY m.scheduled_at
             LIMIT $1
@@ -296,8 +303,10 @@ async def claim_due(limit: int) -> list[dict]:
         UPDATE whatsapp.outbound_messages m
         SET status = 'sending', updated_at = now()
         FROM due
+        LEFT JOIN whatsapp.templates t
+          ON t.shop_id = m.shop_id AND t.name = m.template_name
         WHERE m.id = due.id
-        RETURNING m.*
+        RETURNING m.*, t.category AS category
         """,
         limit,
     )

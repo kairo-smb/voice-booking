@@ -21,8 +21,12 @@ import pytest
 from booking_engine.config import Settings
 from booking_engine.db import connection
 from booking_engine.db import whatsapp_automation_queries as aq
+from booking_engine.db import whatsapp_queries as wq
+from booking_engine.services.messaging import whatsapp_automations as wa
+from booking_engine.services.messaging import whatsapp_send as ws
 
 ROME = ZoneInfo("Europe/Rome")
+SHOP = uuid4()
 
 # Production Neon endpoint — the automation tests create/delete rows and must
 # NEVER run here. Same guard as tests/live_db/conftest.py.
@@ -348,6 +352,22 @@ class TestAutomationQueriesIntegration:
     async def test_get_rules_is_empty_for_a_shop_that_never_configured(self, shop):
         assert await aq.get_rules(shop) == []
 
+    async def test_list_enabled_rules_excludes_disabled_rules(self, shop):
+        """'Absent rows mean off' — the tick only ever sees enabled rules."""
+        await aq.upsert_rule(
+            shop_id=shop, rule_key="feedback", enabled=False,
+            params={"days_after": 2}, weekly_cap=200,
+        )
+        await aq.upsert_rule(
+            shop_id=shop, rule_key="reminder", enabled=True,
+            params={"hours_before": 24}, weekly_cap=200,
+        )
+
+        enabled = await aq.list_enabled_rules()
+
+        assert [r["rule_key"] for r in enabled] == ["reminder"]
+        assert all(r["enabled"] for r in enabled)
+
     async def test_sent_this_week_counts_this_rules_sends_only(self, shop):
         customer_id, staff_id = uuid4(), uuid4()
         await _insert_staff(shop, staff_id)
@@ -367,3 +387,338 @@ class TestAutomationQueriesIntegration:
 
         assert await aq.sent_this_week(shop, "feedback") == 2
         assert await aq.sent_this_week(shop, "reminder") == 1
+
+
+# ------------------------------------------------------- the tick (unit)
+
+class FakeSettings:
+    whatsapp_send_start_hour = 9
+    whatsapp_send_end_hour = 20
+    whatsapp_sends_per_minute = 0
+    whatsapp_recipient_cooldown_hours = 168
+
+
+def _enabled_rule(**over):
+    row = {"shop_id": SHOP, "rule_key": "feedback", "enabled": True,
+           "params": {"days_after": 2}, "weekly_cap": 200}
+    row.update(over)
+    return row
+
+
+def _online_sender(**over):
+    row = {"shop_id": SHOP, "status": "online", "phone_number": "+393331110000",
+           "phone_number_id": "PN1", "access_token": "tok",
+           "quality_rating": "GREEN"}
+    row.update(over)
+    return row
+
+
+def _approved_template(**over):
+    row = {"status": "approved", "name": "kairo_feedback_v1", "language": "it",
+           "category": "UTILITY"}
+    row.update(over)
+    return row
+
+
+def _due_row(**over):
+    row = {"appointment_id": uuid4(), "customer_id": uuid4(),
+           "phone": "+393331112233", "first_name": "Giulia",
+           "shop_name": "Salone X", "service_names": "Taglio",
+           "appointment_at": datetime(2026, 8, 20, 10, 0, tzinfo=ROME)}
+    row.update(over)
+    return row
+
+
+_ENQUEUE_SENTINEL = object()
+
+
+def _patch_automations(monkeypatch, *, rules=None, sender=None, template=None,
+                       due=None, sent_this_week=0, enqueue_result=_ENQUEUE_SENTINEL):
+    calls = {"enqueued": [], "recorded": []}
+
+    async def _rules():
+        return rules if rules is not None else [_enabled_rule()]
+    async def _sender(shop_id):
+        return sender if sender is not None else _online_sender()
+    async def _template(shop_id, key):
+        return template if template is not None else _approved_template()
+    async def _sent_week(shop_id, rule_key):
+        return sent_this_week
+    async def _due_feedback(shop_id, days_after):
+        calls.setdefault("due_feedback", []).append(days_after)
+        return due if due is not None else []
+    async def _due_reminders(shop_id, hours_before):
+        calls.setdefault("due_reminders", []).append(hours_before)
+        return due if due is not None else []
+    async def _enqueue(**kw):
+        calls["enqueued"].append(kw)
+        return uuid4() if enqueue_result is _ENQUEUE_SENTINEL else enqueue_result
+    async def _record(**kw):
+        calls["recorded"].append(kw)
+
+    monkeypatch.setattr(aq, "list_enabled_rules", _rules)
+    monkeypatch.setattr(wq, "get_sender", _sender)
+    monkeypatch.setattr(wq, "get_template", _template)
+    monkeypatch.setattr(aq, "sent_this_week", _sent_week)
+    monkeypatch.setattr(aq, "due_feedback", _due_feedback)
+    monkeypatch.setattr(aq, "due_reminders", _due_reminders)
+    monkeypatch.setattr(wq, "enqueue", _enqueue)
+    monkeypatch.setattr(aq, "record_automation_send", _record)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_disabled_rule_sends_nothing(monkeypatch):
+    """A rule that is off never reaches the tick: list_enabled_rules filters
+    it out (pinned at the query level by
+    test_list_enabled_rules_excludes_disabled_rules), so with no enabled rules
+    the tick enqueues nothing."""
+    calls = _patch_automations(monkeypatch, rules=[], due=[_due_row()])
+
+    counts = await wa.run_automations(settings=FakeSettings())
+
+    assert counts["feedback"] == 0 and counts["reminder"] == 0
+    assert calls["enqueued"] == []
+    assert calls["recorded"] == []
+
+
+@pytest.mark.asyncio
+async def test_weekly_cap_stops_sending_at_the_ceiling(monkeypatch):
+    # Already at the cap: nothing is enqueued at all.
+    at_cap = _patch_automations(monkeypatch, sent_this_week=200, due=[_due_row()])
+    counts = await wa.run_automations(settings=FakeSettings())
+    assert counts["feedback"] == 0
+    assert at_cap["enqueued"] == []
+
+    # One below the cap with three due: exactly one goes out, then the ceiling
+    # stops the batch mid-run.
+    mid = _patch_automations(
+        monkeypatch, sent_this_week=199, due=[_due_row(), _due_row(), _due_row()],
+    )
+    counts = await wa.run_automations(settings=FakeSettings())
+    assert counts["feedback"] == 1
+    assert len(mid["enqueued"]) == 1
+    assert len(mid["recorded"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_red_quality_skips_marketing_rules_and_lets_utility_through(monkeypatch):
+    # A MARKETING rule (Plan 3's win-back) pauses under RED quality...
+    marketing = _patch_automations(
+        monkeypatch, sender=_online_sender(quality_rating="RED"),
+        template=_approved_template(category="MARKETING"), due=[_due_row()],
+    )
+    counts = await wa.run_automations(settings=FakeSettings())
+    assert counts["feedback"] == 0
+    assert marketing["enqueued"] == []
+
+    # ...but the UTILITY rules this plan ships continue regardless.
+    utility = _patch_automations(
+        monkeypatch, sender=_online_sender(quality_rating="RED"),
+        template=_approved_template(category="UTILITY"), due=[_due_row()],
+    )
+    counts = await wa.run_automations(settings=FakeSettings())
+    assert counts["feedback"] == 1
+    assert len(utility["enqueued"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_enqueue_failure_records_nothing_in_automation_sends(monkeypatch):
+    calls = _patch_automations(monkeypatch, due=[_due_row()])
+
+    async def _enqueue_raises(**kw):
+        raise RuntimeError("queue down")
+    monkeypatch.setattr(wq, "enqueue", _enqueue_raises)
+
+    counts = await wa.run_automations(settings=FakeSettings())
+
+    assert counts["feedback"] == 0 and counts["errors"] == 1
+    assert calls["recorded"] == []          # so the next tick retries it
+
+
+@pytest.mark.asyncio
+async def test_one_shop_raising_does_not_abort_the_others(monkeypatch):
+    good_shop, bad_shop = uuid4(), uuid4()
+    recorded = []
+    rules = [_enabled_rule(shop_id=bad_shop, rule_key="feedback"),
+             _enabled_rule(shop_id=good_shop, rule_key="reminder")]
+
+    async def _rules():
+        return rules
+    async def _sender(shop_id):
+        if shop_id == bad_shop:
+            raise RuntimeError("boom")
+        return _online_sender(shop_id=shop_id)
+    async def _template(shop_id, key):
+        return _approved_template(name="kairo_reminder_v1")
+    async def _sent_week(shop_id, rule_key):
+        return 0
+    async def _due_feedback(shop_id, days_after):
+        return []
+    async def _due_reminders(shop_id, hours_before):
+        return [_due_row()]
+    async def _enqueue(**kw):
+        return uuid4()
+    async def _record(**kw):
+        recorded.append(kw)
+
+    monkeypatch.setattr(aq, "list_enabled_rules", _rules)
+    monkeypatch.setattr(wq, "get_sender", _sender)
+    monkeypatch.setattr(wq, "get_template", _template)
+    monkeypatch.setattr(aq, "sent_this_week", _sent_week)
+    monkeypatch.setattr(aq, "due_feedback", _due_feedback)
+    monkeypatch.setattr(aq, "due_reminders", _due_reminders)
+    monkeypatch.setattr(wq, "enqueue", _enqueue)
+    monkeypatch.setattr(aq, "record_automation_send", _record)
+
+    counts = await wa.run_automations(settings=FakeSettings())
+
+    assert counts["errors"] == 1
+    assert counts["reminder"] == 1
+    assert len(recorded) == 1 and recorded[0]["shop_id"] == good_shop
+
+
+@pytest.mark.asyncio
+async def test_already_enqueued_appointment_is_still_recorded(monkeypatch):
+    """Crash recovery: a previous tick enqueued this appointment but died
+    before recording. The unique index returns None; we record anyway, so the
+    appointment stops being due and the already-queued row is delivered once."""
+    calls = _patch_automations(monkeypatch, due=[_due_row()], enqueue_result=None)
+
+    counts = await wa.run_automations(settings=FakeSettings())
+
+    assert counts["feedback"] == 0              # not a new send
+    assert len(calls["recorded"]) == 1          # but the appointment is logged
+
+
+def test_render_variables_formats_facts_not_generated_copy():
+    row = _due_row(appointment_at=datetime(2026, 8, 12, 10, 30, tzinfo=ROME))
+
+    fb = wa.render_variables("feedback_v1", row)
+    assert fb["1"] == "Giulia"
+    assert fb["2"] == "Salone X"
+    assert fb["3"] == "12 agosto"
+    assert fb["4"] == "Taglio"
+
+    rem = wa.render_variables("reminder_v1", row)
+    assert rem["3"] == "mercoledì 12 alle 10:30"
+
+
+# --------------------------------------------- UTILITY bypasses the send gate
+
+def _consentless(**over):
+    row = {"id": uuid4(), "full_name": "Giulia", "phone": "+393331112222",
+           "phone_normalized": "393331112222", "marketing_consent": False,
+           "marketing_consent_granted_at": None,
+           "marketing_consent_withdrawn_at": None}
+    row.update(over)
+    return row
+
+
+async def _patch_enqueue(monkeypatch, *, template=None, customer=None):
+    async def _sender(shop_id):
+        return {"status": "online", "phone_number": "+393331110000",
+                "phone_number_id": "PN1", "access_token": "tok", "daily_cap": 50,
+                "messaging_limit": "TIER_1K", "platform_type": "COEXISTENCE"}
+    async def _template(shop_id, key):
+        return template if template is not None else {
+            "status": "approved", "name": "kairo_promo_v1", "language": "it",
+            "category": "MARKETING",
+        }
+    async def _recent(*, shop_id, customer_ids, hours):
+        return set()
+    async def _customer(shop_id, customer_id):
+        return _consentless() if customer is None else customer
+    monkeypatch.setattr(wq, "get_sender", _sender)
+    monkeypatch.setattr(wq, "get_template", _template)
+    monkeypatch.setattr(wq, "recently_contacted", _recent)
+    from booking_engine.db import sms_queries
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", _customer)
+
+
+@pytest.mark.asyncio
+async def test_utility_send_to_a_consentless_customer_is_enqueued_but_marketing_is_not(monkeypatch):
+    """The whole point of the category existing.
+
+    UTILITY is transactional (a reminder about the customer's own
+    appointment), so it needs no marketing consent and is not suppressed by
+    the cooldown. The same customer, on a MARKETING template, must still be
+    refused — the two are not the same gate.
+    """
+    rows = []
+    async def _enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+    monkeypatch.setattr(wq, "enqueue", _enqueue)
+
+    # UTILITY first: same consent-less customer, queued.
+    await _patch_enqueue(monkeypatch, template={
+        "status": "approved", "name": "kairo_feedback_v1", "language": "it",
+        "category": "UTILITY",
+    })
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="feedback_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {"1": "Giulia"}}],
+        settings=FakeSettings(),
+    )
+    assert result["queued"] == 1 and result["suppressed"] == 0
+    assert rows[-1]["status"] == "queued"
+
+    # MARKETING: the same customer is refused.
+    await _patch_enqueue(monkeypatch)
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c2", template_key="promo_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}}],
+        settings=FakeSettings(),
+    )
+    assert result["queued"] == 0 and result["suppressed"] == 1
+    assert rows[-1]["suppressed_reason"] == "no_consent"
+
+
+@pytest.mark.asyncio
+async def test_send_due_does_not_suppress_a_utility_message_for_no_consent(monkeypatch):
+    """send_due re-reads consent at send time — but only for MARKETING.
+
+    A queued UTILITY reminder must reach the send even if the customer has no
+    marketing consent, else the whole automation feature would suppress itself
+    at the drip stage.
+    """
+    spy = {"sent": [], "meta_sends": []}
+    message = {
+        "id": uuid4(), "shop_id": SHOP, "customer_id": uuid4(),
+        "to_phone": "+393331112222", "from_number": "+393331110000",
+        "template_name": "kairo_feedback_v1", "template_language": "it",
+        "variables": {"1": "Giulia"}, "category": "UTILITY",
+    }
+
+    async def _claim(limit):
+        return [message]
+    async def _requeue_stuck(*a, **kw):
+        return 0
+    async def _sender(shop_id):
+        return {"status": "online", "phone_number_id": "PN1",
+                "access_token": "tok", "daily_cap": 50,
+                "messaging_limit": "TIER_1K", "platform_type": "COEXISTENCE"}
+    async def _sent_24h(shop_id):
+        return 0
+    async def _send(**kw):
+        spy["meta_sends"].append(kw)
+        return "wamid.1"
+
+    async def _mark_sent(**kw):
+        spy["sent"].append(kw)
+    async def _mark_suppressed(**kw):
+        spy.setdefault("suppressed", []).append(kw)
+    monkeypatch.setattr(wq, "claim_due", _claim)
+    monkeypatch.setattr(wq, "requeue_stuck", _requeue_stuck)
+    monkeypatch.setattr(wq, "get_sender", _sender)
+    monkeypatch.setattr(wq, "sent_last_24h", _sent_24h)
+    monkeypatch.setattr(wq, "mark_sent", _mark_sent)
+    monkeypatch.setattr(wq, "mark_suppressed", _mark_suppressed)
+    from booking_engine.clients import meta_whatsapp as meta
+    monkeypatch.setattr(meta, "send_template", _send)
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["sent"] == 1 and counts["suppressed"] == 0
+    assert len(spy["sent"]) == 1

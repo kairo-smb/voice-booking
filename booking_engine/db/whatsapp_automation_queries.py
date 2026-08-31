@@ -52,6 +52,18 @@ async def get_rules(shop_id: UUID) -> list[dict]:
     return [_parse_rule(row) for row in rows]
 
 
+async def list_enabled_rules() -> list[dict]:
+    """Every enabled rule across all shops, for the hourly tick."""
+    rows = await execute(
+        """
+        SELECT * FROM whatsapp.automation_rules
+        WHERE enabled = true
+        ORDER BY shop_id, rule_key
+        """
+    )
+    return [_parse_rule(row) for row in rows]
+
+
 async def upsert_rule(
     *, shop_id: UUID, rule_key: str, enabled: bool, params: dict,
     weekly_cap: int,
