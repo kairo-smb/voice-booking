@@ -53,26 +53,27 @@ CATALOGUE: dict[str, Template] = {
     # before it is a fact: name, salon, and a lookup from the visit record.
     "promo_v1": Template(
         body=(
-            "Ciao {{1}}, ti scriviamo da {{2}} con una proposta per te: {{3}} "
+            "Ciao {{1}}, ti scriviamo da {{2}} per proporti {{3}}. "
             "Rispondi a questo messaggio o chiamaci per prenotare."
         ),
         variables=3,
         sample={
             "1": "Giulia",
             "2": "Salone Bellezza",
-            "3": "taglio e piega a 35€ questa settimana",
+            "3": "un taglio con piega a 35€ questa settimana",
         },
         generated_slot=3,
         intent="promo",
         guidance=(
             "Una proposta concreta, basata su un servizio che il cliente fa già "
             "o su uno complementare. Nessun saluto e nessun invito a prenotare: "
-            "ci sono già nel testo fisso."
+            "ci sono già nel testo fisso. Frammento che completa «per proporti», "
+            "minuscolo, senza punto finale."
         ),
     ),
     "winback_v1": Template(
         body=(
-            "Ciao {{1}}, ti scriviamo da {{2}}. Dall'ultima volta è passato {{3}}, "
+            "Ciao {{1}}, ti scriviamo da {{2}}: non ci vediamo da {{3}} "
             "e per questo ti proponiamo {{4}}. "
             "Rispondi a questo messaggio per prenotare."
         ),
@@ -80,14 +81,16 @@ CATALOGUE: dict[str, Template] = {
         sample={
             "1": "Giulia",
             "2": "Salone Bellezza",
-            "3": "un po' dal tuo colore di marzo",
+            "3": "tre mesi",
             "4": "un ritocco colore con piega a 45€",
         },
         generated_slot=4,
         intent="winback",
         guidance=(
-            "Riconosci l'assenza senza colpevolizzare e dai un motivo concreto "
-            "per tornare. Deve incastrarsi dopo «ti proponiamo»."
+            "Scrivi solo il complemento oggetto di «ti proponiamo»: un sintagma "
+            "nominale con articolo (servizio ed eventuale prezzo), minuscolo, senza "
+            "punto finale. L'assenza è già nel testo fisso: non ripeterla. Nessun "
+            "invito a prenotare o rispondere: sono già nel testo fisso."
         ),
     ),
     "rebook_v1": Template(
@@ -106,8 +109,9 @@ CATALOGUE: dict[str, Template] = {
         generated_slot=4,
         intent="rebook",
         guidance=(
-            "Il cliente è regolare: tono di continuità, non di recupero. "
-            "Deve incastrarsi dopo «il momento giusto per»."
+            "Il cliente è regolare: tono di continuità, non di recupero. Frammento "
+            "che completa «il momento giusto per», minuscolo, senza punteggiatura "
+            "finale. Nessun invito a prenotare o rispondere: sono già nel testo fisso."
         ),
     ),
 
@@ -120,7 +124,7 @@ CATALOGUE: dict[str, Template] = {
     # Enforced by test_utility_templates_stay_utility.
     "feedback_v1": Template(
         body=(
-            "Ciao {{1}}, grazie per essere passato da {{2}} il {{3}} per {{4}}. "
+            "Ciao {{1}}, grazie per la tua visita da {{2}} il {{3}} per {{4}}. "
             "Com'è andata? Rispondi a questo messaggio per dirci la tua."
         ),
         variables=4,
@@ -135,7 +139,7 @@ CATALOGUE: dict[str, Template] = {
     ),
     "reminder_v1": Template(
         body=(
-            "Ciao {{1}}, ti ricordiamo il tuo appuntamento da {{2}} il {{3}} "
+            "Ciao {{1}}, ti ricordiamo il tuo appuntamento da {{2}} in programma {{3}} "
             "per {{4}}. Se non puoi venire, rispondi a questo messaggio per spostarlo."
         ),
         variables=4,
