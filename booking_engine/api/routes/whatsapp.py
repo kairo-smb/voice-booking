@@ -66,6 +66,10 @@ def _template_descriptor(key: str) -> dict:
         "max_chars": tpl.max_chars,
         "intent": tpl.intent,
         "guidance": tpl.guidance,
+        # The approved sample per variable, so the webapp can render the body
+        # with realistic values (the automations tile shows the owner exactly
+        # what the customer will read) without duplicating the catalogue.
+        "sample": tpl.sample,
     }
 
 
