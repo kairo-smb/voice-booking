@@ -388,6 +388,21 @@ class TestAutomationQueriesIntegration:
         assert await aq.sent_this_week(shop, "feedback") == 2
         assert await aq.sent_this_week(shop, "reminder") == 1
 
+    async def test_claim_due_sql_is_valid(self, shop):
+        """The drip's claim statement parses and plans against the real schema.
+
+        claim_due is mocked in every other test, so when the template-category
+        join was added it shipped as a parse error ("invalid reference to
+        FROM-clause entry for table m" — Postgres refuses to let an outer join
+        in UPDATE ... FROM reference the update target) and every WhatsApp send
+        would have failed at runtime.
+
+        LIMIT 0 is the point: parse-analysis and planning still run over the
+        whole statement, so a broken join raises here, while the CTE selects
+        nothing and no row on the shared QA branch is claimed.
+        """
+        assert await wq.claim_due(0) == []
+
 
 # ------------------------------------------------------- the tick (unit)
 
