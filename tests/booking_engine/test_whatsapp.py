@@ -795,6 +795,161 @@ async def test_ensure_templates_fails_closed_without_kairo_waba_configured(monke
     assert "fetch_template" not in calls
 
 
+@pytest.mark.asyncio
+async def test_sweep_propagates_to_an_online_shop_once_kairo_gets_approved(monkeypatch):
+    """The retry that did not exist, and its absence was silent.
+
+    A salon onboards while Kairo's copy is still pending, so it gets nothing.
+    Meta approves ours an hour later — on *Kairo's* WABA, with no per-shop
+    event attached. Before this, `list_verifying_senders` didn't match (the
+    salon is `online`), onboarding was over, and the panel only offered a
+    manual re-push for a *rejected* template. That shop could never send and
+    nothing anywhere said why.
+    """
+    sender = {"shop_id": SHOP, "source": "coexistence", "status": "online",
+              "display_name": "Salone X", "waba_id": "WABA1", "access_token": "tok"}
+    calls = _patch_onboarding(monkeypatch, sender=sender, calls={})
+
+    async def _none():
+        return []
+    async def _missing(catalogue_size):
+        calls.setdefault("missing_query", []).append(catalogue_size)
+        return [sender]
+    monkeypatch.setattr(wq, "list_verifying_senders", _none)
+    monkeypatch.setattr(wq, "list_unresolved_templates", _none)
+    monkeypatch.setattr(wq, "list_senders_missing_templates", _missing)
+
+    counts = await wo.sweep(settings=FakeSettings())
+
+    assert counts["propagated"] == len(wt.CATALOGUE)
+    assert calls["missing_query"] == [len(wt.CATALOGUE)]
+    assert [c["waba_id"] for c in calls["create_template"]] == ["WABA1"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_asks_kairos_waba_once_not_once_per_shop(monkeypatch):
+    """Same question, same answer for everyone — N shops must not mean N calls."""
+    sender = {"shop_id": SHOP, "source": "coexistence", "status": "online",
+              "display_name": "Salone X", "waba_id": "WABA1", "access_token": "tok"}
+    calls = _patch_onboarding(monkeypatch, sender=sender, calls={})
+
+    async def _none():
+        return []
+    async def _three(catalogue_size):
+        return [dict(sender, shop_id=uuid4()) for _ in range(3)]
+    monkeypatch.setattr(wq, "list_verifying_senders", _none)
+    monkeypatch.setattr(wq, "list_unresolved_templates", _none)
+    monkeypatch.setattr(wq, "list_senders_missing_templates", _three)
+
+    await wo.sweep(settings=FakeSettings())
+
+    assert len(calls["fetch_template"]) == len(wt.CATALOGUE)
+    assert len(calls["create_template"]) == 3 * len(wt.CATALOGUE)
+
+
+@pytest.mark.asyncio
+async def test_sweep_pushes_nothing_when_the_kairo_gate_is_empty(monkeypatch):
+    """Fails closed: an unconfigured (or unreachable) gate propagates nothing."""
+    sender = {"shop_id": SHOP, "source": "coexistence", "status": "online",
+              "display_name": "Salone X", "waba_id": "WABA1", "access_token": "tok"}
+    calls = _patch_onboarding(monkeypatch, sender=sender, calls={})
+
+    async def _none():
+        return []
+    async def _boom(catalogue_size):
+        raise AssertionError("must not even ask for shops it cannot help")
+    monkeypatch.setattr(wq, "list_verifying_senders", _none)
+    monkeypatch.setattr(wq, "list_unresolved_templates", _none)
+    monkeypatch.setattr(wq, "list_senders_missing_templates", _boom)
+
+    class NoKairoWaba(FakeSettings):
+        meta_kairo_waba_id = ""
+        meta_kairo_token = ""
+
+    counts = await wo.sweep(settings=NoKairoWaba())
+
+    assert counts["propagated"] == 0
+    assert "create_template" not in calls
+
+
+@pytest.mark.asyncio
+async def test_retire_template_deletes_kairos_copy_before_the_customers(monkeypatch):
+    """Order is the design: ours first closes the gate.
+
+    Customers-first would leave the gate still answering "approved" if the last
+    step failed, and the next sweep would re-push everything just deleted.
+    """
+    order = []
+
+    async def _delete(*, waba_id, name, token):
+        order.append(waba_id)
+    async def _senders(template_key):
+        return [{"shop_id": SHOP, "waba_id": "WABA1", "access_token": "tok",
+                 "name": wo.template_name(template_key)}]
+    dropped = []
+    async def _drop(*, shop_id, template_key):
+        dropped.append((shop_id, template_key))
+    monkeypatch.setattr(meta, "delete_template", _delete)
+    monkeypatch.setattr(wq, "list_senders_with_template", _senders)
+    monkeypatch.setattr(wq, "delete_template_row", _drop)
+
+    result = await wo.retire_template(template_key="promo_v1", settings=FakeSettings())
+
+    assert order == ["KAIRO_WABA", "WABA1"]
+    assert result["deleted"] == 1
+    assert dropped == [(SHOP, "promo_v1")]
+
+
+@pytest.mark.asyncio
+async def test_retire_template_keeps_the_row_when_meta_refuses(monkeypatch):
+    """A failed delete must stay on the worklist, not vanish from our records."""
+    async def _delete(*, waba_id, name, token):
+        if waba_id != "KAIRO_WABA":
+            raise meta.MetaError(100, "permission denied")
+    async def _senders(template_key):
+        return [{"shop_id": SHOP, "waba_id": "WABA1", "access_token": "tok",
+                 "name": wo.template_name(template_key)}]
+    async def _drop(*, shop_id, template_key):
+        raise AssertionError("row dropped despite Meta still holding the template")
+    monkeypatch.setattr(meta, "delete_template", _delete)
+    monkeypatch.setattr(wq, "list_senders_with_template", _senders)
+    monkeypatch.setattr(wq, "delete_template_row", _drop)
+
+    result = await wo.retire_template(template_key="promo_v1", settings=FakeSettings())
+
+    assert result["deleted"] == 0
+    assert result["failed"] == [str(SHOP)]
+
+
+@pytest.mark.asyncio
+async def test_retire_template_refuses_an_unknown_key(monkeypatch):
+    async def _boom(*a, **kw):
+        raise AssertionError("must not touch Meta for a key we don't ship")
+    monkeypatch.setattr(meta, "delete_template", _boom)
+
+    result = await wo.retire_template(template_key="nope", settings=FakeSettings())
+    assert result == {"ok": False, "error": "unknown_template"}
+
+
+def test_push_templates_uses_the_name_the_gate_looks_for():
+    """The script pushes to Kairo's WABA; the gate reads it back by name.
+
+    They disagreed until 2026-08-31 — the script posted the bare catalogue key
+    and the gate looked for the `kairo_` prefixed one, so the gate never found
+    anything and no customer WABA ever received a template.
+    """
+    import ast
+    import pathlib
+
+    source = pathlib.Path(__file__).parents[2] / "scripts" / "kairo_waba.py"
+    tree = ast.parse(source.read_text())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "push_templates")
+    names = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "template_name"]
+    assert names, "push-templates must submit template_name(key), not the bare key"
+
+
 def test_signup_config_asks_meta_for_the_coexistence_branch():
     """Without this flag the popup offers only a brand-new WABA.
 

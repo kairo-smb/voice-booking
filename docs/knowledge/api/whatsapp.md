@@ -125,7 +125,18 @@ Re-runs template injection — after a rejection, or after the catalogue (`servi
 
 Returns `{"created": N, "failed": ["key", …], "not_ready": ["key", …]}`. `not_ready` is not approved on Kairo's WABA yet (or Kairo's WABA isn't configured) — expected right after adding a new catalogue entry, before you've pushed and gotten it approved on Kairo's own WABA. One rejected template never aborts the rest of the catalogue.
 
-Templates carry the **same name in every salon's WABA** (`kairo_promo_v1`): the catalogue is Kairo's, Meta scopes names per-WABA, and a per-shop name would make "is promo_v1 approved for this salon?" unanswerable without a lookup.
+Templates carry the **same name in every salon's WABA** (`kairo_promo_v1`): the catalogue is Kairo's, Meta scopes names per-WABA, and a per-shop name would make "is promo_v1 approved for this salon?" unanswerable without a lookup. `kairo_waba.py push-templates` submits that same prefixed name — it posted the bare catalogue key until 2026-08-31, which meant the gate looked for `kairo_promo_v1`, found nothing, and no customer WABA ever received a template. Pinned by `test_push_templates_uses_the_name_the_gate_looks_for`.
+
+**A `not_ready` key is retried by the hourly tick (2026-08-31).** Approval lands later, on *Kairo's* WABA, with no per-shop event attached — so without that retry a salon that onboarded while a template was pending could never send, permanently and silently. See [The hourly tick](#the-hourly-tick).
+
+### Retiring a template
+
+`scripts/kairo_waba.py retire-template --key promo_v1` deletes a template from Kairo's WABA **and from every customer WABA that has it**, then drops the rows so the catalogue entry can be re-pushed later.
+
+- **Kairo's copy goes first**, deliberately. The reverse order leaves the propagation gate still answering "approved" if a later step fails, and the next tick re-pushes everything just deleted. Ours first closes the gate, so a partial run stops dead and re-running finishes it.
+- **Not in the tick.** The tick could infer "gone from Kairo's WABA → delete downstream", but then one transient Graph read error wipes the template from every customer at once. A destructive fan-out gets an explicit operator behind it, and the command confirms before running.
+- **Meta blocks reusing the name for 30 days.** This is a kill switch for a template that must stop going out, not an editing workflow. New copy means a new key (`promo_v2`), not delete-and-recreate.
+- A per-shop delete failure keeps that row, so the next run retries it; "already gone" counts as success everywhere.
 
 ---
 
@@ -299,7 +310,7 @@ New `suppressed_reason` values: `recently_contacted`,
 
 `POST /messaging/tick` ([Number Provisioning](number-provisioning.md)) has two WhatsApp stages, each independently wrapped so one failure can't suppress the others:
 
-- `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver.
+- `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver, and carries the **only retry of the propagation gate**: live senders missing part of the catalogue are re-pushed once Kairo's own copy turns `approved`. Kairo's WABA is asked once per run, not once per shop — the answer is identical for everyone. An empty gate (unconfigured, or a Graph error) skips the stage entirely rather than pushing on a guess. Counts add `propagated` and `approved_on_kairo`.
 - `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed` (`no_consent`, `opted_out`, `recently_contacted`), `failed`, `deferred` (over daily cap, retried in an hour), `rate_capped` (Meta 131049, retried in 24h), `requeued` (claimed but never sent, recovered from a crashed tick).
 
 ---

@@ -187,10 +187,11 @@ class TemplateStatus:
 async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStatus | None:
     """Meta's current verdict on one template, by name.
 
-    Only used by the tick's reconciler: verdicts normally arrive as
-    `message_template_status_update` webhooks within minutes. A missed webhook
-    would otherwise leave a template `pending` forever and silently block
-    every send for that shop.
+    Two callers: the tick's reconciler (verdicts normally arrive as
+    `message_template_status_update` webhooks within minutes, and a missed one
+    would leave a template `pending` forever, blocking every send for that shop
+    in silence), and the propagation gate, which asks the same question of
+    *Kairo's* WABA before pushing anything into a customer's.
     """
     body = await _request(
         "GET", f"{waba_id}/message_templates", token=token,
@@ -203,6 +204,28 @@ async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStat
                 rejection_reason=row.get("rejected_reason") or None,
             )
     return None
+
+
+async def delete_template(*, waba_id: str, name: str, token: str) -> None:
+    """Remove a template from one WABA, by name.
+
+    Deletes **every language version** of the name — Meta's by-name delete is
+    not language-scoped, which is fine here because the catalogue is one
+    language per key.
+
+    Not idempotent-friendly at Meta: deleting a name that isn't there is an
+    error, not a no-op. Callers that fan this out across many WABAs must treat
+    "already gone" as success or a partial retry can never finish.
+
+    **Meta blocks reusing a deleted template's name for 30 days.** That makes
+    this a kill switch for a template that must stop going out, not an editing
+    workflow — to change copy, add `promo_v2` and retire `promo_v1` once the
+    new one is approved everywhere.
+    """
+    await _request(
+        "DELETE", f"{waba_id}/message_templates", token=token,
+        params={"name": name},
+    )
 
 
 # ---------------------------------------------------------------------- send

@@ -147,6 +147,60 @@ async def set_template_status(
     )
 
 
+async def list_senders_missing_templates(catalogue_size: int) -> list[dict]:
+    """Live senders that don't have the whole catalogue yet.
+
+    The gap this closes: propagation is gated on Kairo's own copy being
+    approved, so a salon that onboards while a template is still pending gets
+    nothing. Meta approves ours an hour later and — before this query existed —
+    nothing ever went back for that shop. `list_verifying_senders` doesn't
+    catch it (that salon is `online`, its sender is fine), onboarding is long
+    over, and the panel only offers the manual re-push for a *rejected*
+    template, not a missing one. The result was a shop that could never send,
+    with nothing anywhere saying why.
+
+    Cheap enough to run every tick: one count per sender, and shops with the
+    full catalogue — which is all of them, steady-state — don't come back.
+    """
+    return await execute(
+        """
+        SELECT s.* FROM whatsapp.senders s
+        WHERE s.status = 'online'
+          AND s.waba_id IS NOT NULL AND s.access_token IS NOT NULL
+          AND (SELECT count(*) FROM whatsapp.templates t
+               WHERE t.shop_id = s.shop_id) < $1
+        """,
+        catalogue_size,
+    )
+
+
+async def list_senders_with_template(template_key: str) -> list[dict]:
+    """Every WABA carrying one catalogue entry — the retire fan-out's worklist."""
+    return await execute(
+        """
+        SELECT s.shop_id, s.waba_id, s.access_token, t.name
+        FROM whatsapp.templates t
+        JOIN whatsapp.senders s ON s.shop_id = t.shop_id
+        WHERE t.template_key = $1
+          AND s.waba_id IS NOT NULL AND s.access_token IS NOT NULL
+        """,
+        template_key,
+    )
+
+
+async def delete_template_row(*, shop_id: UUID, template_key: str) -> None:
+    """Drop our record of a template, once Meta no longer has it.
+
+    Deliberately a real delete and not a status flag: `ensure_templates` skips
+    any key it already has a row for, so a tombstone would block the shop from
+    ever receiving the replacement.
+    """
+    await execute_void(
+        "DELETE FROM whatsapp.templates WHERE shop_id = $1 AND template_key = $2",
+        shop_id, template_key,
+    )
+
+
 async def list_unresolved_templates() -> list[dict]:
     """Templates Meta hasn't ruled on yet — the tick's reconciler.
 

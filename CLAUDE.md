@@ -6,6 +6,54 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-08-31 — The propagation gate had no retry, and `push-templates` used the wrong name
+
+**Two bugs on the same path, either of which alone meant no customer WABA ever
+received a template.** Found while wiring the webapp's Connetti WhatsApp button
+end to end.
+
+**1. `kairo_waba.py push-templates` submitted the bare catalogue key.** It
+posted `promo_v1`; the gate (`ensure_templates`) reads Kairo's WABA back looking
+for `template_name(key)` — `kairo_promo_v1`. The two never agreed, so
+`fetch_template` returned `None` for everything and every key landed in
+`not_ready` forever. The gate was working exactly as designed and failing
+closed on a question it was asking about a name that didn't exist. Fixed to
+push `template_name(key)`; pinned by an AST test, because this is a
+cross-file naming agreement with nothing else holding it together.
+
+**2. Nothing ever re-ran the gate for a live shop.** `ensure_templates` ran at
+onboarding, in the sweep for `list_verifying_senders()` (`verifying` /
+`pending_signup` only), and behind a webapp button shown *only* for a
+`rejected` template. So the ordinary sequence — salon onboards Monday while
+Kairo's copy is pending, Meta approves ours Tuesday — had no step that went
+back for that salon. It could never send, and the approval that unblocked it
+arrived on Kairo's WABA with no per-shop event attached, so nothing anywhere
+would have said why.
+
+Fixed by adding `list_senders_missing_templates()` to the sweep. Kairo's
+verdict is now computed **once per run** (`approved_on_kairo_waba`) rather than
+once per shop — same question, same answer for everyone, and it was previously
+N shops × M keys of identical Graph calls every hour. An empty gate
+(unconfigured, or a Graph error) skips the stage rather than pushing on a
+guess, so "fails closed" survives the change.
+
+**Also added: `retire-template`, deliberately outside the tick.** Deleting a
+template from Kairo's WABA now fans the delete out to every customer WABA and
+drops the rows. The tick *could* infer "gone from Kairo's WABA → delete
+downstream", and that was rejected: one transient Graph read error would then
+wipe the template from every customer at once. A destructive fan-out gets an
+explicit operator behind it. Kairo's copy is deleted **first** — the reverse
+leaves the gate answering "approved" if a later step fails, and the next tick
+re-pushes everything just deleted; ours-first closes the gate so a partial run
+stops dead and re-running finishes it.
+
+Note this makes delete a **kill switch, not an editing workflow**: Meta blocks
+reusing a deleted name for 30 days, so changing copy means `promo_v2`, not
+delete-and-recreate.
+
+**Docs:** `docs/knowledge/api/whatsapp.md` (templates/ensure, new "Retiring a
+template", the hourly tick).
+
 ## 2026-08-30 — WhatsApp is BYO WABA only; the `source='new'` provisioning path is removed
 
 **Decision:** dropped the second onboarding path entirely — owner's call, "we

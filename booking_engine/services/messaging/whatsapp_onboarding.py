@@ -179,7 +179,34 @@ async def complete(
             "templates": templates.get("created", 0)}
 
 
-async def ensure_templates(*, shop_id: UUID, settings) -> dict:
+async def approved_on_kairo_waba(settings) -> set[str]:
+    """Which catalogue keys Meta has approved on *Kairo's own* WABA.
+
+    Split out of `ensure_templates` so the sweep asks Meta once per run rather
+    than once per shop: the answer is the same for everyone, and it was N shops
+    × M keys of identical Graph calls every hour.
+
+    Fails closed. No `meta_kairo_waba_id`/`meta_kairo_token` configured means an
+    empty set — nothing propagates — never "propagate unchecked". A Graph error
+    is the same: `fetch_template` raises, the caller logs it, and the shop is
+    retried next tick rather than pushed to on a guess.
+    """
+    if not settings.meta_kairo_waba_id or not settings.meta_kairo_token:
+        return set()
+    approved = set()
+    for key in CATALOGUE:
+        verdict = await meta.fetch_template(
+            waba_id=settings.meta_kairo_waba_id, name=template_name(key),
+            token=settings.meta_kairo_token,
+        )
+        if verdict and verdict.status == "approved":
+            approved.add(key)
+    return approved
+
+
+async def ensure_templates(
+    *, shop_id: UUID, settings, approved: set[str] | None = None,
+) -> dict:
     """Inject Kairo's catalogue into the salon's own WABA.
 
     This is the call Twilio structurally could not make — a WABA it doesn't
@@ -193,12 +220,17 @@ async def ensure_templates(*, shop_id: UUID, settings) -> dict:
     rejection is a Meta judgment on the *content*, identical whatever WABA it's
     submitted to, so testing on one WABA before N customer WABAs avoids
     burning the same rejection N times (and the quality-rating hit that comes
-    with it). Fails closed: no `meta_kairo_waba_id`/`meta_kairo_token`
-    configured means nothing propagates, not "propagate unchecked."
+    with it).
+
+    `approved` is the gate's answer, passed in by the sweep so it is computed
+    once for the whole run; alone, this function asks for itself.
     """
     row = await wq.get_sender(shop_id)
     if not row or not row.get("waba_id") or not row.get("access_token"):
         return {"ok": False, "error": "not_started"}
+
+    if approved is None:
+        approved = await approved_on_kairo_waba(settings)
 
     created, failed, not_ready = 0, [], []
     for key, tpl in CATALOGUE.items():
@@ -206,14 +238,7 @@ async def ensure_templates(*, shop_id: UUID, settings) -> dict:
             continue
         name = template_name(key)
 
-        if not settings.meta_kairo_waba_id or not settings.meta_kairo_token:
-            not_ready.append(key)
-            continue
-        kairo_verdict = await meta.fetch_template(
-            waba_id=settings.meta_kairo_waba_id, name=name,
-            token=settings.meta_kairo_token,
-        )
-        if not kairo_verdict or kairo_verdict.status != "approved":
+        if key not in approved:
             not_ready.append(key)
             continue
 
@@ -247,8 +272,23 @@ async def sweep(*, settings) -> dict:
     `pending` forever, which blocks every send for that shop and looks like
     nothing at all. One bad shop is logged and skipped, never allowed to abort
     the sweep.
+
+    It also carries the **only** retry of the propagation gate. A salon that
+    onboards while Kairo's copy of a template is still pending gets nothing,
+    and the approval that unblocks it lands later, on Kairo's WABA, with no
+    per-shop event attached — so if this loop didn't go back for them, nobody
+    would.
     """
-    counts = {"senders": 0, "online": 0, "templates": 0, "approved": 0, "errors": 0}
+    counts = {"senders": 0, "online": 0, "templates": 0, "approved": 0,
+              "propagated": 0, "errors": 0}
+
+    # Once per sweep, not once per shop: same question, same answer for all.
+    try:
+        approved = await approved_on_kairo_waba(settings)
+    except Exception:  # noqa: BLE001 — a Graph blip must not skip the rest
+        logger.exception("whatsapp.kairo_gate_failed")
+        approved = set()
+    counts["approved_on_kairo"] = len(approved)
 
     for row in await wq.list_verifying_senders():
         try:
@@ -265,11 +305,33 @@ async def sweep(*, settings) -> dict:
                 throughput_level=number.throughput_level,
                 platform_type=number.platform_type,
             )
-            await ensure_templates(shop_id=row["shop_id"], settings=settings)
+            await ensure_templates(
+                shop_id=row["shop_id"], settings=settings, approved=approved
+            )
             counts["online"] += 1
         except Exception:  # noqa: BLE001 — one shop must not abort the sweep
             logger.exception("whatsapp.sender_poll_failed shop=%s", row["shop_id"])
             counts["errors"] += 1
+
+    # Live senders still missing part of the catalogue. Skipped entirely when
+    # the gate is empty — there is nothing to give them, and asking would be
+    # one pointless query per shop per hour.
+    if approved:
+        for row in await wq.list_senders_missing_templates(len(CATALOGUE)):
+            try:
+                result = await ensure_templates(
+                    shop_id=row["shop_id"], settings=settings, approved=approved
+                )
+                if result.get("created"):
+                    counts["propagated"] += result["created"]
+                    logger.info(
+                        "whatsapp.templates_propagated_late shop=%s created=%s",
+                        row["shop_id"], result["created"],
+                    )
+            except Exception:  # noqa: BLE001 — see above
+                logger.exception("whatsapp.late_propagation_failed shop=%s",
+                                 row["shop_id"])
+                counts["errors"] += 1
 
     for tpl in await wq.list_unresolved_templates():
         try:
@@ -292,3 +354,62 @@ async def sweep(*, settings) -> dict:
             counts["errors"] += 1
 
     return counts
+
+
+async def retire_template(*, template_key: str, settings) -> dict:
+    """Delete one template from Kairo's WABA and from every customer's.
+
+    **Deliberately not part of the sweep.** The sweep could infer "gone from
+    Kairo's WABA → delete downstream", but then one transient Graph read error
+    reads as a deletion and wipes the template from every customer's WABA at
+    once. A destructive fan-out gets an explicit operator behind it:
+    `scripts/kairo_waba.py retire-template --key promo_v1`.
+
+    **Kairo's copy goes first, and that order is the whole design.** The
+    reverse — customers first — leaves the gate still answering "approved" if
+    the last step fails, and the next sweep cheerfully re-pushes everything
+    just deleted. Deleting ours first closes the gate, so a partial run stops
+    dead and re-running finishes it.
+
+    "Already gone" counts as success at every step: Meta 404s a name it doesn't
+    have, and a partial retry must be able to complete.
+    """
+    if template_key not in CATALOGUE:
+        return {"ok": False, "error": "unknown_template"}
+    if not settings.meta_kairo_waba_id or not settings.meta_kairo_token:
+        return {"ok": False, "error": "kairo_waba_not_configured"}
+
+    name = template_name(template_key)
+    try:
+        await meta.delete_template(
+            waba_id=settings.meta_kairo_waba_id, name=name,
+            token=settings.meta_kairo_token,
+        )
+    except meta.MetaError as exc:
+        # 2593002 / 100 — no such template. Ours is already gone, which is the
+        # state we wanted; carry on to the customers who may still have it.
+        logger.warning("whatsapp.kairo_template_delete_failed name=%s err=%s", name, exc)
+
+    deleted, failed = 0, []
+    for row in await wq.list_senders_with_template(template_key):
+        try:
+            await meta.delete_template(
+                waba_id=row["waba_id"], name=row["name"], token=row["access_token"]
+            )
+        except meta.MetaError as exc:
+            # The row is dropped anyway when Meta says the template isn't
+            # there; anything else is a real failure and keeps the row so the
+            # next run retries it.
+            logger.warning("whatsapp.template_delete_failed shop=%s err=%s",
+                           row["shop_id"], exc)
+            failed.append(str(row["shop_id"]))
+            continue
+        await wq.delete_template_row(
+            shop_id=row["shop_id"], template_key=template_key
+        )
+        deleted += 1
+
+    logger.info("whatsapp.template_retired key=%s deleted=%s failed=%s",
+                template_key, deleted, len(failed))
+    return {"ok": True, "template_key": template_key,
+            "deleted": deleted, "failed": failed}

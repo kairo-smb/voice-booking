@@ -105,11 +105,16 @@ def register(a) -> None:
 def push_templates(a) -> None:
     """Submit the repo's own catalogue to this WABA, for approval."""
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from booking_engine.services.messaging.whatsapp_onboarding import template_name
     from booking_engine.services.messaging.whatsapp_templates import CATALOGUE
 
     for key, tpl in CATALOGUE.items():
         payload = {
-            "name": key,
+            # `template_name(key)`, not `key`. The propagation gate looks for
+            # `kairo_promo_v1` on this WABA; pushing it as bare `promo_v1`
+            # meant the gate never found it and nothing ever propagated to a
+            # customer — with "not_ready" as the only symptom. Fixed 2026-08-31.
+            "name": template_name(key),
             "language": tpl.language,
             "category": tpl.category,
             "components": [
@@ -132,6 +137,29 @@ def templates(a) -> None:
     out = _api("GET", f"{_waba()}/message_templates", params={"limit": 50})
     for t in out.get("data", []):
         print(f"{t['status']:10} {t['category']:12} {t['name']} ({t['language']})")
+
+
+def retire_template(a) -> None:
+    """Delete a template here AND from every customer WABA that has it.
+
+    Destructive and fanned out, so it asks first. Reads the same settings the
+    service does rather than META_TOKEN/META_WABA_ID — the fan-out needs the
+    database anyway, and one source of truth beats two that can disagree.
+
+    Meta blocks reusing the name for 30 days afterwards: this retires a
+    template, it does not edit one. New copy means a new key.
+    """
+    import asyncio
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from booking_engine.config import Settings
+    from booking_engine.services.messaging.whatsapp_onboarding import retire_template
+
+    if input(f"delete '{a.key}' from Kairo's WABA and EVERY customer WABA? [y/N] ") != "y":
+        sys.exit("aborted")
+    print(json.dumps(asyncio.run(retire_template(
+        template_key=a.key, settings=Settings()
+    )), indent=2))
 
 
 def send_template(a) -> None:
@@ -178,6 +206,9 @@ def main() -> None:
 
     sub.add_parser("push-templates").set_defaults(f=push_templates)
     sub.add_parser("templates").set_defaults(f=templates)
+
+    c = sub.add_parser("retire-template"); c.set_defaults(f=retire_template)
+    c.add_argument("--key", required=True, help="catalogue key, e.g. promo_v1")
 
     c = sub.add_parser("send-template"); c.set_defaults(f=send_template)
     c.add_argument("--phone-id", default=phone, required=not phone)
