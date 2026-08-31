@@ -152,7 +152,7 @@ def test_clean_variable_bounds_length():
 
 def test_render_produces_what_the_customer_reads():
     text = wt.render("promo_v1", {"1": "Giulia", "2": "Salone X", "3": "sconto 20%."})
-    assert "Ciao Giulia!" in text
+    assert "Ciao Giulia," in text
     assert "Salone X" in text
     assert "{{" not in text
 
@@ -823,7 +823,7 @@ async def test_sweep_propagates_to_an_online_shop_once_kairo_gets_approved(monke
 
     assert counts["propagated"] == len(wt.CATALOGUE)
     assert calls["missing_query"] == [len(wt.CATALOGUE)]
-    assert [c["waba_id"] for c in calls["create_template"]] == ["WABA1"]
+    assert [c["waba_id"] for c in calls["create_template"]] == ["WABA1"] * len(wt.CATALOGUE)
 
 
 @pytest.mark.asyncio
@@ -1305,3 +1305,50 @@ async def test_webhook_persists_inbound_replies(monkeypatch):
     assert captured["from_phone"] == "+393331112222"
     assert captured["body"] == "Certo, prenoto per giovedì!"
     assert captured["message_type"] == "text"
+
+
+def test_template_descriptor_carries_what_the_generator_needs():
+    """The webapp picker and the engine prompt both read this one payload.
+    A descriptor missing `body` or `generated_slot` produces a prompt with no
+    frame — the model then writes a standalone sentence that reads as a non
+    sequitur inside the approved scaffolding."""
+    from booking_engine.api.routes.whatsapp import _template_descriptor
+
+    d = _template_descriptor("winback_v1")
+    assert d["template_key"] == "winback_v1"
+    assert d["category"] == "MARKETING"
+    assert d["generated_slot"] == 4
+    assert "{{4}}" in d["body"]
+    assert d["max_chars"] == 90
+    assert d["intent"] == "winback"
+    assert d["guidance"]
+    assert d["language"] == "it"
+
+
+def test_descriptor_keeps_the_field_name_its_consumers_read():
+    """`template_key` is the name the DB column, CampaignRequest and three
+    webapp components all use. Renaming it here does not fail any test in this
+    repo — it fails silently in the webapp, where BulkCampaignTile gates sending
+    on `t.template_key === 'promo_v1'` and would simply stop sending."""
+    from booking_engine.api.routes.whatsapp import _template_descriptor
+
+    for key in wt.CATALOGUE:
+        d = _template_descriptor(key)
+        assert "template_key" in d, f"{key}: consumers read template_key"
+        assert "key" not in d, f"{key}: two names for one field will drift"
+
+
+def test_utility_descriptor_reports_no_generated_slot():
+    from booking_engine.api.routes.whatsapp import _template_descriptor
+
+    assert _template_descriptor("feedback_v1")["generated_slot"] is None
+
+
+def test_descriptor_reports_who_fills_the_slot():
+    """The webapp picks its UI from this: an LLM-filled template gets a
+    generate button, an owner-filled one gets a textarea."""
+    from booking_engine.api.routes.whatsapp import _template_descriptor
+
+    assert _template_descriptor("promo_v1")["filled_by"] == "llm"
+    assert _template_descriptor("promo_manual_v1")["filled_by"] == "owner"
+    assert _template_descriptor("feedback_v1")["filled_by"] is None

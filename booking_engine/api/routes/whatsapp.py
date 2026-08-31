@@ -46,6 +46,28 @@ _STATUS_MAP = {
 _OPT_OUT_CODES = {131050}
 
 
+def _template_descriptor(key: str) -> dict:
+    """Everything a caller needs to render the picker AND build the prompt.
+
+    One payload for both so they cannot disagree: the picker showing
+    `winback_v1` while the generator writes for `promo_v1`'s frame would
+    produce grammatically broken messages with nothing failing.
+    """
+    tpl = CATALOGUE[key]
+    return {
+        "template_key": key,
+        "body": tpl.body,
+        "category": tpl.category,
+        "language": tpl.language,
+        "variables": tpl.variables,
+        "generated_slot": tpl.generated_slot,
+        "filled_by": tpl.filled_by,
+        "max_chars": tpl.max_chars,
+        "intent": tpl.intent,
+        "guidance": tpl.guidance,
+    }
+
+
 class StartRequest(BaseModel):
     shop_id: UUID
     display_name: str = Field(min_length=1, max_length=120)
@@ -130,13 +152,17 @@ async def status(
         # The price list is not a sender fact: the webapp shows "what this
         # would cost you" before onboarding starts.
         return {"data": {
-            "status": "not_started", "templates": [],
+            "status": "not_started",
+            "templates": [
+                {**_template_descriptor(key), "status": "missing"}
+                for key in CATALOGUE
+            ],
             "sent_this_month": 0,
             "pricing": price_list(),
             "signup": onboarding.signup_config(settings),
         }}
     templates = [
-        {"template_key": key,
+        {**_template_descriptor(key),
          "status": (await wq.get_template(shop_id, key) or {}).get("status", "missing")}
         for key in CATALOGUE
     ]
