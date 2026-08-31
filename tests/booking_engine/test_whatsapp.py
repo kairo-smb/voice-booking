@@ -152,7 +152,7 @@ def test_clean_variable_bounds_length():
 
 def test_render_produces_what_the_customer_reads():
     text = wt.render("promo_v1", {"1": "Giulia", "2": "Salone X", "3": "sconto 20%."})
-    assert "Ciao Giulia!" in text
+    assert "Ciao Giulia," in text
     assert "Salone X" in text
     assert "{{" not in text
 
@@ -823,7 +823,7 @@ async def test_sweep_propagates_to_an_online_shop_once_kairo_gets_approved(monke
 
     assert counts["propagated"] == len(wt.CATALOGUE)
     assert calls["missing_query"] == [len(wt.CATALOGUE)]
-    assert [c["waba_id"] for c in calls["create_template"]] == ["WABA1"]
+    assert [c["waba_id"] for c in calls["create_template"]] == ["WABA1"] * len(wt.CATALOGUE)
 
 
 @pytest.mark.asyncio

@@ -35,23 +35,118 @@ class Template:
     sample: dict[str, str]
     category: str = "MARKETING"
     language: str = "it"
+    # Which {{n}} the LLM writes. None means nothing is generated — the mark of
+    # a UTILITY template, and the reason it stays UTILITY. Every other variable
+    # is a fact the webapp already holds, which is both cheaper and unable to
+    # hallucinate a service the customer never had.
+    generated_slot: int | None = None
+    max_chars: int = 90
+    # Passed to the model as-is. Never sent to Meta, so both can be retuned
+    # freely after a template is approved.
+    intent: str = ""
+    guidance: str = ""
 
 
 CATALOGUE: dict[str, Template] = {
-    # {{1}} customer first name, {{2}} salon name, {{3}} the generated offer.
-    # The fixed scaffolding around {{3}} is what makes this approvable: Meta
-    # can see what the message is for without seeing the variable's value.
+    # ── MARKETING ────────────────────────────────────────────────────────────
+    # Exactly one generated slot each, always the last variable. Everything
+    # before it is a fact: name, salon, and a lookup from the visit record.
     "promo_v1": Template(
         body=(
-            "Ciao {{1}}! Un messaggio da {{2}}: {{3}} "
+            "Ciao {{1}}, ti scriviamo da {{2}} con una proposta per te: {{3}} "
             "Rispondi a questo messaggio o chiamaci per prenotare."
         ),
         variables=3,
         sample={
             "1": "Giulia",
             "2": "Salone Bellezza",
-            "3": "questa settimana taglio e piega a 35€, valido fino a domenica.",
+            "3": "taglio e piega a 35€ questa settimana",
         },
+        generated_slot=3,
+        intent="promo",
+        guidance=(
+            "Una proposta concreta, basata su un servizio che il cliente fa già "
+            "o su uno complementare. Nessun saluto e nessun invito a prenotare: "
+            "ci sono già nel testo fisso."
+        ),
+    ),
+    "winback_v1": Template(
+        body=(
+            "Ciao {{1}}, ti scriviamo da {{2}}. Dall'ultima volta è passato {{3}}, "
+            "e per questo ti proponiamo {{4}}. "
+            "Rispondi a questo messaggio per prenotare."
+        ),
+        variables=4,
+        sample={
+            "1": "Giulia",
+            "2": "Salone Bellezza",
+            "3": "un po' dal tuo colore di marzo",
+            "4": "un ritocco colore con piega a 45€",
+        },
+        generated_slot=4,
+        intent="winback",
+        guidance=(
+            "Riconosci l'assenza senza colpevolizzare e dai un motivo concreto "
+            "per tornare. Deve incastrarsi dopo «ti proponiamo»."
+        ),
+    ),
+    "rebook_v1": Template(
+        body=(
+            "Ciao {{1}}, ti scriviamo da {{2}}. Di solito passi da noi ogni {{3}}, "
+            "quindi potrebbe essere il momento giusto per {{4}}. "
+            "Rispondi a questo messaggio per prenotare."
+        ),
+        variables=4,
+        sample={
+            "1": "Giulia",
+            "2": "Salone Bellezza",
+            "3": "sei settimane",
+            "4": "un taglio e piega a 35€",
+        },
+        generated_slot=4,
+        intent="rebook",
+        guidance=(
+            "Il cliente è regolare: tono di continuità, non di recupero. "
+            "Deve incastrarsi dopo «il momento giusto per»."
+        ),
+    ),
+
+    # ── UTILITY ──────────────────────────────────────────────────────────────
+    # NOTHING GENERATED AND NOTHING PERSUASIVE. That is the whole reason these
+    # cost €0.0341 instead of €0.0691, need no marketing consent and are exempt
+    # from the recipient cooldown. Adding so much as "e approfitta del 10%"
+    # makes Meta recategorise the template as MARKETING — not a rejection, a
+    # silent doubling of the economics of the highest-volume messages we send.
+    # Enforced by test_utility_templates_stay_utility.
+    "feedback_v1": Template(
+        body=(
+            "Ciao {{1}}, grazie per essere passato da {{2}} il {{3}} per {{4}}. "
+            "Com'è andata? Rispondi a questo messaggio per dirci la tua."
+        ),
+        variables=4,
+        sample={
+            "1": "Giulia",
+            "2": "Salone Bellezza",
+            "3": "12 marzo",
+            "4": "colore e piega",
+        },
+        category="UTILITY",
+        generated_slot=None,
+    ),
+    "reminder_v1": Template(
+        body=(
+            "Ciao {{1}}, ti ricordiamo il tuo appuntamento da {{2}} il {{3}} "
+            "per {{4}}. Se non puoi venire, rispondi a questo messaggio per spostarlo."
+        ),
+        variables=4,
+        sample={
+            "1": "Giulia",
+            "2": "Salone Bellezza",
+            "3": "giovedì 14 alle 10:30",
+            "4": "taglio e piega",
+        },
+        category="UTILITY",
+        generated_slot=None,
     ),
 }
 
