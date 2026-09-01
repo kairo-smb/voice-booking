@@ -570,7 +570,7 @@ async def test_one_shop_raising_does_not_abort_the_others(monkeypatch):
             raise RuntimeError("boom")
         return _online_sender(shop_id=shop_id)
     async def _template(shop_id, key):
-        return _approved_template(name="kairo_reminder_v1")
+        return _approved_template(name="it_reminder_v6")
     async def _due_feedback(shop_id, hours_after):
         return []
     async def _due_reminders(shop_id, min_no_shows):
@@ -611,8 +611,10 @@ async def test_already_enqueued_appointment_is_still_recorded(monkeypatch):
 def test_render_variables_formats_facts_not_generated_copy():
     row = _due_row(appointment_at=datetime(2026, 8, 12, 10, 30, tzinfo=ROME))
 
-    rem = wa.render_variables("reminder_v1", row)
-    assert rem == {"1": "Giulia", "2": "mercoledì 12 alle 10:30"}
+    rem = wa.render_variables("reminder_v6", row)
+    assert rem == {
+        "1": "Giulia", "2": "mercoledì 12 alle 10:30", "3": "Salone X",
+    }
 
     fb = wa.render_variables(
         "feedback_v2", row, platform="google", link="https://g.page/r/x",

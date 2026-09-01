@@ -57,7 +57,7 @@ _IT_DAYS = [
 # the review request (platform + link); feedback_v1 was the same message without
 # the ask, and is gone from the catalogue entirely (2026-09-01) — Meta locks an
 # approved body, so new copy is a new key, never an edit.
-_RULE_TEMPLATE = {"feedback": "feedback_v2", "reminder": "reminder_v1"}
+_RULE_TEMPLATE = {"feedback": "feedback_v2", "reminder": "reminder_v6"}
 
 _PLATFORM_LABELS = {
     "google": "Google",
@@ -89,12 +89,13 @@ def render_variables(
     approved frame. That is what keeps these templates UTILITY.
 
         feedback_v2: {{1}} name, {{2}} visit date, {{3}} where to review
-        reminder_v1: {{1}} name, {{2}} appointment date and time
+        reminder_v6: {{1}} name, {{2}} appointment date and time, {{3}} salon
 
-    Shortened on 2026-09-01. The salon name and the service list are gone from
-    both bodies (the message already arrives from the salon's own number), and
-    with them `shop_name`/`service_names` — the row still carries them for the
-    logs. `link` is accepted and ignored: the body now names the platform only.
+    Shortened on 2026-09-01: the service list is gone from both bodies, and the
+    salon name from the review request — that one already arrives from the
+    salon's own number. The reminder keeps the salon name, because a reminder
+    from a number the customer never saved otherwise says who is waiting for
+    them nowhere. `link` is accepted and ignored: the body names the platform.
     """
     when = row["appointment_at"]
     name = clean_variable(row["first_name"] or "")
@@ -104,7 +105,11 @@ def render_variables(
             "2": clean_variable(_feedback_date(when)),
             "3": _PLATFORM_LABELS.get(platform, _GENERAL_PLATFORM),
         }
-    return {"1": name, "2": clean_variable(_reminder_when(when))}
+    return {
+        "1": name,
+        "2": clean_variable(_reminder_when(when)),
+        "3": clean_variable(row["shop_name"] or ""),
+    }
 
 
 def _quality_blocks_marketing(sender: dict) -> bool:

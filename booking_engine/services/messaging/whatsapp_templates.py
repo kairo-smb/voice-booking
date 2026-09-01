@@ -201,15 +201,24 @@ CATALOGUE: dict[str, Template] = {
         category="UTILITY",
         generated_slot=None,
     ),
-    "reminder_v1": Template(
+    # `_v6` because that is the copy submitted and approved on Kairo's WABA —
+    # the key tracks Meta's name, never the other way round. Meta locks an
+    # approved body, so the version in this dict has to be the version Meta
+    # holds or the send addresses a template that does not exist.
+    #
+    # The salon name is back as {{3}}: it turns out a reminder arriving from a
+    # number the customer may not have saved reads as "who is waiting for me?"
+    # without it. It is still a fact from the shop row, so still UTILITY.
+    "reminder_v6": Template(
         body=(
-            "Ciao {{1}}, ti aspettiamo {{2}}. Se non puoi venire, rispondi a "
-            "questo messaggio e lo spostiamo."
+            "Ciao {{1}}, ti aspettiamo {{2}} da {{3}}. Se non puoi venire, "
+            "rispondi a questo messaggio e lo spostiamo."
         ),
-        variables=2,
+        variables=3,
         sample={
             "1": "Giulia",
             "2": "giovedì 14 alle 10:30",
+            "3": "Salone Bellezza",
         },
         category="UTILITY",
         generated_slot=None,
