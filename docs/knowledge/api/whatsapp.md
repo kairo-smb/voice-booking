@@ -64,6 +64,12 @@ Server-side, in this order — and the order is load-bearing:
 
 Errors (409): `not_started`, `onboarding_limit_reached`, `code_exchange_failed`, `meta_error`.
 
+### `DELETE /whatsapp/onboarding/{shop_id}`
+
+The owner closed Meta's popup without finishing (or the code exchange failed on `complete`). `start` persisted a `pending_signup` row to record intent; this is the other end of that contract — it drops the row so the next status read is `not_started` and the panel offers the connect button again instead of a stuck "Meta is verifying" box.
+
+Idempotent and narrow: it deletes only a `pending_signup` row (an `online` or `failed` sender is real state and is never touched), and deleting nothing still returns `{"data": {"ok": true}}`.
+
 ### `GET /whatsapp/status/{shop_id}`
 
 ```json
@@ -83,6 +89,8 @@ Errors (409): `not_started`, `onboarding_limit_reached`, `code_exchange_failed`,
 ```
 
 `status` is `not_started | pending_signup | verifying | online | offline | failed`. A salon can send only when `status == "online"` **and** the template is `approved`.
+
+`pending_signup` is reported as `not_started` once the row has been untouched for 15 minutes (`ABANDONED_AFTER`): the webapp aborts explicitly when its popup closes, but an owner can walk away from or close the whole tab with nothing firing, and a permanent "verifying" box with no way back is worse than forgetting the attempt.
 
 `pricing` is returned even for `not_started`: it is not a sender fact, and the webapp shows "what this would cost you" before onboarding begins.
 

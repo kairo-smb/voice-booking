@@ -23,6 +23,7 @@ See CLAUDE.md §2026-08-24, §2026-08-30 and docs/knowledge/api/whatsapp.md.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from booking_engine.clients import meta_whatsapp as meta
@@ -33,6 +34,25 @@ from booking_engine.services.messaging.whatsapp_templates import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Longer than any real popup interaction; a pending row this old was abandoned.
+ABANDONED_AFTER = timedelta(minutes=15)
+
+
+def is_abandoned(sender: dict, *, now: datetime | None = None) -> bool:
+    """A `pending_signup` row untouched for a while is an abandoned popup.
+
+    The webapp aborts explicitly when its popup closes, but an owner can walk
+    away from (or close) the whole tab and nothing fires. Interpreting such a
+    row as never-started at read time is what lets the panel offer the connect
+    button again instead of saying "Meta is verifying" forever.
+    """
+    if sender.get("status") != "pending_signup":
+        return False
+    updated = sender.get("updated_at")
+    if not updated:
+        return False
+    return (now or datetime.now(timezone.utc)) - updated > ABANDONED_AFTER
 
 # Meta's template statuses -> ours. Anything unrecognised stays 'pending' so a
 # new Meta state can never silently mark a template sendable.
@@ -188,6 +208,18 @@ async def complete(
             "phone_number": number.display_phone_number,
             "coexistence": number.is_on_biz_app,
             "templates": templates.get("created", 0)}
+
+
+async def abort(*, shop_id: UUID) -> dict:
+    """The owner closed Meta's popup without finishing, or the exchange failed.
+
+    The other end of `start()`'s contract: it wrote a `pending_signup` row to
+    record intent, and this drops it so the next status read is `not_started`
+    and the panel offers the button again. Idempotent — no row, or a row past
+    the pending stage, deletes nothing and still reports ok.
+    """
+    await wq.delete_pending_sender(shop_id)
+    return {"ok": True}
 
 
 async def approved_on_kairo_waba(settings) -> set[tuple[str, str]]:

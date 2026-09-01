@@ -73,6 +73,19 @@ async def set_sender_fields(shop_id: UUID, **fields) -> None:
     )
 
 
+async def delete_pending_sender(shop_id: UUID) -> None:
+    """Drop an abandoned onboarding row.
+
+    `start()` wrote it to record intent; nothing completed it, so it must not
+    linger as a permanent `pending_signup`. Scoped to that status on purpose:
+    an `online` or `failed` sender is real state and must survive.
+    """
+    await execute_void(
+        "DELETE FROM whatsapp.senders WHERE shop_id = $1 AND status = 'pending_signup'",
+        shop_id,
+    )
+
+
 async def list_verifying_senders() -> list[dict]:
     """Senders not yet online — polled by the tick to pick up Meta's verdict.
 

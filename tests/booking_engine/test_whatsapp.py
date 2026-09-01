@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -800,6 +800,39 @@ async def test_ensure_templates_fails_closed_without_kairo_waba_configured(monke
     assert set(result["not_ready"]) == set(wt.CATALOGUE)
     assert "create_template" not in calls
     assert "fetch_template" not in calls
+
+
+@pytest.mark.asyncio
+async def test_abort_drops_the_pending_row(monkeypatch):
+    """The abandon contract: `start()` records intent, `abort()` forgets it."""
+    calls = {}
+
+    async def _delete(shop_id):
+        calls["shop_id"] = shop_id
+    monkeypatch.setattr(wq, "delete_pending_sender", _delete)
+
+    result = await wo.abort(shop_id=SHOP)
+
+    assert result == {"ok": True}
+    assert calls["shop_id"] == SHOP
+
+
+def test_is_abandoned_ignores_a_fresh_pending_row():
+    sender = {"status": "pending_signup",
+              "updated_at": datetime.now(timezone.utc) - timedelta(minutes=2)}
+    assert wo.is_abandoned(sender) is False
+
+
+def test_is_abandoned_flags_a_stale_pending_row():
+    sender = {"status": "pending_signup",
+              "updated_at": datetime.now(timezone.utc) - timedelta(minutes=20)}
+    assert wo.is_abandoned(sender) is True
+
+
+def test_is_abandoned_ignores_non_pending_statuses():
+    sender = {"status": "online",
+              "updated_at": datetime.now(timezone.utc) - timedelta(days=3)}
+    assert wo.is_abandoned(sender) is False
 
 
 @pytest.mark.asyncio

@@ -161,6 +161,15 @@ async def complete(
     return {"data": result}
 
 
+@router.delete("/onboarding/{shop_id}")
+async def abort_onboarding(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Owner closed Meta's popup without finishing — reset so they can retry."""
+    return {"data": await onboarding.abort(shop_id=shop_id)}
+
+
 @router.get("/status/{shop_id}")
 async def status(
     shop_id: UUID,
@@ -169,6 +178,11 @@ async def status(
 ) -> dict:
     """Everything the webapp needs to render the onboarding/waiting state."""
     sender = await wq.get_sender(shop_id)
+    # A pending row nobody touched for a while is an abandoned popup, not a
+    # verification in flight — report it as never started so the panel offers
+    # the connect button instead of a stuck "Meta is verifying" box.
+    if sender and onboarding.is_abandoned(sender):
+        sender["status"] = "not_started"
     language = resolve_language(await wq.get_shop_language(shop_id))
     if not sender:
         # The price list is not a sender fact: the webapp shows "what this
