@@ -169,6 +169,28 @@ CATALOGUE: dict[str, Template] = {
         category="UTILITY",
         generated_slot=None,
     ),
+    # The review request: the owner picks where to ask ({{5}}) and may attach
+    # a link ({{6}}). Still facts only — a platform name and a URL are facts,
+    # so the UTILITY economics hold. feedback_v1 above is retired, not edited,
+    # because Meta locks an approved body.
+    "feedback_v2": Template(
+        body=(
+            "Ciao {{1}}, grazie per la tua visita da {{2}} il {{3}} per {{4}}. "
+            "Lascia una recensione su {{5}} o condividi il tuo parere con noi "
+            "{{6}} Grazie!"
+        ),
+        variables=6,
+        sample={
+            "1": "Giulia",
+            "2": "Salone Bellezza",
+            "3": "12 marzo",
+            "4": "colore e piega",
+            "5": "Google",
+            "6": "https://g.page/r/recensione",
+        },
+        category="UTILITY",
+        generated_slot=None,
+    ),
     "reminder_v1": Template(
         body=(
             "Ciao {{1}}, ti ricordiamo il tuo appuntamento da {{2}} in programma {{3}} "

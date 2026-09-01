@@ -8,13 +8,17 @@ looking at it, so the rails live in the same place as the send:
    ship here are UTILITY and continue regardless. The gate is written now so
    Plan 3's automated win-back (MARKETING) lands beside it without having to
    remember to add the pause.
-3. Weekly cap.     `sent_this_week >= weekly_cap` -> that rule is skipped.
-4. Enqueue, then record. A crash between the two re-sends once (recoverable);
+3. Enqueue, then record. A crash between the two re-sends once (recoverable);
    recording first would silently drop a message forever.
 
 Both templates are UTILITY: nothing is generated, every variable is a database
 fact, so no marketing consent is needed and the 7-day recipient cooldown does
 not apply. The send path agrees — see whatsapp_send's category branch.
+
+Per-rule params the owner configures on the webapp tile:
+  feedback:  hours_after (default 24), platform (google/facebook/instagram/
+             general), link (optional review URL).
+  reminder:  min_no_shows (default 0 = everyone; the 24h lead is fixed).
 """
 from __future__ import annotations
 
@@ -49,8 +53,19 @@ _IT_DAYS = [
     "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica",
 ]
 
-# Both rules are UTILITY — see whatsapp_templates.CATALOGUE.
-_RULE_TEMPLATE = {"feedback": "feedback_v1", "reminder": "reminder_v1"}
+# Both rules are UTILITY — see whatsapp_templates.CATALOGUE. feedback_v2 is
+# the review request (platform + link); feedback_v1 stays in the catalogue only
+# because Meta cannot un-approve an already-approved body, so the old template
+# is retired rather than edited.
+_RULE_TEMPLATE = {"feedback": "feedback_v2", "reminder": "reminder_v1"}
+
+_PLATFORM_LABELS = {
+    "google": "Google",
+    "facebook": "Facebook",
+    "instagram": "Instagram",
+}
+_GENERAL_PLATFORM = "un canale a tua scelta"
+_NO_LINK_CTA = "rispondendo a questo messaggio"
 
 
 def _feedback_date(when: datetime) -> str:
@@ -65,24 +80,35 @@ def _reminder_when(when: datetime) -> str:
     return f"{_IT_DAYS[local.weekday()]} {local.day} alle {local:%H:%M}"
 
 
-def render_variables(template_key: str, row: dict) -> dict[str, str]:
-    """The four variables every UTILITY template needs, from the due-work row.
+def render_variables(
+    template_key: str, row: dict,
+    *, platform: str = "general", link: str = "",
+) -> dict[str, str]:
+    """The variables the UTILITY templates need, from the due-work row.
 
     {{1}} name, {{2}} salon, {{3}} appointment time, {{4}} services. Nothing
     is generated: each value is a database fact, formatted for the approved
     frame. That is what keeps these templates UTILITY.
+
+    The review request (`feedback_v2`) also fills {{5}} (the platform the
+    owner picked, or a neutral phrase when "general") and {{6}} (the review
+    link, or a plain CTA when the owner left it empty).
     """
     when = row["appointment_at"]
-    if template_key == "feedback_v1":
+    if template_key.startswith("feedback"):
         date_text = _feedback_date(when)
     else:
         date_text = _reminder_when(when)
-    return {
+    out = {
         "1": clean_variable(row["first_name"] or ""),
         "2": clean_variable(row["shop_name"] or ""),
         "3": clean_variable(date_text),
         "4": clean_variable(row["service_names"] or ""),
     }
+    if template_key == "feedback_v2":
+        out["5"] = _PLATFORM_LABELS.get(platform, _GENERAL_PLATFORM)
+        out["6"] = clean_variable(link) if link else _NO_LINK_CTA
+    return out
 
 
 def _quality_blocks_marketing(sender: dict) -> bool:
@@ -123,22 +149,21 @@ async def run_automations(*, settings) -> dict:
                 # 3's win-back lands beside it without remembering to add it.
                 continue
 
-            cap = rule["weekly_cap"]
-            sent_this_week = await aq.sent_this_week(shop_id, rule_key)
-            if sent_this_week >= cap:
-                continue
-
             if rule_key == "feedback":
-                days_after = rule["params"].get("days_after", 2)
-                due = await aq.due_feedback(shop_id, days_after)
+                due = await aq.due_feedback(
+                    shop_id, rule["params"].get("hours_after", 24)
+                )
             else:
-                hours_before = rule["params"].get("hours_before", 24)
-                due = await aq.due_reminders(shop_id, hours_before)
+                due = await aq.due_reminders(
+                    shop_id, rule["params"].get("min_no_shows", 0)
+                )
 
             for row in due:
-                if sent_this_week >= cap:
-                    break
-                variables = render_variables(template_key, row)
+                variables = render_variables(
+                    template_key, row,
+                    platform=str(rule["params"].get("platform", "general")),
+                    link=str(rule["params"].get("link", "")),
+                )
                 try:
                     message_id = await wq.enqueue(
                         shop_id=shop_id,
@@ -172,7 +197,6 @@ async def run_automations(*, settings) -> dict:
                     appointment_id=row["appointment_id"],
                 )
                 if message_id is not None:
-                    sent_this_week += 1
                     counts[rule_key] += 1
         except Exception:  # noqa: BLE001 — one shop must not abort the others
             logger.exception(

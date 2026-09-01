@@ -167,14 +167,14 @@ async def shop(db_connection):
     )
 
 
-async def _completed_days_ago(shop_id, customer_id, staff_id, days):
-    """Insert a completed appointment whose end_time is `days` days old."""
+async def _completed_hours_ago(shop_id, customer_id, staff_id, hours):
+    """Insert a completed appointment whose end_time is `hours` hours old."""
     appointment_id = uuid4()
     await _insert_appointment(
         shop_id=shop_id, appointment_id=appointment_id, customer_id=customer_id,
         staff_id=staff_id,
-        start_time=datetime.now(tz=ROME) - timedelta(days=days + 1, minutes=10),
-        end_time=datetime.now(tz=ROME) - timedelta(days=days),
+        start_time=datetime.now(tz=ROME) - timedelta(hours=hours + 1, minutes=10),
+        end_time=datetime.now(tz=ROME) - timedelta(hours=hours),
     )
     return appointment_id
 
@@ -198,8 +198,8 @@ class TestAutomationQueriesIntegration:
         await _insert_staff(shop, staff_id)
         await _insert_customer(shop, customer_id)
         await _insert_service(shop, service_id)
-        appointment_id = await _completed_days_ago(
-            shop, customer_id, staff_id, days=2,
+        appointment_id = await _completed_hours_ago(
+            shop, customer_id, staff_id, hours=2,
         )
         await _insert_appointment_service(appointment_id, service_id)
 
@@ -207,10 +207,10 @@ class TestAutomationQueriesIntegration:
             shop_id=shop, rule_key="feedback", appointment_id=appointment_id,
         )
 
-        due = await aq.due_feedback(shop, days_after=2)
+        due = await aq.due_feedback(shop, hours_after=2)
         assert due == []
 
-    async def test_due_feedback_respects_the_one_day_window_at_both_edges(
+    async def test_due_feedback_respects_the_one_hour_window_at_both_edges(
         self, shop,
     ):
         customer_id, staff_id = uuid4(), uuid4()
@@ -219,14 +219,14 @@ class TestAutomationQueriesIntegration:
         await _insert_customer(shop, customer_id)
         await _insert_service(shop, service_id)
 
-        due_id = await _completed_days_ago(shop, customer_id, staff_id, days=2)
+        due_id = await _completed_hours_ago(shop, customer_id, staff_id, hours=2)
         await _insert_appointment_service(due_id, service_id)
-        too_old_id = await _completed_days_ago(
-            shop, customer_id, staff_id, days=3,
+        too_old_id = await _completed_hours_ago(
+            shop, customer_id, staff_id, hours=3,
         )
         await _insert_appointment_service(too_old_id, service_id)
 
-        due = await aq.due_feedback(shop, days_after=2)
+        due = await aq.due_feedback(shop, hours_after=2)
 
         ids = {row["appointment_id"] for row in due}
         assert ids == {due_id}
@@ -237,9 +237,9 @@ class TestAutomationQueriesIntegration:
         customer_id, staff_id = uuid4(), uuid4()
         await _insert_staff(shop, staff_id)
         await _insert_customer(shop, customer_id, phone=None)
-        await _completed_days_ago(shop, customer_id, staff_id, days=2)
+        await _completed_hours_ago(shop, customer_id, staff_id, hours=2)
 
-        assert await aq.due_feedback(shop, days_after=2) == []
+        assert await aq.due_feedback(shop, hours_after=2) == []
 
     async def test_due_feedback_rows_for_another_shop_never_appear(self, shop):
         other_shop = uuid4()
@@ -250,9 +250,9 @@ class TestAutomationQueriesIntegration:
                 customer_id, staff_id = uuid4(), uuid4()
                 await _insert_staff(sid, staff_id)
                 await _insert_customer(sid, customer_id)
-                await _completed_days_ago(sid, customer_id, staff_id, days=2)
+                await _completed_hours_ago(sid, customer_id, staff_id, hours=2)
 
-            due = await aq.due_feedback(shop, days_after=2)
+            due = await aq.due_feedback(shop, hours_after=2)
             assert due and all(row["appointment_id"] is not None for row in due)
         finally:
             await connection.execute_void(
@@ -300,7 +300,7 @@ class TestAutomationQueriesIntegration:
         )
         await _insert_appointment_service(too_far, service_id)
 
-        due = await aq.due_reminders(shop, hours_before=24)
+        due = await aq.due_reminders(shop, min_no_shows=0)
 
         assert {row["appointment_id"] for row in due} == {upcoming}
         assert due[0]["service_names"] == "Taglio"
@@ -327,27 +327,60 @@ class TestAutomationQueriesIntegration:
             status="cancelled",
         )
 
-        assert await aq.due_reminders(shop, hours_before=24) == []
+        assert await aq.due_reminders(shop, min_no_shows=0) == []
+
+    async def test_due_reminders_filters_by_no_show_threshold(self, shop):
+        """Only customers with >= min_no_shows no-shows are reminded; 0 = all."""
+        customer_id, staff_id = uuid4(), uuid4()
+        await _insert_staff(shop, staff_id)
+        await _insert_customer(shop, customer_id)
+        # A past appointment this customer missed — the one thing that makes
+        # them a no-show and so eligible for the reminder under min_no_shows=1.
+        missed_id = uuid4()
+        await _insert_appointment(
+            shop_id=shop, appointment_id=missed_id, customer_id=customer_id,
+            staff_id=staff_id,
+            start_time=datetime.now(tz=ROME) - timedelta(days=3),
+            end_time=datetime.now(tz=ROME) - timedelta(days=3) + timedelta(hours=1),
+            status="no_show",
+        )
+        upcoming_id = uuid4()
+        await _insert_appointment(
+            shop_id=shop, appointment_id=upcoming_id, customer_id=customer_id,
+            staff_id=staff_id,
+            start_time=datetime.now(tz=ROME) + timedelta(hours=2),
+            end_time=datetime.now(tz=ROME) + timedelta(hours=3),
+            status="scheduled",
+        )
+
+        # Threshold 1: the no-show history qualifies this customer.
+        due = await aq.due_reminders(shop, min_no_shows=1)
+        assert {row["appointment_id"] for row in due} == {upcoming_id}
+
+        # Threshold 3: the single no-show is not enough.
+        assert await aq.due_reminders(shop, min_no_shows=3) == []
+
+        # Threshold 0: everyone with an upcoming booking is reminded.
+        due_all = await aq.due_reminders(shop, min_no_shows=0)
+        assert {row["appointment_id"] for row in due_all} == {upcoming_id}
 
     async def test_upsert_rule_creates_then_updates(self, shop):
         created = await aq.upsert_rule(
             shop_id=shop, rule_key="feedback", enabled=True,
-            params={"days_after": 2}, weekly_cap=150,
+            params={"hours_after": 24, "platform": "google", "link": ""},
         )
         assert created["enabled"] is True
-        assert created["weekly_cap"] == 150
 
         updated = await aq.upsert_rule(
             shop_id=shop, rule_key="feedback", enabled=False,
-            params={"days_after": 3}, weekly_cap=100,
+            params={"hours_after": 6, "platform": "general", "link": ""},
         )
         assert updated["enabled"] is False
-        assert updated["params"] == {"days_after": 3}
+        assert updated["params"] == {"hours_after": 6, "platform": "general", "link": ""}
 
         rules = await aq.get_rules(shop)
         assert len(rules) == 1
         assert rules[0]["rule_key"] == "feedback"
-        assert rules[0]["weekly_cap"] == 100
 
     async def test_get_rules_is_empty_for_a_shop_that_never_configured(self, shop):
         assert await aq.get_rules(shop) == []
@@ -356,37 +389,17 @@ class TestAutomationQueriesIntegration:
         """'Absent rows mean off' — the tick only ever sees enabled rules."""
         await aq.upsert_rule(
             shop_id=shop, rule_key="feedback", enabled=False,
-            params={"days_after": 2}, weekly_cap=200,
+            params={"hours_after": 24, "platform": "general", "link": ""},
         )
         await aq.upsert_rule(
             shop_id=shop, rule_key="reminder", enabled=True,
-            params={"hours_before": 24}, weekly_cap=200,
+            params={"min_no_shows": 1},
         )
 
         enabled = await aq.list_enabled_rules()
 
         assert [r["rule_key"] for r in enabled] == ["reminder"]
         assert all(r["enabled"] for r in enabled)
-
-    async def test_sent_this_week_counts_this_rules_sends_only(self, shop):
-        customer_id, staff_id = uuid4(), uuid4()
-        await _insert_staff(shop, staff_id)
-        await _insert_customer(shop, customer_id)
-
-        appt_a = await _completed_days_ago(shop, customer_id, staff_id, days=2)
-        appt_b = await _completed_days_ago(shop, customer_id, staff_id, days=3)
-        await aq.record_automation_send(
-            shop_id=shop, rule_key="feedback", appointment_id=appt_a,
-        )
-        await aq.record_automation_send(
-            shop_id=shop, rule_key="feedback", appointment_id=appt_b,
-        )
-        await aq.record_automation_send(
-            shop_id=shop, rule_key="reminder", appointment_id=appt_a,
-        )
-
-        assert await aq.sent_this_week(shop, "feedback") == 2
-        assert await aq.sent_this_week(shop, "reminder") == 1
 
     async def test_claim_due_sql_is_valid(self, shop):
         """The drip's claim statement parses and plans against the real schema.
@@ -415,7 +428,7 @@ class FakeSettings:
 
 def _enabled_rule(**over):
     row = {"shop_id": SHOP, "rule_key": "feedback", "enabled": True,
-           "params": {"days_after": 2}, "weekly_cap": 200}
+           "params": {"hours_after": 24, "platform": "general", "link": ""}}
     row.update(over)
     return row
 
@@ -429,7 +442,7 @@ def _online_sender(**over):
 
 
 def _approved_template(**over):
-    row = {"status": "approved", "name": "kairo_feedback_v1", "language": "it",
+    row = {"status": "approved", "name": "kairo_feedback_v2", "language": "it",
            "category": "UTILITY"}
     row.update(over)
     return row
@@ -448,7 +461,7 @@ _ENQUEUE_SENTINEL = object()
 
 
 def _patch_automations(monkeypatch, *, rules=None, sender=None, template=None,
-                       due=None, sent_this_week=0, enqueue_result=_ENQUEUE_SENTINEL):
+                       due=None, enqueue_result=_ENQUEUE_SENTINEL):
     calls = {"enqueued": [], "recorded": []}
 
     async def _rules():
@@ -457,13 +470,11 @@ def _patch_automations(monkeypatch, *, rules=None, sender=None, template=None,
         return sender if sender is not None else _online_sender()
     async def _template(shop_id, key):
         return template if template is not None else _approved_template()
-    async def _sent_week(shop_id, rule_key):
-        return sent_this_week
-    async def _due_feedback(shop_id, days_after):
-        calls.setdefault("due_feedback", []).append(days_after)
+    async def _due_feedback(shop_id, hours_after):
+        calls.setdefault("due_feedback", []).append(hours_after)
         return due if due is not None else []
-    async def _due_reminders(shop_id, hours_before):
-        calls.setdefault("due_reminders", []).append(hours_before)
+    async def _due_reminders(shop_id, min_no_shows):
+        calls.setdefault("due_reminders", []).append(min_no_shows)
         return due if due is not None else []
     async def _enqueue(**kw):
         calls["enqueued"].append(kw)
@@ -474,7 +485,6 @@ def _patch_automations(monkeypatch, *, rules=None, sender=None, template=None,
     monkeypatch.setattr(aq, "list_enabled_rules", _rules)
     monkeypatch.setattr(wq, "get_sender", _sender)
     monkeypatch.setattr(wq, "get_template", _template)
-    monkeypatch.setattr(aq, "sent_this_week", _sent_week)
     monkeypatch.setattr(aq, "due_feedback", _due_feedback)
     monkeypatch.setattr(aq, "due_reminders", _due_reminders)
     monkeypatch.setattr(wq, "enqueue", _enqueue)
@@ -498,22 +508,17 @@ async def test_disabled_rule_sends_nothing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_weekly_cap_stops_sending_at_the_ceiling(monkeypatch):
-    # Already at the cap: nothing is enqueued at all.
-    at_cap = _patch_automations(monkeypatch, sent_this_week=200, due=[_due_row()])
-    counts = await wa.run_automations(settings=FakeSettings())
-    assert counts["feedback"] == 0
-    assert at_cap["enqueued"] == []
-
-    # One below the cap with three due: exactly one goes out, then the ceiling
-    # stops the batch mid-run.
-    mid = _patch_automations(
-        monkeypatch, sent_this_week=199, due=[_due_row(), _due_row(), _due_row()],
+async def test_sends_every_due_row_with_no_cap(monkeypatch):
+    """The weekly cap is gone: every due appointment is enqueued, however many."""
+    calls = _patch_automations(
+        monkeypatch, due=[_due_row(), _due_row(), _due_row()],
     )
+
     counts = await wa.run_automations(settings=FakeSettings())
-    assert counts["feedback"] == 1
-    assert len(mid["enqueued"]) == 1
-    assert len(mid["recorded"]) == 1
+
+    assert counts["feedback"] == 3
+    assert len(calls["enqueued"]) == 3
+    assert len(calls["recorded"]) == 3
 
 
 @pytest.mark.asyncio
@@ -566,11 +571,9 @@ async def test_one_shop_raising_does_not_abort_the_others(monkeypatch):
         return _online_sender(shop_id=shop_id)
     async def _template(shop_id, key):
         return _approved_template(name="kairo_reminder_v1")
-    async def _sent_week(shop_id, rule_key):
-        return 0
-    async def _due_feedback(shop_id, days_after):
+    async def _due_feedback(shop_id, hours_after):
         return []
-    async def _due_reminders(shop_id, hours_before):
+    async def _due_reminders(shop_id, min_no_shows):
         return [_due_row()]
     async def _enqueue(**kw):
         return uuid4()
@@ -580,7 +583,6 @@ async def test_one_shop_raising_does_not_abort_the_others(monkeypatch):
     monkeypatch.setattr(aq, "list_enabled_rules", _rules)
     monkeypatch.setattr(wq, "get_sender", _sender)
     monkeypatch.setattr(wq, "get_template", _template)
-    monkeypatch.setattr(aq, "sent_this_week", _sent_week)
     monkeypatch.setattr(aq, "due_feedback", _due_feedback)
     monkeypatch.setattr(aq, "due_reminders", _due_reminders)
     monkeypatch.setattr(wq, "enqueue", _enqueue)
@@ -609,14 +611,22 @@ async def test_already_enqueued_appointment_is_still_recorded(monkeypatch):
 def test_render_variables_formats_facts_not_generated_copy():
     row = _due_row(appointment_at=datetime(2026, 8, 12, 10, 30, tzinfo=ROME))
 
-    fb = wa.render_variables("feedback_v1", row)
-    assert fb["1"] == "Giulia"
-    assert fb["2"] == "Salone X"
-    assert fb["3"] == "12 agosto"
-    assert fb["4"] == "Taglio"
-
     rem = wa.render_variables("reminder_v1", row)
+    assert rem["1"] == "Giulia"
+    assert rem["2"] == "Salone X"
     assert rem["3"] == "mercoledì 12 alle 10:30"
+    assert rem["4"] == "Taglio"
+
+    fb = wa.render_variables(
+        "feedback_v2", row, platform="google", link="https://g.page/r/x",
+    )
+    assert fb["3"] == "12 agosto"
+    assert fb["5"] == "Google"
+    assert fb["6"] == "https://g.page/r/x"
+
+    general = wa.render_variables("feedback_v2", row)
+    assert general["5"] == "un canale a tua scelta"
+    assert general["6"] == "rispondendo a questo messaggio"
 
 
 # --------------------------------------------- UTILITY bypasses the send gate
