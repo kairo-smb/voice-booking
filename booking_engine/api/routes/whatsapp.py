@@ -96,8 +96,7 @@ class AutomationRuleRequest(BaseModel):
     shop_id: UUID
     rule_key: str
     enabled: bool
-    params: dict[str, int] = Field(default_factory=dict)
-    weekly_cap: int = Field(default=200, ge=1)
+    params: dict[str, str | int] = Field(default_factory=dict)
 
 
 class CampaignRequest(BaseModel):
@@ -268,8 +267,8 @@ async def campaign_status(
 # that has never opened the screen sends nothing — so GET always returns both,
 # with defaults, rather than only the rows that happen to exist.
 _RULE_DEFAULTS = {
-    "feedback": {"params": {"days_after": 2}, "weekly_cap": 200},
-    "reminder": {"params": {"hours_before": 24}, "weekly_cap": 200},
+    "feedback": {"params": {"hours_after": 24, "platform": "general", "link": ""}},
+    "reminder": {"params": {"min_no_shows": 0}},
 }
 
 
@@ -278,15 +277,13 @@ async def automations(
     shop_id: UUID,
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict:
-    """Both rules with their params, caps, and this week's sent count."""
+    """Both rules with their params."""
     rules = {r["rule_key"]: r for r in await aq.get_rules(shop_id)}
     return {"data": {
         key: {
             "rule_key": key,
             "enabled": (rules.get(key) or _RULE_DEFAULTS[key]).get("enabled", False),
             "params": (rules.get(key) or _RULE_DEFAULTS[key])["params"],
-            "weekly_cap": (rules.get(key) or _RULE_DEFAULTS[key])["weekly_cap"],
-            "sent_this_week": await aq.sent_this_week(shop_id, key),
         }
         for key in _RULE_DEFAULTS
     }}
@@ -305,14 +302,12 @@ async def put_automation(
         raise HTTPException(status_code=422, detail="unknown rule_key")
     row = await aq.upsert_rule(
         shop_id=shop_id, rule_key=payload.rule_key, enabled=payload.enabled,
-        params=payload.params, weekly_cap=payload.weekly_cap,
+        params=payload.params,
     )
     return {"data": {
         "rule_key": row["rule_key"],
         "enabled": row["enabled"],
         "params": row["params"],
-        "weekly_cap": row["weekly_cap"],
-        "sent_this_week": await aq.sent_this_week(shop_id, row["rule_key"]),
     }}
 
 

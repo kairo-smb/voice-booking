@@ -66,42 +66,22 @@ async def list_enabled_rules() -> list[dict]:
 
 async def upsert_rule(
     *, shop_id: UUID, rule_key: str, enabled: bool, params: dict,
-    weekly_cap: int,
 ) -> dict:
     """Create or update one rule. Additive and idempotent, like every write here."""
     row = await execute_one(
         """
         INSERT INTO whatsapp.automation_rules
-            (shop_id, rule_key, enabled, params, weekly_cap)
-        VALUES ($1,$2,$3,$4::jsonb,$5)
+            (shop_id, rule_key, enabled, params)
+        VALUES ($1,$2,$3,$4::jsonb)
         ON CONFLICT (shop_id, rule_key) DO UPDATE
         SET enabled = EXCLUDED.enabled,
             params = EXCLUDED.params,
-            weekly_cap = EXCLUDED.weekly_cap,
             updated_at = now()
         RETURNING *
         """,
-        shop_id, rule_key, enabled, json.dumps(params), weekly_cap,
+        shop_id, rule_key, enabled, json.dumps(params),
     )
     return _parse_rule(row) if row else row
-
-
-async def sent_this_week(shop_id: UUID, rule_key: str) -> int:
-    """How many of this rule's sends went out this calendar week.
-
-    The counter the owner sees against the weekly cap. A calendar week is the
-    honest meaning of "questa settimana"; the cap is a commercial ceiling, not
-    a Meta platform fact, so it does not need Meta's rolling window.
-    """
-    row = await execute_one(
-        """
-        SELECT count(*) AS n FROM whatsapp.automation_sends
-        WHERE shop_id = $1 AND rule_key = $2
-          AND sent_at >= date_trunc('week', now())
-        """,
-        shop_id, rule_key,
-    )
-    return int(row["n"]) if row else 0
 
 
 async def record_automation_send(
@@ -149,12 +129,13 @@ _CUSTOMER_REACHABLE = """
 """
 
 
-async def due_feedback(shop_id: UUID, days_after: int) -> list[dict]:
-    """Completed appointments whose end was `days_after` days ago.
+async def due_feedback(shop_id: UUID, hours_after: int) -> list[dict]:
+    """Completed appointments whose end was `hours_after` hours ago.
 
-    A one-day window, not "older than": the appointment is due the day it
-    becomes `days_after` days old and stays due for 24 hours. Re-runs are safe
-    because `automation_sends` is keyed on the appointment id.
+    A one-hour window, not "older than": the appointment is due the hour it
+    becomes `hours_after` hours old and stays due until `hours_after + 1`.
+    The tick runs hourly, so every appointment is caught once. Re-runs are
+    safe because `automation_sends` is keyed on the appointment id.
     """
     return await execute(
         f"""
@@ -164,8 +145,8 @@ async def due_feedback(shop_id: UUID, days_after: int) -> list[dict]:
         JOIN business_app_core.shops s ON s.id = a.shop_id
         WHERE a.shop_id = $1
           AND a.status = 'completed'
-          AND a.end_time > now() - make_interval(days => $2 + 1)
-          AND a.end_time <= now() - make_interval(days => $2)
+          AND a.end_time > now() - make_interval(hours => $2 + 1)
+          AND a.end_time <= now() - make_interval(hours => $2)
           {_CUSTOMER_REACHABLE}
           AND NOT EXISTS (
               SELECT 1 FROM whatsapp.automation_sends as_send
@@ -173,17 +154,28 @@ async def due_feedback(shop_id: UUID, days_after: int) -> list[dict]:
                 AND as_send.appointment_id = a.id
           )
         """,
-        shop_id, days_after,
+        shop_id, hours_after,
     )
 
 
-async def due_reminders(shop_id: UUID, hours_before: int) -> list[dict]:
-    """Booked appointments starting within the next `hours_before` hours.
+async def due_reminders(shop_id: UUID, min_no_shows: int) -> list[dict]:
+    """Booked appointments starting within the next 24 hours, for customers
+    with at least `min_no_shows` recorded no-shows.
 
-    "Booked" means not yet started and not cancelled: status is still
+    The 24-hour lead is a product constant, not a per-shop setting: the owner
+    only decides *who* is worth a reminder, and `min_no_shows = 0` means
+    everyone. "Booked" means not yet started and not cancelled: status is still
     scheduled/confirmed. Same one-shot guarantee as due_feedback — the send log
     makes re-running the tick idempotent.
     """
+    no_show_filter = ""
+    args: list = [shop_id]
+    if min_no_shows > 0:
+        no_show_filter = """
+          AND (SELECT count(*) FROM business_app_core.appointments a2
+               WHERE a2.customer_id = c.id AND a2.status = 'no_show') >= $2
+        """
+        args.append(min_no_shows)
     return await execute(
         f"""
         SELECT {_DUE_PROJECTION}, a.start_time AS appointment_at
@@ -193,7 +185,8 @@ async def due_reminders(shop_id: UUID, hours_before: int) -> list[dict]:
         WHERE a.shop_id = $1
           AND a.status IN ('scheduled','confirmed')
           AND a.start_time > now()
-          AND a.start_time <= now() + make_interval(hours => $2)
+          AND a.start_time <= now() + make_interval(hours => 24)
+          {no_show_filter}
           {_CUSTOMER_REACHABLE}
           AND NOT EXISTS (
               SELECT 1 FROM whatsapp.automation_sends as_send
@@ -201,5 +194,5 @@ async def due_reminders(shop_id: UUID, hours_before: int) -> list[dict]:
                 AND as_send.appointment_id = a.id
           )
         """,
-        shop_id, hours_before,
+        *args,
     )
