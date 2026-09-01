@@ -280,14 +280,27 @@ async def claim_due(limit: int) -> list[dict]:
     purpose: two overlapping ticks, or two Fly machines, must never both send
     the same row. SKIP LOCKED means the loser takes different work rather
     than blocking.
+
+    The template's category rides along so send_due can re-apply consent and
+    the cooldown only to MARKETING. A LEFT JOIN (not inner) so a row whose
+    template can't be resolved is still claimed — and fails closed to the
+    stricter MARKETING checks when category is missing.
+
+    The category is resolved inside the CTE and carried out through `due`, not
+    joined again in the UPDATE's FROM: Postgres refuses to let an outer join in
+    an UPDATE ... FROM reference the update target ("invalid reference to
+    FROM-clause entry for table m"), which is a parse error, so every send
+    would fail at runtime rather than at import.
     """
     return await execute(
         """
         WITH due AS (
-            SELECT m.id
+            SELECT m.id, t.category
             FROM whatsapp.outbound_messages m
             JOIN whatsapp.senders s
               ON s.shop_id = m.shop_id AND s.status = 'online'
+            LEFT JOIN whatsapp.templates t
+              ON t.shop_id = m.shop_id AND t.name = m.template_name
             WHERE m.status = 'queued' AND m.scheduled_at <= now()
             ORDER BY m.scheduled_at
             LIMIT $1
@@ -297,7 +310,7 @@ async def claim_due(limit: int) -> list[dict]:
         SET status = 'sending', updated_at = now()
         FROM due
         WHERE m.id = due.id
-        RETURNING m.*
+        RETURNING m.*, due.category AS category
         """,
         limit,
     )

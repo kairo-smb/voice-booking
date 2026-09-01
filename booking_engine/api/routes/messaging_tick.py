@@ -20,6 +20,7 @@ from booking_engine.db.number_request_queries import list_pending_review, set_st
 from booking_engine.services.number_health import check_all
 from booking_engine.services.number_provisioning import provision_approved
 from booking_engine.services.number_release import sweep as release_sweep
+from booking_engine.services.messaging.whatsapp_automations import run_automations as whatsapp_run_automations
 from booking_engine.services.messaging.whatsapp_onboarding import sweep as whatsapp_sweep
 from booking_engine.services.messaging.whatsapp_send import send_due as whatsapp_send_due
 
@@ -98,6 +99,17 @@ async def tick(
         whatsapp_sends = {"errors": 1}
         errors += 1
 
+    # Automation rules run after the drip so a queued reminder is only ever
+    # sent in a later tick (or the same one, if it lands before send_due
+    # claims). Same isolation as every other stage: one failure is counted,
+    # not raised, so it can never 500 the tick.
+    try:
+        whatsapp_automations = await whatsapp_run_automations(settings=settings)
+    except Exception:  # noqa: BLE001 — see comment above
+        logger.exception("messaging_tick.whatsapp_automations_failed")
+        whatsapp_automations = {"errors": 1}
+        errors += 1
+
     return {"data": {
         "reviewed": reviewed,
         "provisioned": provisioned,
@@ -107,4 +119,5 @@ async def tick(
         "release": release,
         "whatsapp": whatsapp_onboarding_counts,
         "whatsapp_sends": whatsapp_sends,
+        "whatsapp_automations": whatsapp_automations,
     }}

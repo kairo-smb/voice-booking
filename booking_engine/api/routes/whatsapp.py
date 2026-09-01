@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token, _get_settings
 from booking_engine.config import Settings
+from booking_engine.db import whatsapp_automation_queries as aq
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
@@ -65,6 +66,10 @@ def _template_descriptor(key: str) -> dict:
         "max_chars": tpl.max_chars,
         "intent": tpl.intent,
         "guidance": tpl.guidance,
+        # The approved sample per variable, so the webapp can render the body
+        # with realistic values (the automations tile shows the owner exactly
+        # what the customer will read) without duplicating the catalogue.
+        "sample": tpl.sample,
     }
 
 
@@ -85,6 +90,14 @@ class CompleteRequest(BaseModel):
 class Recipient(BaseModel):
     customer_id: UUID
     variables: dict[str, str] = Field(default_factory=dict)
+
+
+class AutomationRuleRequest(BaseModel):
+    shop_id: UUID
+    rule_key: str
+    enabled: bool
+    params: dict[str, int] = Field(default_factory=dict)
+    weekly_cap: int = Field(default=200, ge=1)
 
 
 class CampaignRequest(BaseModel):
@@ -247,6 +260,60 @@ async def campaign_status(
     return {"data": await wq.campaign_progress(
         shop_id=shop_id, campaign_key=campaign_key
     )}
+
+
+# ----------------------------------------------------------------- automations
+
+# The two rules the automations tile offers. Absent rows mean "off" — a shop
+# that has never opened the screen sends nothing — so GET always returns both,
+# with defaults, rather than only the rows that happen to exist.
+_RULE_DEFAULTS = {
+    "feedback": {"params": {"days_after": 2}, "weekly_cap": 200},
+    "reminder": {"params": {"hours_before": 24}, "weekly_cap": 200},
+}
+
+
+@router.get("/automations/{shop_id}")
+async def automations(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Both rules with their params, caps, and this week's sent count."""
+    rules = {r["rule_key"]: r for r in await aq.get_rules(shop_id)}
+    return {"data": {
+        key: {
+            "rule_key": key,
+            "enabled": (rules.get(key) or _RULE_DEFAULTS[key]).get("enabled", False),
+            "params": (rules.get(key) or _RULE_DEFAULTS[key])["params"],
+            "weekly_cap": (rules.get(key) or _RULE_DEFAULTS[key])["weekly_cap"],
+            "sent_this_week": await aq.sent_this_week(shop_id, key),
+        }
+        for key in _RULE_DEFAULTS
+    }}
+
+
+@router.put("/automations/{shop_id}")
+async def put_automation(
+    shop_id: UUID,
+    payload: AutomationRuleRequest,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Upsert one rule. Owner-configured, so the toggle and the rails land here."""
+    if payload.shop_id != shop_id:
+        raise HTTPException(status_code=422, detail="shop_id mismatch")
+    if payload.rule_key not in _RULE_DEFAULTS:
+        raise HTTPException(status_code=422, detail="unknown rule_key")
+    row = await aq.upsert_rule(
+        shop_id=shop_id, rule_key=payload.rule_key, enabled=payload.enabled,
+        params=payload.params, weekly_cap=payload.weekly_cap,
+    )
+    return {"data": {
+        "rule_key": row["rule_key"],
+        "enabled": row["enabled"],
+        "params": row["params"],
+        "weekly_cap": row["weekly_cap"],
+        "sent_this_week": await aq.sent_this_week(shop_id, row["rule_key"]),
+    }}
 
 
 @router.delete("/campaigns/{shop_id}/{campaign_key}")

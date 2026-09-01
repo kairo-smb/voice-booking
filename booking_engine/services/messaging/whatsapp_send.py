@@ -139,6 +139,15 @@ async def enqueue_campaign(
         # queue slot, so refuse here where the owner can see why.
         return {"ok": False, "error": f"template_{template['status']}"}
 
+    # UTILITY is transactional — a reminder about the customer's own
+    # appointment. It needs no marketing consent, is not blocked by Meta's +1
+    # marketing pause, and must never be suppressed by the 7-day recipient
+    # cooldown (that cooldown is our guard against the MARKETING frequency
+    # cap; an appointment reminder is not a promotion). Nothing fails when
+    # this is wrong the other way: a missing category fails closed to the
+    # stricter MARKETING path.
+    is_utility = template.get("category") == "UTILITY"
+
     # The binding daily ceiling: min(Meta's tier, our drip rate). Not
     # `sender["daily_cap"]` directly — that is a commercial knob and must never
     # be able to authorise more than the platform allows. See meta_limits.
@@ -163,11 +172,17 @@ async def enqueue_campaign(
     # Who already heard from this salon inside the cooldown. One batched query
     # for the whole campaign — a bulk send is up to 2000 recipients, and this
     # is the safeguard that keeps us *under* Meta's per-user marketing cap
-    # rather than discovering it as a 131049 after the send is spent.
-    cooled_off = await wq.recently_contacted(
-        shop_id=shop_id,
-        customer_ids=[r["customer_id"] for r in recipients],
-        hours=settings.whatsapp_recipient_cooldown_hours,
+    # rather than discovering it as a 131049 after the send is spent. UTILITY
+    # sends skip it entirely: the cooldown guards marketing, and a reminder
+    # must not be delayed (or suppressed) by last week's offer.
+    cooled_off = (
+        set()
+        if is_utility
+        else await wq.recently_contacted(
+            shop_id=shop_id,
+            customer_ids=[r["customer_id"] for r in recipients],
+            hours=settings.whatsapp_recipient_cooldown_hours,
+        )
     )
 
     queued, suppressed, skipped = 0, 0, 0
@@ -185,13 +200,13 @@ async def enqueue_campaign(
             reason = "customer_not_found"
         elif not phone:
             reason = "no_phone"
-        elif not _has_active_consent(customer):
+        elif not is_utility and not _has_active_consent(customer):
             reason = "no_consent"
-        elif not meta_limits.marketing_allowed(phone):
+        elif not is_utility and not meta_limits.marketing_allowed(phone):
             # Meta has paused marketing delivery to +1 entirely since
             # 2025-04-01. Refused here rather than queued as a certain failure.
             reason = "marketing_blocked_destination"
-        elif customer_id in cooled_off:
+        elif not is_utility and customer_id in cooled_off:
             reason = "recently_contacted"
 
         message_id = await wq.enqueue(
@@ -272,26 +287,29 @@ async def send_due(*, settings) -> dict:
             counts["deferred"] += 1
             continue
 
-        # Re-read consent: the row may have been queued hours ago.
-        customer = (
-            await sms_queries.get_customer_for_send(shop_id, msg["customer_id"])
-            if msg["customer_id"] else None
-        )
-        if msg["customer_id"] and (not customer or not _has_active_consent(customer)):
-            await wq.mark_suppressed(message_id=msg["id"], reason="no_consent")
-            counts["suppressed"] += 1
-            continue
-
-        # Re-check the cooldown too, for the same reason consent is re-read: a
-        # row queued days ago may have been overtaken by another campaign, and
-        # the per-user cap it protects against is Meta's, not ours to spend.
-        if msg["customer_id"] and await wq.recently_contacted(
-            shop_id=shop_id, customer_ids=[msg["customer_id"]],
-            hours=settings.whatsapp_recipient_cooldown_hours,
-        ):
-            await wq.mark_suppressed(message_id=msg["id"], reason="recently_contacted")
-            counts["suppressed"] += 1
-            continue
+        # Re-read consent and the cooldown only for MARKETING, for the same
+        # reason consent is re-read at all: a queued row can sit for hours (or
+        # days, on a multi-day drip), and both the customer's consent and the
+        # per-user marketing cap can change in between. A UTILITY reminder is
+        # exempt from both — it is transactional, about the customer's own
+        # appointment, and the cooldown must never suppress it.
+        if msg["customer_id"] and msg.get("category") != "UTILITY":
+            customer = await sms_queries.get_customer_for_send(
+                shop_id, msg["customer_id"],
+            )
+            if not customer or not _has_active_consent(customer):
+                await wq.mark_suppressed(message_id=msg["id"], reason="no_consent")
+                counts["suppressed"] += 1
+                continue
+            if await wq.recently_contacted(
+                shop_id=shop_id, customer_ids=[msg["customer_id"]],
+                hours=settings.whatsapp_recipient_cooldown_hours,
+            ):
+                await wq.mark_suppressed(
+                    message_id=msg["id"], reason="recently_contacted",
+                )
+                counts["suppressed"] += 1
+                continue
 
         variables = msg["variables"]
         if isinstance(variables, str):     # asyncpg hands jsonb back as text
