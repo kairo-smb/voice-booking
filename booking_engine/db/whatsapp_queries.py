@@ -20,6 +20,19 @@ async def get_sender(shop_id: UUID) -> dict | None:
     )
 
 
+async def get_shop_language(shop_id: UUID) -> str | None:
+    """The locale the shop runs the platform in — `shops.language`, NOT NULL.
+
+    It is what template names are composed from, so it is read at the moment
+    of use rather than copied onto the sender: a shop that switches locale
+    must start addressing the other language's templates immediately.
+    """
+    row = await execute_one(
+        "SELECT language FROM business_app_core.shops WHERE id = $1", shop_id
+    )
+    return (row or {}).get("language")
+
+
 async def upsert_sender(*, shop_id: UUID, display_name: str, source: str) -> dict:
     row = await execute_one(
         """

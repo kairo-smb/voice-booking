@@ -24,7 +24,10 @@ from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
 from booking_engine.services.messaging.whatsapp_pricing import price_list
 from booking_engine.services.messaging.whatsapp_send import enqueue_campaign
-from booking_engine.services.messaging.whatsapp_templates import CATALOGUE
+from booking_engine.services.messaging.whatsapp_onboarding import template_name
+from booking_engine.services.messaging.whatsapp_templates import (
+    CATALOGUE, DEFAULT_LANGUAGE, resolve_language,
+)
 from booking_engine.services.meta_signature import meta_signature_valid
 
 logger = logging.getLogger(__name__)
@@ -47,19 +50,25 @@ _STATUS_MAP = {
 _OPT_OUT_CODES = {131050}
 
 
-def _template_descriptor(key: str) -> dict:
+def _template_descriptor(key: str, language: str = DEFAULT_LANGUAGE) -> dict:
     """Everything a caller needs to render the picker AND build the prompt.
 
     One payload for both so they cannot disagree: the picker showing
     `winback_v1` while the generator writes for `promo_v1`'s frame would
     produce grammatically broken messages with nothing failing.
+
+    `language` is the shop's own locale, already resolved to one we have copy
+    for. marketing-engine writes the generated slot in whatever this says
+    (`buildOfferSystem` reads it straight off the descriptor), so a wrong value
+    here is a message in the wrong language, not an error anywhere.
     """
     tpl = CATALOGUE[key]
     return {
         "template_key": key,
+        "name": template_name(key, language),
         "body": tpl.body,
         "category": tpl.category,
-        "language": tpl.language,
+        "language": language,
         "variables": tpl.variables,
         "generated_slot": tpl.generated_slot,
         "filled_by": tpl.filled_by,
@@ -160,13 +169,14 @@ async def status(
 ) -> dict:
     """Everything the webapp needs to render the onboarding/waiting state."""
     sender = await wq.get_sender(shop_id)
+    language = resolve_language(await wq.get_shop_language(shop_id))
     if not sender:
         # The price list is not a sender fact: the webapp shows "what this
         # would cost you" before onboarding starts.
         return {"data": {
             "status": "not_started",
             "templates": [
-                {**_template_descriptor(key), "status": "missing"}
+                {**_template_descriptor(key, language), "status": "missing"}
                 for key in CATALOGUE
             ],
             "sent_this_month": 0,
@@ -174,7 +184,7 @@ async def status(
             "signup": onboarding.signup_config(settings),
         }}
     templates = [
-        {**_template_descriptor(key),
+        {**_template_descriptor(key, language),
          "status": (await wq.get_template(shop_id, key) or {}).get("status", "missing")}
         for key in CATALOGUE
     ]

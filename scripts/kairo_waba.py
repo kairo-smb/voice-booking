@@ -35,7 +35,7 @@ GRAPH = "https://graph.facebook.com/v26.0"
 _CODE = re.compile(r"\b(\d{3})[- ]?(\d{3})\b")
 
 
-def _api(method: str, path: str, **kwargs) -> dict:
+def _call(method: str, path: str, **kwargs) -> tuple[int, dict]:
     token = os.environ["META_TOKEN"]
     r = httpx.request(
         method,
@@ -44,9 +44,13 @@ def _api(method: str, path: str, **kwargs) -> dict:
         timeout=30,
         **kwargs,
     )
-    body = r.json()
-    if r.status_code >= 400:
-        sys.exit(f"HTTP {r.status_code}\n{json.dumps(body, indent=2)}")
+    return r.status_code, r.json()
+
+
+def _api(method: str, path: str, **kwargs) -> dict:
+    status, body = _call(method, path, **kwargs)
+    if status >= 400:
+        sys.exit(f"HTTP {status}\n{json.dumps(body, indent=2)}")
     return body
 
 
@@ -102,35 +106,109 @@ def register(a) -> None:
     )
 
 
+def _body_component(tpl) -> dict:
+    return {
+        "type": "BODY",
+        "text": tpl.body,
+        # Meta rejects a body with variables and no example.
+        "example": {
+            "body_text": [[tpl.sample[str(i)] for i in range(1, tpl.variables + 1)]]
+        },
+    }
+
+
+def _live_body(live: dict) -> dict | None:
+    for comp in live.get("components", []):
+        if comp.get("type") == "BODY":
+            return comp
+    return None
+
+
+# Meta only accepts an edit on a template that has had a verdict. A PENDING one
+# has to be waited out, and a name deleted in the last 30 days is unusable.
+_EDITABLE = {"APPROVED", "REJECTED", "PAUSED"}
+
+
 def push_templates(a) -> None:
-    """Submit the repo's own catalogue to this WABA, for approval."""
+    """Reconcile this WABA against the repo's catalogue: create, edit, or skip.
+
+    Not a blind create loop any more. It used to POST every entry and die on
+    the first `name already exists` (`_api` exits on 4xx), so re-running after
+    a copy change pushed nothing and — worse — stopped before the entries added
+    *after* the previous run. A catalogue that has moved to v2 while Meta still
+    holds v1 was invisible: the status list shows APPROVED either way, because
+    it prints names, not bodies.
+    """
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from booking_engine.services.messaging.whatsapp_onboarding import template_name
-    from booking_engine.services.messaging.whatsapp_templates import CATALOGUE
+    from booking_engine.services.messaging.whatsapp_templates import (
+        CATALOGUE, SUPPORTED_LANGUAGES,
+    )
 
-    for key, tpl in CATALOGUE.items():
-        payload = {
-            # `template_name(key)`, not `key`. The propagation gate looks for
-            # `kairo_promo_v1` on this WABA; pushing it as bare `promo_v1`
-            # meant the gate never found it and nothing ever propagated to a
-            # customer — with "not_ready" as the only symptom. Fixed 2026-08-31.
-            "name": template_name(key),
-            "language": tpl.language,
-            "category": tpl.category,
-            "components": [
-                {
-                    "type": "BODY",
-                    "text": tpl.body,
-                    # Meta rejects a body with variables and no example.
-                    "example": {
-                        "body_text": [
-                            [tpl.sample[str(i)] for i in range(1, tpl.variables + 1)]
-                        ]
-                    },
-                }
-            ],
-        }
-        print(key, _api("POST", f"{_waba()}/message_templates", json=payload))
+    out = _api(
+        "GET", f"{_waba()}/message_templates",
+        params={"limit": 100, "fields": "id,name,language,status,category,components"},
+    )
+    live = {(t["name"], t["language"]): t for t in out.get("data", [])}
+
+    # One pass per locale. Kairo's WABA carries every language's copy side by
+    # side (`it_promo_v1`, `en_promo_v1`, …) — Meta cannot translate a template,
+    # so each is its own submission with its own verdict.
+    failed = []
+    for language, (key, tpl) in [
+        (lang, item) for lang in SUPPORTED_LANGUAGES for item in CATALOGUE.items()
+    ]:
+        # `template_name(key, language)`, not `key`. The propagation gate looks
+        # for `it_promo_v1` on this WABA; pushing it as bare `promo_v1` meant
+        # the gate never found it and nothing ever propagated to a customer —
+        # with "not_ready" as the only symptom. Fixed 2026-08-31.
+        name = template_name(key, language)
+        want = _body_component(tpl)
+        have = live.get((name, language))
+
+        if have is None:
+            if a.dry_run:
+                print(f"create     {name}"); continue
+            status, body = _call("POST", f"{_waba()}/message_templates", json={
+                "name": name, "language": language,
+                "category": tpl.category, "components": [want],
+            })
+            # One failure must not abort the rest: the whole bug this replaces
+            # was a single 4xx swallowing every later entry in the catalogue.
+            if status >= 400:
+                print(f"FAILED     {name}  {json.dumps(body)}"); failed.append(name)
+            else:
+                print(f"created    {name}  {body.get('status', '')}")
+            continue
+
+        got = _live_body(have) or {}
+        if got.get("text") == want["text"] and got.get("example") == want["example"]:
+            print(f"unchanged  {name}  {have['status']}")
+            continue
+
+        # Category is not sent on an edit. UTILITY -> MARKETING doubles the cost
+        # of the highest-volume messages we send and Meta re-reviews it as a new
+        # template anyway, so it gets a human, not a loop.
+        if have.get("category") != tpl.category:
+            print(f"SKIPPED    {name}  category {have.get('category')} != {tpl.category}"
+                  f" — retire and re-push under a new key")
+            failed.append(name)
+            continue
+        if have["status"] not in _EDITABLE:
+            print(f"SKIPPED    {name}  status {have['status']} is not editable")
+            failed.append(name)
+            continue
+        if a.dry_run:
+            print(f"edit       {name}  ({have['status']} -> PENDING)"); continue
+
+        status, body = _call("POST", have["id"], json={"components": [want]})
+        if status >= 400:
+            print(f"FAILED     {name}  {json.dumps(body)}"); failed.append(name)
+        else:
+            print(f"edited     {name}  back to PENDING")
+
+    if failed:
+        sys.exit(f"\n{len(failed)} not pushed: {', '.join(failed)}")
 
 
 def templates(a) -> None:
@@ -204,7 +282,9 @@ def main() -> None:
     c.add_argument("--phone-id", default=phone, required=not phone)
     c.add_argument("--pin", required=True, help="6 digits you choose and keep")
 
-    sub.add_parser("push-templates").set_defaults(f=push_templates)
+    c = sub.add_parser("push-templates"); c.set_defaults(f=push_templates)
+    c.add_argument("--dry-run", action="store_true",
+                   help="print what would be created/edited, touch nothing")
     sub.add_parser("templates").set_defaults(f=templates)
 
     c = sub.add_parser("retire-template"); c.set_defaults(f=retire_template)

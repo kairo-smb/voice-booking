@@ -612,21 +612,32 @@ def test_render_variables_formats_facts_not_generated_copy():
     row = _due_row(appointment_at=datetime(2026, 8, 12, 10, 30, tzinfo=ROME))
 
     rem = wa.render_variables("reminder_v1", row)
-    assert rem["1"] == "Giulia"
-    assert rem["2"] == "Salone X"
-    assert rem["3"] == "mercoledì 12 alle 10:30"
-    assert rem["4"] == "Taglio"
+    assert rem == {"1": "Giulia", "2": "mercoledì 12 alle 10:30"}
 
     fb = wa.render_variables(
         "feedback_v2", row, platform="google", link="https://g.page/r/x",
     )
-    assert fb["3"] == "12 agosto"
-    assert fb["5"] == "Google"
-    assert fb["6"] == "https://g.page/r/x"
+    # Exact, not a subset: a leftover {{4}} would be a parameter Meta rejects
+    # against the shortened body, and `link` is no longer sent at all.
+    assert fb == {"1": "Giulia", "2": "12 agosto", "3": "Google"}
 
     general = wa.render_variables("feedback_v2", row)
-    assert general["5"] == "un canale a tua scelta"
-    assert general["6"] == "rispondendo a questo messaggio"
+    assert general["3"] == "un canale a tua scelta"
+
+
+def test_variable_count_matches_the_template_each_rule_sends():
+    """A body and its parameter list drift silently — Meta 400s the send.
+
+    Both rules are unattended, so nothing is on screen when it happens.
+    """
+    from booking_engine.services.messaging.whatsapp_templates import CATALOGUE
+
+    row = _due_row(appointment_at=datetime(2026, 8, 12, 10, 30, tzinfo=ROME))
+    for rule_key, template_key in wa._RULE_TEMPLATE.items():
+        variables = wa.render_variables(template_key, row, platform="google")
+        assert set(variables) == {
+            str(n) for n in range(1, CATALOGUE[template_key].variables + 1)
+        }, rule_key
 
 
 # --------------------------------------------- UTILITY bypasses the send gate
@@ -678,11 +689,11 @@ async def test_utility_send_to_a_consentless_customer_is_enqueued_but_marketing_
 
     # UTILITY first: same consent-less customer, queued.
     await _patch_enqueue(monkeypatch, template={
-        "status": "approved", "name": "kairo_feedback_v1", "language": "it",
+        "status": "approved", "name": "kairo_feedback_v2", "language": "it",
         "category": "UTILITY",
     })
     result = await ws.enqueue_campaign(
-        shop_id=SHOP, campaign_key="c1", template_key="feedback_v1",
+        shop_id=SHOP, campaign_key="c1", template_key="feedback_v2",
         recipients=[{"customer_id": uuid4(), "variables": {"1": "Giulia"}}],
         settings=FakeSettings(),
     )
@@ -712,7 +723,7 @@ async def test_send_due_does_not_suppress_a_utility_message_for_no_consent(monke
     message = {
         "id": uuid4(), "shop_id": SHOP, "customer_id": uuid4(),
         "to_phone": "+393331112222", "from_number": "+393331110000",
-        "template_name": "kairo_feedback_v1", "template_language": "it",
+        "template_name": "kairo_feedback_v2", "template_language": "it",
         "variables": {"1": "Giulia"}, "category": "UTILITY",
     }
 

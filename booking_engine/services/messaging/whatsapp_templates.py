@@ -27,6 +27,24 @@ MAX_VARIABLE_CHARS = 500
 
 _WHITESPACE = re.compile(r"[\r\n\t]+|\s{4,}")
 
+# The locales whose copy actually exists. Italian only today — this is the
+# whole reason template names carry the locale (`it_promo_v1`): a second
+# language is a second set of bodies approved under its own names on the same
+# WABA, not an edit of these. Adding one means writing the copy, adding it
+# here, and pushing it; nothing else in the flow has to change.
+SUPPORTED_LANGUAGES = ("it",)
+DEFAULT_LANGUAGE = "it"
+
+
+def resolve_language(language: str | None) -> str:
+    """The locale we can actually send in, for a shop that asked for `language`.
+
+    A shop set to a locale we have no copy for gets Italian rather than a name
+    (`en_promo_v1`) that exists on no WABA — which would surface as every
+    template `missing`, for a reason nothing on screen could explain.
+    """
+    return language if language in SUPPORTED_LANGUAGES else DEFAULT_LANGUAGE
+
 
 @dataclass(frozen=True)
 class Template:
@@ -154,54 +172,44 @@ CATALOGUE: dict[str, Template] = {
     # makes Meta recategorise the template as MARKETING — not a rejection, a
     # silent doubling of the economics of the highest-volume messages we send.
     # Enforced by test_utility_templates_stay_utility.
-    "feedback_v1": Template(
-        body=(
-            "Ciao {{1}}, grazie per la tua visita da {{2}} il {{3}} per {{4}}. "
-            "Com'è andata? Rispondi a questo messaggio per dirci la tua."
-        ),
-        variables=4,
-        sample={
-            "1": "Giulia",
-            "2": "Salone Bellezza",
-            "3": "12 marzo",
-            "4": "colore e piega",
-        },
-        category="UTILITY",
-        generated_slot=None,
-    ),
     # The review request: the owner picks where to ask ({{5}}) and may attach
     # a link ({{6}}). Still facts only — a platform name and a URL are facts,
-    # so the UTILITY economics hold. feedback_v1 above is retired, not edited,
-    # because Meta locks an approved body.
+    # so the UTILITY economics hold.
+    #
+    # `feedback_v1` (same body, no review ask) was dropped from the catalogue
+    # on 2026-09-01 rather than edited: Meta locks an approved body, so new copy
+    # is always a new key. It was safe to delete outright because no sender had
+    # ever received it — nothing to retire downstream, and the catalogue is the
+    # push list, not a history of what we once sent.
+    # The salon's name and the service list came out on 2026-09-01. Coexistence
+    # means this arrives from the salon's own number under the salon's own
+    # display name — naming it again in the body is what made a two-line message
+    # read like a mailshot. The visit date stays: it is the anchor to the
+    # customer's own transaction, and that anchor is what keeps Meta reading
+    # these as UTILITY rather than recategorising them.
     "feedback_v2": Template(
         body=(
-            "Ciao {{1}}, grazie per la tua visita da {{2}} il {{3}} per {{4}}. "
-            "Lascia una recensione su {{5}} o condividi il tuo parere con noi "
-            "{{6}} Grazie!"
+            "Ciao {{1}}, grazie per la tua visita del {{2}}! Se ti va, "
+            "lascia una recensione su {{3}}: per noi conta molto."
         ),
-        variables=6,
+        variables=3,
         sample={
             "1": "Giulia",
-            "2": "Salone Bellezza",
-            "3": "12 marzo",
-            "4": "colore e piega",
-            "5": "Google",
-            "6": "https://g.page/r/recensione",
+            "2": "12 marzo",
+            "3": "Google",
         },
         category="UTILITY",
         generated_slot=None,
     ),
     "reminder_v1": Template(
         body=(
-            "Ciao {{1}}, ti ricordiamo il tuo appuntamento da {{2}} in programma {{3}} "
-            "per {{4}}. Se non puoi venire, rispondi a questo messaggio per spostarlo."
+            "Ciao {{1}}, ti aspettiamo {{2}}. Se non puoi venire, rispondi a "
+            "questo messaggio e lo spostiamo."
         ),
-        variables=4,
+        variables=2,
         sample={
             "1": "Giulia",
-            "2": "Salone Bellezza",
-            "3": "giovedì 14 alle 10:30",
-            "4": "taglio e piega",
+            "2": "giovedì 14 alle 10:30",
         },
         category="UTILITY",
         generated_slot=None,

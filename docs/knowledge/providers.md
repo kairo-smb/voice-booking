@@ -141,6 +141,11 @@ Graph changes shape across versions):
   salon's WABA — the call Twilio structurally could not make. Meta blocks
   reusing a deleted template's name for 30 days, so `ensure_templates` skips
   rather than recreates.
+- **One template per locale, named `{locale}_{key}`** (`it_promo_v1`). Meta
+  cannot translate a template, so each language is a separate submission with
+  its own verdict; the shop's `shops.language` composes the name. Italian is
+  the only copy that exists today — see
+  [Templates carry the locale](api/whatsapp.md#post-whatsapptemplatesensureshop_id).
 - **A rejection is content, not per-WABA luck.** `ensure_templates` only
   pushes a catalogue entry into a salon's WABA once the same-named template is
   `approved` on Kairo's own WABA (`scripts/kairo_waba.py push-templates`,

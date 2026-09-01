@@ -54,9 +54,9 @@ _IT_DAYS = [
 ]
 
 # Both rules are UTILITY — see whatsapp_templates.CATALOGUE. feedback_v2 is
-# the review request (platform + link); feedback_v1 stays in the catalogue only
-# because Meta cannot un-approve an already-approved body, so the old template
-# is retired rather than edited.
+# the review request (platform + link); feedback_v1 was the same message without
+# the ask, and is gone from the catalogue entirely (2026-09-01) — Meta locks an
+# approved body, so new copy is a new key, never an edit.
 _RULE_TEMPLATE = {"feedback": "feedback_v2", "reminder": "reminder_v1"}
 
 _PLATFORM_LABELS = {
@@ -65,7 +65,6 @@ _PLATFORM_LABELS = {
     "instagram": "Instagram",
 }
 _GENERAL_PLATFORM = "un canale a tua scelta"
-_NO_LINK_CTA = "rispondendo a questo messaggio"
 
 
 def _feedback_date(when: datetime) -> str:
@@ -86,29 +85,26 @@ def render_variables(
 ) -> dict[str, str]:
     """The variables the UTILITY templates need, from the due-work row.
 
-    {{1}} name, {{2}} salon, {{3}} appointment time, {{4}} services. Nothing
-    is generated: each value is a database fact, formatted for the approved
-    frame. That is what keeps these templates UTILITY.
+    Nothing is generated: each value is a database fact, formatted for the
+    approved frame. That is what keeps these templates UTILITY.
 
-    The review request (`feedback_v2`) also fills {{5}} (the platform the
-    owner picked, or a neutral phrase when "general") and {{6}} (the review
-    link, or a plain CTA when the owner left it empty).
+        feedback_v2: {{1}} name, {{2}} visit date, {{3}} where to review
+        reminder_v1: {{1}} name, {{2}} appointment date and time
+
+    Shortened on 2026-09-01. The salon name and the service list are gone from
+    both bodies (the message already arrives from the salon's own number), and
+    with them `shop_name`/`service_names` — the row still carries them for the
+    logs. `link` is accepted and ignored: the body now names the platform only.
     """
     when = row["appointment_at"]
+    name = clean_variable(row["first_name"] or "")
     if template_key.startswith("feedback"):
-        date_text = _feedback_date(when)
-    else:
-        date_text = _reminder_when(when)
-    out = {
-        "1": clean_variable(row["first_name"] or ""),
-        "2": clean_variable(row["shop_name"] or ""),
-        "3": clean_variable(date_text),
-        "4": clean_variable(row["service_names"] or ""),
-    }
-    if template_key == "feedback_v2":
-        out["5"] = _PLATFORM_LABELS.get(platform, _GENERAL_PLATFORM)
-        out["6"] = clean_variable(link) if link else _NO_LINK_CTA
-    return out
+        return {
+            "1": name,
+            "2": clean_variable(_feedback_date(when)),
+            "3": _PLATFORM_LABELS.get(platform, _GENERAL_PLATFORM),
+        }
+    return {"1": name, "2": clean_variable(_reminder_when(when))}
 
 
 def _quality_blocks_marketing(sender: dict) -> bool:

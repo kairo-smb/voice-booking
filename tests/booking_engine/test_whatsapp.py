@@ -175,7 +175,7 @@ def _online_sender(**over):
 
 
 def _approved_template(**over):
-    row = {"status": "approved", "name": "kairo_promo_v1", "language": "it"}
+    row = {"status": "approved", "name": "it_promo_v1", "language": "it"}
     row.update(over)
     return row
 
@@ -290,7 +290,9 @@ async def test_enqueue_writes_the_template_name_meta_sends_by(monkeypatch):
         recipients=[{"customer_id": uuid4(), "variables": {"1": "Giulia"}}],
         settings=FakeSettings(),
     )
-    assert rows[0]["template_name"] == "kairo_promo_v1"
+    # The name is read off the shop's own template row, not composed here: the
+    # send must address exactly what was injected into that WABA.
+    assert rows[0]["template_name"] == "it_promo_v1"
     assert rows[0]["template_language"] == "it"
 
 
@@ -598,6 +600,11 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
         return kw
     async def _onboarded(*a, **kw):
         return calls.get("onboarded_last_7_days", 0)
+    # The shop's platform locale — what template names are composed from.
+    # `calls["language"]` lets a test run a shop on another locale.
+    async def _language(shop_id):
+        return calls.get("language", "it")
+    monkeypatch.setattr(wq, "get_shop_language", _language)
     monkeypatch.setattr(wq, "get_sender", _get_sender)
     monkeypatch.setattr(wq, "set_sender_fields", _set_fields)
     monkeypatch.setattr(wq, "get_template", _get_template)
@@ -724,7 +731,7 @@ async def test_complete_injects_the_catalogue_into_the_salons_waba(monkeypatch):
 
     created = calls["create_template"]
     assert {c["name"] for c in created} == {
-        wo.template_name(k) for k in wt.CATALOGUE
+        wo.template_name(k, "it") for k in wt.CATALOGUE
     }
     assert all(c["waba_id"] == "WABA1" for c in created)
     assert all(c["token"] == "customer-token" for c in created)
@@ -885,7 +892,7 @@ async def test_retire_template_deletes_kairos_copy_before_the_customers(monkeypa
         order.append(waba_id)
     async def _senders(template_key):
         return [{"shop_id": SHOP, "waba_id": "WABA1", "access_token": "tok",
-                 "name": wo.template_name(template_key)}]
+                 "name": wo.template_name(template_key, "it")}]
     dropped = []
     async def _drop(*, shop_id, template_key):
         dropped.append((shop_id, template_key))
@@ -908,7 +915,7 @@ async def test_retire_template_keeps_the_row_when_meta_refuses(monkeypatch):
             raise meta.MetaError(100, "permission denied")
     async def _senders(template_key):
         return [{"shop_id": SHOP, "waba_id": "WABA1", "access_token": "tok",
-                 "name": wo.template_name(template_key)}]
+                 "name": wo.template_name(template_key, "it")}]
     async def _drop(*, shop_id, template_key):
         raise AssertionError("row dropped despite Meta still holding the template")
     monkeypatch.setattr(meta, "delete_template", _delete)
@@ -950,6 +957,70 @@ def test_push_templates_uses_the_name_the_gate_looks_for():
     assert names, "push-templates must submit template_name(key), not the bare key"
 
 
+def _load_kairo_waba():
+    import importlib.util
+    import pathlib
+
+    source = pathlib.Path(__file__).parents[2] / "scripts" / "kairo_waba.py"
+    spec = importlib.util.spec_from_file_location("kairo_waba", source)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_push_templates_edits_a_stale_body_and_pushes_past_the_ones_that_exist(monkeypatch):
+    """The catalogue moving to v2 must actually reach Meta.
+
+    Before 2026-09-01 this was a blind create loop over the whole catalogue and
+    `_api` exited on any 4xx, so the first `name already exists` aborted the
+    run: an edited body never reached Meta, and an entry added *after* the
+    previous push was never submitted at all. Neither showed up in
+    `kairo_waba.py templates`, which prints names and statuses, not bodies.
+    """
+    import argparse
+
+    mod = _load_kairo_waba()
+    monkeypatch.setenv("META_TOKEN", "t")
+    monkeypatch.setenv("META_WABA_ID", "W")
+
+    # Built from the catalogue, not hardcoded copy: this pins the behaviour,
+    # not today's wording, so a template edit doesn't fail an unrelated test.
+    keys = list(wt.CATALOGUE)
+    stale, missing = keys[0], keys[-1]
+    live = []
+    for key in keys:
+        if key == missing:
+            continue
+        tpl = wt.CATALOGUE[key]
+        body = mod._body_component(tpl)
+        if key == stale:
+            body = {**body, "text": "il testo che Meta ha già"}
+        live.append({
+            "id": f"id_{key}", "name": wo.template_name(key, tpl.language),
+            "language": tpl.language,
+            "status": "APPROVED", "category": tpl.category, "components": [body],
+        })
+
+    calls = []
+
+    def fake_call(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("json")))
+        return 200, ({"data": live} if method == "GET" else {"status": "PENDING"})
+
+    monkeypatch.setattr(mod, "_call", fake_call)
+    mod.push_templates(argparse.Namespace(dry_run=False))
+
+    posts = [(path, payload) for method, path, payload in calls if method == "POST"]
+    edited = [p for p in posts if p[0] == f"id_{stale}"]
+    created = [p for p in posts if p[1] and p[1].get("name") == wo.template_name(missing, "it")]
+    assert edited, "a changed body must be edited on the template it belongs to"
+    assert edited[0][1]["components"][0]["text"] == wt.CATALOGUE[stale].body
+    assert created, "an entry added after the last push must still be created"
+    # Everything else was already identical: re-submitting burns Meta's edit
+    # quota and puts an approved template back into review for nothing.
+    assert len(posts) == 2, posts
+
+
 def test_signup_config_asks_meta_for_the_coexistence_branch():
     """Without this flag the popup offers only a brand-new WABA.
 
@@ -962,9 +1033,50 @@ def test_signup_config_asks_meta_for_the_coexistence_branch():
     assert config["solution_id"] == "sol"
 
 
-def test_template_names_are_stable_across_shops():
-    """Meta scopes names per-WABA, so every salon carries the same one."""
-    assert wo.template_name("promo_v1") == "kairo_promo_v1"
+def test_template_names_compose_the_locale_with_the_key():
+    """Meta scopes names per-WABA and cannot translate a template.
+
+    So the platform addresses a locale's copy by composing the name, never by
+    looking one up: `it_promo_v1` today, `en_promo_v1` the day English copy
+    exists on the same WABA. Still one name per (locale, key) across all shops.
+    """
+    assert wo.template_name("promo_v1", "it") == "it_promo_v1"
+    assert wo.template_name("promo_v1", "en") == "en_promo_v1"
+
+
+def test_a_shop_on_an_unsupported_locale_falls_back_to_copy_that_exists():
+    """Spanish is in the platform's locales, not (yet) in the catalogue.
+
+    Composing `es_promo_v1` for that shop would name a template on no WABA:
+    every template reads `missing` and nothing says why. Italian is wrong copy
+    but a real, approved template.
+    """
+    assert wt.resolve_language("it") == "it"
+    assert wt.resolve_language("es") == "it"
+    assert wt.resolve_language(None) == "it"
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_names_the_shops_own_locale(monkeypatch):
+    """The salon's `shops.language` is what decides which copy it receives."""
+    calls = _patch_onboarding(
+        monkeypatch,
+        sender={"shop_id": SHOP, "waba_id": "WABA1", "access_token": "tok"},
+        calls={"language": "it"},
+    )
+
+    await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
+
+    created = calls["create_template"]
+    assert {c["name"] for c in created} == {
+        f"it_{key}" for key in wt.CATALOGUE
+    }
+    assert {c["language"] for c in created} == {"it"}
+    # The gate was asked about the same locale it then created, or a shop can
+    # be told a template is ready and be given one that is not.
+    assert {f["name"] for f in calls["fetch_template"]} == {
+        f"it_{key}" for key in wt.CATALOGUE
+    }
 
 
 def test_unknown_meta_template_status_is_never_treated_as_approved():
@@ -1341,7 +1453,7 @@ def test_descriptor_keeps_the_field_name_its_consumers_read():
 def test_utility_descriptor_reports_no_generated_slot():
     from booking_engine.api.routes.whatsapp import _template_descriptor
 
-    assert _template_descriptor("feedback_v1")["generated_slot"] is None
+    assert _template_descriptor("feedback_v2")["generated_slot"] is None
 
 
 def test_descriptor_reports_who_fills_the_slot():
@@ -1351,4 +1463,4 @@ def test_descriptor_reports_who_fills_the_slot():
 
     assert _template_descriptor("promo_v1")["filled_by"] == "llm"
     assert _template_descriptor("promo_manual_v1")["filled_by"] == "owner"
-    assert _template_descriptor("feedback_v1")["filled_by"] is None
+    assert _template_descriptor("feedback_v2")["filled_by"] is None
