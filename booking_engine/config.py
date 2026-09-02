@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # which fails closed: nothing propagates until these are set.
     meta_kairo_waba_id: str = ""
     meta_kairo_token: str = ""
+    # Publicly-hosted sample receipt PDF Meta reviews when we create the
+    # DOCUMENT-header `purchase_receipt_1` template on a customer's WABA. Empty
+    # means "not configured": ensure_receipt_template fails closed rather than
+    # submitting a header-less document template Meta would reject.
+    meta_receipt_sample_url: str = ""
     # Marketing sends are dripped across this local window (Europe/Rome) so a
     # salon's promotions arrive during opening hours, not at 03:00.
     whatsapp_send_start_hour: int = 9

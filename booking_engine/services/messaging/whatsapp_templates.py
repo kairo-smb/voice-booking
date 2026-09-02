@@ -240,28 +240,20 @@ CATALOGUE: dict[str, Template] = {
         category="UTILITY",
         generated_slot=None,
     ),
-    # Itemised receipt for a completed visit (the "send me the receipt" feature,
-    # not built yet — inert until a sender references it). Facts only, amounts
-    # are the visit's own prices: UTILITY economics hold, and the receipt is the
-    # clearest kind of transaction follow-up. {{3}} is a single line (Meta
-    # rejects newlines in a parameter), so itemisation is joined with a
-    # separator, e.g. "Taglio 25,00 € · Piega 18,00 €".
-    "receipt_v1": Template(
-        body=(
-            "Ciao {{1}}, ecco il riepilogo della tua visita del {{2}} con i "
-            "dettagli dei servizi: {{3}} Il totale è {{4}} €. Grazie e a presto!"
-        ),
-        variables=4,
-        sample={
-            "1": "Giulia",
-            "2": "12 marzo",
-            "3": "Taglio 25,00 € · Piega 18,00 €",
-            "4": "43,00",
-        },
-        category="UTILITY",
-        generated_slot=None,
-    ),
 }
+
+
+# ── Smart Receipt (DOCUMENT header) ──────────────────────────────────────────
+# Deliberately NOT a CATALOGUE entry: a receipt is a document attachment, not a
+# body with variables, and the name is Meta's pre-built preset (`purchase_receipt_1`
+# under Utility › Payments › receipt attachment), used verbatim rather than
+# language-prefixed like the marketing keys. The PDF carries the whole receipt;
+# the body is a short fixed text with no variables to fill, so there is nothing
+# to personalise and nothing the model writes.
+RECEIPT_TEMPLATE_KEY = "purchase_receipt_1"
+RECEIPT_TEMPLATE_NAME = "purchase_receipt_1"
+RECEIPT_TEMPLATE_LANGUAGE = "it"
+RECEIPT_TEMPLATE_BODY = "In allegato trovi la ricevuta del tuo pagamento. Grazie e a presto!"
 
 
 def clean_variable(value: str) -> str:

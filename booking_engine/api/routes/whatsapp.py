@@ -24,10 +24,11 @@ from booking_engine.db import whatsapp_queries as wq
 from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
 from booking_engine.services.messaging.whatsapp_pricing import price_list
+from booking_engine.services.messaging import whatsapp_receipt
 from booking_engine.services.messaging.whatsapp_send import enqueue_campaign
 from booking_engine.services.messaging.whatsapp_onboarding import template_name
 from booking_engine.services.messaging.whatsapp_templates import (
-    CATALOGUE, DEFAULT_LANGUAGE, resolve_language,
+    CATALOGUE, DEFAULT_LANGUAGE, RECEIPT_TEMPLATE_NAME, resolve_language,
 )
 from booking_engine.services.meta_signature import meta_signature_valid
 
@@ -127,6 +128,22 @@ class CampaignRequest(BaseModel):
     # as many days as the daily cap needs. The monthly plan allowance is the
     # real ceiling and is enforced in enqueue_campaign.
     recipients: list[Recipient] = Field(min_length=1, max_length=2000)
+
+
+class ReceiptRequest(BaseModel):
+    """Smart Receipt send. The template is fixed server-side to Meta's
+    `purchase_receipt_1`; the webapp's `template_key` field is informational and
+    ignored here (Pydantic drops unknown fields)."""
+
+    shop_id: UUID
+    customer_id: UUID
+    phone: str = Field(min_length=1, max_length=32)
+    payment_id: str = Field(min_length=1, max_length=80)
+    reference: str = ""
+    filename: str = "ricevuta.pdf"
+    pdf_base64: str = Field(min_length=1)
+    requested_by: UUID | None = None
+    source: str | None = None
 
 
 # ------------------------------------------------------------------ onboarding
@@ -339,6 +356,39 @@ async def campaign_status(
     return {"data": await wq.campaign_progress(
         shop_id=shop_id, campaign_key=campaign_key
     )}
+
+
+@router.post("/receipts")
+async def receipt(
+    payload: ReceiptRequest,
+    settings: Annotated[Settings, Depends(_get_settings)],
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Send one receipt PDF as a WhatsApp document (Smart Receipt).
+
+    Synchronous and immediate, unlike `campaigns`: the webapp calls this right
+    after a paid ticket closes and expects the PDF uploaded and delivered now.
+    The template is fixed server-side to Meta's `purchase_receipt_1`.
+    """
+    result = await whatsapp_receipt.send_receipt(
+        shop_id=payload.shop_id, customer_id=payload.customer_id,
+        phone=payload.phone, reference=payload.reference,
+        filename=payload.filename, pdf_base64=payload.pdf_base64,
+        initiated_by=payload.requested_by, settings=settings,
+    )
+    await waq.record_audit_event(
+        shop_id=payload.shop_id, event="receipt.send",
+        actor_id=payload.requested_by, source=payload.source,
+        template_name=RECEIPT_TEMPLATE_NAME,
+        request={"payment_id": payload.payment_id, "reference": payload.reference},
+        response=result if result.get("ok") else None,
+        status="success" if result.get("ok") else "error",
+        http_status=None if result.get("ok") else 409,
+        error_message=result.get("error") if not result.get("ok") else None,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error"))
+    return {"data": result}
 
 
 # ----------------------------------------------------------------- automations

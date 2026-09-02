@@ -184,7 +184,7 @@ def test_marketing_templates_carry_the_soft_cta_tail():
     is deliberately excluded."""
     for key in ("promo_v1", "winback_v1", "rebook_v1"):
         assert "Se ti va, scrivimi pure." in wt.CATALOGUE[key].body, key
-    for key in ("promo_manual_v1", "feedback_v2", "reminder_v6", "receipt_v1"):
+    for key in ("promo_manual_v1", "feedback_v2", "reminder_v6"):
         assert "Se ti va, scrivimi pure." not in wt.CATALOGUE[key].body, key
 
 

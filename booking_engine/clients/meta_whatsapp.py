@@ -259,3 +259,92 @@ async def send_template(
     )
     messages = body.get("messages") or [{}]
     return messages[0].get("id", "")
+
+
+# -------------------------------------------------------------------- document
+
+async def create_document_template(
+    *, waba_id: str, token: str, name: str, language: str,
+    category: str, body_text: str, example_url: str,
+) -> tuple[str, str]:
+    """Create a DOCUMENT-header template (the Smart Receipt shape).
+
+    `example_url` is a publicly-hosted sample PDF for Meta's review — mandatory
+    for a document header, and the reason this is a separate call from
+    `create_template` (which only ever emits a BODY). Returns (id, status).
+    """
+    body = await _request(
+        "POST", f"{waba_id}/message_templates", token=token,
+        json_body={
+            "name": name,
+            "language": language,
+            "category": category,
+            "components": [
+                {
+                    "type": "HEADER",
+                    "format": "DOCUMENT",
+                    "example": {"header_handle": [example_url]},
+                },
+                {"type": "BODY", "text": body_text},
+            ],
+        },
+    )
+    return body.get("id", ""), (body.get("status") or "PENDING").lower()
+
+
+async def upload_media(
+    *, phone_number_id: str, token: str, filename: str, content: bytes,
+) -> str:
+    """Upload a document to Meta, returning its media id for a document send.
+
+    Multipart, not JSON — so it does not go through `_request`.
+    """
+    async with AsyncClient(timeout=_TIMEOUT) as client:
+        response = await client.post(
+            f"{GRAPH}/{phone_number_id}/media",
+            headers={"Authorization": f"Bearer {token}"},
+            files={"file": (filename, content, "application/pdf")},
+            data={"messaging_product": "whatsapp", "type": "application/pdf"},
+        )
+        try:
+            body = response.json() if response.content else {}
+        except ValueError:
+            body = {}
+        if response.status_code >= 400:
+            err = body.get("error") or {}
+            raise MetaError(err.get("code"), err.get("message") or "media_upload_failed")
+        return body.get("id", "")
+
+
+async def send_document_template(
+    *, phone_number_id: str, token: str, to: str,
+    name: str, language: str, media_id: str, filename: str,
+) -> str:
+    """Send a DOCUMENT-header template: the uploaded PDF is the header document.
+
+    Distinct from `send_template` (body variables) because the document is the
+    whole payload — a receipt has no body variables to fill.
+    """
+    template = {
+        "name": name,
+        "language": {"code": language},
+        "components": [{
+            "type": "header",
+            "parameters": [{
+                "type": "document",
+                "document": {"id": media_id, "filename": filename},
+            }],
+        }],
+    }
+    body = await _request(
+        "POST", f"{phone_number_id}/messages", token=token,
+        json_body={
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "template",
+            "template": template,
+        },
+    )
+    messages = body.get("messages") or [{}]
+    return messages[0].get("id", "")
