@@ -4,8 +4,9 @@
 marketing message can only be a template Meta approved in advance. There is no
 free-form path — the "personalised copy" the SMS flow generates end-to-end
 cannot be sent on WhatsApp as-is. So personalisation happens *inside*
-variables: a fixed, approved skeleton plus a per-customer offer line the LLM
-writes.
+variables: a fixed, approved skeleton plus a per-customer line the LLM writes
+— an offer or proposal, or for promo_v1 a gentle observation tuned to the
+customer's last visit.
 
 That is a real product downgrade from SMS and it is deliberate: the alternative
 (a template that is essentially one big `{{1}}`) is the single most common
@@ -74,79 +75,95 @@ class Template:
 CATALOGUE: dict[str, Template] = {
     # ── MARKETING ────────────────────────────────────────────────────────────
     # Exactly one generated slot each, always the last variable. Everything
-    # before it is a fact: name, salon, and a lookup from the visit record.
+    # before it is a fact: name, the stylist of the last visit, the salon, and
+    # a lookup from the visit record. Every body closes with the same soft CTA
+    # («Se ti va, scrivimi pure.») — a hard-sell imperative reads worse and is
+    # harder to get approved; an open invitation is enough, the observation
+    # alone invites a reply.
+    #
+    # The message is signed by the stylist, not the salon: «sono {{2}} di {{3}}»
+    # reads like the person who served them writing, not a mailing. {{2}} is the
+    # primary staff of the customer's last visit (first if several).
     "promo_v1": Template(
         body=(
-            "Ciao {{1}}, ti scriviamo da {{2}} per proporti {{3}}. "
-            "Rispondi a questo messaggio o chiamaci per prenotare."
+            "Ciao {{1}}, sono {{2}} di {{3}}. A proposito della tua ultima visita: "
+            "{{4}} Se ti va, scrivimi pure."
         ),
-        variables=3,
+        variables=4,
         sample={
             "1": "Giulia",
-            "2": "Salone Bellezza",
-            "3": "un taglio con piega a 35€ questa settimana",
+            "2": "Chiara",
+            "3": "Salone Bellezza",
+            "4": "sono passate circa tre settimane dal tuo colore, com'è la ricrescita?",
         },
-        generated_slot=3,
+        generated_slot=4,
         filled_by="llm",
+        max_chars=200,
         intent="promo",
         guidance=(
-            "Una proposta concreta, basata su un servizio che il cliente fa già "
-            "o su uno complementare. Nessun saluto e nessun invito a prenotare: "
-            "ci sono già nel testo fisso. Frammento che completa «per proporti», "
-            "minuscolo, senza punto finale."
+            "Scrivi solo l'osservazione che segue i due punti: una frase di check-in "
+            "calda, ancorata a un servizio che il cliente ha fatto davvero nell'ultima "
+            "visita e al tempo passato. Mai venditivo: niente prezzi, niente urgenza, "
+            "niente «approfitta», nessun invito a prenotare o rispondere (la chiusura "
+            "è già nel testo fisso). Al massimo una domanda naturale, la ricrescita "
+            "per un colore, la forma per un taglio. Inizia in minuscolo (dopo i due "
+            "punti). Se il contesto non mostra un servizio recente, scrivi un "
+            "check-in generico: non inventare servizi."
         ),
     ),
     "winback_v1": Template(
         body=(
-            "Ciao {{1}}, ti scriviamo da {{2}}: non ci vediamo da {{3}} "
-            "e per questo ti proponiamo {{4}}. "
-            "Rispondi a questo messaggio per prenotare."
+            "Ciao {{1}}, sono {{2}} di {{3}}. Pensavo a te: non ci vediamo da {{4}}, "
+            "quindi volevo proporti {{5}}. Se ti va, scrivimi pure."
         ),
-        variables=4,
+        variables=5,
         sample={
             "1": "Giulia",
-            "2": "Salone Bellezza",
-            "3": "tre mesi",
-            "4": "un ritocco colore con piega a 45€",
+            "2": "Chiara",
+            "3": "Salone Bellezza",
+            "4": "tre mesi",
+            "5": "un ritocco colore con piega a 45€",
         },
-        generated_slot=4,
+        generated_slot=5,
         filled_by="llm",
         intent="winback",
         guidance=(
-            "Scrivi solo il complemento oggetto di «ti proponiamo»: un sintagma "
+            "Scrivi solo il complemento oggetto di «volevo proporti»: un sintagma "
             "nominale con articolo (servizio ed eventuale prezzo), minuscolo, senza "
             "punto finale. L'assenza è già nel testo fisso: non ripeterla. Nessun "
-            "invito a prenotare o rispondere: sono già nel testo fisso."
+            "invito a prenotare o rispondere: la chiusura è già nel testo fisso."
         ),
     ),
     "rebook_v1": Template(
         body=(
-            "Ciao {{1}}, ti scriviamo da {{2}}. Di solito passi da noi ogni {{3}}, "
-            "quindi potrebbe essere il momento giusto per {{4}}. "
-            "Rispondi a questo messaggio per prenotare."
+            "Ciao {{1}}, sono {{2}} di {{3}}. Di solito passi da noi ogni {{4}}, "
+            "quindi potrebbe essere il momento giusto per {{5}}. "
+            "Se ti va, scrivimi pure."
         ),
-        variables=4,
+        variables=5,
         sample={
             "1": "Giulia",
-            "2": "Salone Bellezza",
-            "3": "sei settimane",
-            "4": "un taglio e piega a 35€",
+            "2": "Chiara",
+            "3": "Salone Bellezza",
+            "4": "sei settimane",
+            "5": "un taglio e piega",
         },
-        generated_slot=4,
+        generated_slot=5,
         filled_by="llm",
         intent="rebook",
         guidance=(
-            "Il cliente è regolare: tono di continuità, non di recupero. Frammento "
-            "che completa «il momento giusto per», minuscolo, senza punteggiatura "
-            "finale. Nessun invito a prenotare o rispondere: sono già nel testo fisso."
+            "Il cliente è regolare: tono di continuità, non di recupero. Scrivi il "
+            "complemento oggetto di «il momento giusto per»: sintagma nominale con "
+            "articolo, SOLO servizi — mai importi, mai prezzi, mai sconti. Minuscolo, "
+            "senza punteggiatura finale. Nessun invito a prenotare o rispondere: la "
+            "chiusura è già nel testo fisso."
         ),
     ),
 
     # Owner-written, not model-written: the Campagna Promo tile takes a line
     # the shop types and sends it verbatim. A separate template rather than a
     # mode of promo_v1 because Meta approves bodies, and owner-written copy
-    # reads as an announcement where promo_v1's frame ("per proporti …")
-    # expects a fragment the model completes.
+    # reads as an announcement where promo_v1 expects a model observation.
     "promo_manual_v1": Template(
         body=(
             "Ciao {{1}}, ti scriviamo da {{2}} con una novità: {{3}}. "
@@ -219,6 +236,27 @@ CATALOGUE: dict[str, Template] = {
             "1": "Giulia",
             "2": "giovedì 14 alle 10:30",
             "3": "Salone Bellezza",
+        },
+        category="UTILITY",
+        generated_slot=None,
+    ),
+    # Itemised receipt for a completed visit (the "send me the receipt" feature,
+    # not built yet — inert until a sender references it). Facts only, amounts
+    # are the visit's own prices: UTILITY economics hold, and the receipt is the
+    # clearest kind of transaction follow-up. {{3}} is a single line (Meta
+    # rejects newlines in a parameter), so itemisation is joined with a
+    # separator, e.g. "Taglio 25,00 € · Piega 18,00 €".
+    "receipt_v1": Template(
+        body=(
+            "Ciao {{1}}, ecco il riepilogo della tua visita del {{2}} con i "
+            "dettagli dei servizi: {{3}} Il totale è {{4}} €. Grazie e a presto!"
+        ),
+        variables=4,
+        sample={
+            "1": "Giulia",
+            "2": "12 marzo",
+            "3": "Taglio 25,00 € · Piega 18,00 €",
+            "4": "43,00",
         },
         category="UTILITY",
         generated_slot=None,

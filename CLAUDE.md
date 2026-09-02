@@ -6,6 +6,59 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-02 — WhatsApp marketing templates re-voiced (stylist-signed, observation-led), and a UTILITY receipt template
+
+**Decision (owner, copy-driven):** the three LLM marketing templates read "asettici"
+(impersonal, seller-voiced). Re-voiced to be warm and human: **signed by the
+stylist of the customer's last visit** — `sono {{2}} di {{3}}`, stylist + shop —
+and tuned to that visit rather than pitching. promo_v1's generated slot is now a
+gentle **observation** about the last visit (check-in, never a price, never
+urgency), not an offer; winback_v1 and rebook_v1 keep their proposal slot. All
+three close with the same soft fixed CTA, **«Se ti va, scrivimi pure.»** — a
+hard-sell imperative reads worse and is harder to get Meta to approve. `rebook_v1`
+never mentions money (owner rule; pinned by a test). Keys kept, bodies rewritten
+**in place**, because no marketing body had ever been approved on any WABA
+(verified with the owner) — the one case where an edit is not a new key.
+
+**Variable slots moved** (the meanings are the contract the webapp/engine fill):
+promo_v1 went 3→4 vars (`{{1}}` name, `{{2}}` **stylist**, `{{3}}` shop,
+`{{4}}` observation); winback_v1 and rebook_v1 went 4→5 (`{{4}}` gap/cadence,
+`{{5}}` proposal). The stylist is the **primary staff of the customer's last
+visit** (owner: "first if several"; per-service staff is overkill for this).
+A new UTILITY `receipt_v1` (itemised visit + total) was added for a not-yet-built
+"send me the receipt" feature — inert until a sender references it, but it enters
+the push list like any catalogue entry.
+
+**Structural constraint that shaped the final copy:** `tests/booking_engine/
+test_template_shape.py` encodes Meta's submission rules as tests (≥3 words of
+fixed copy per variable + 1; variables separated by real words, punctuation
+does not count). The first drafts were too variable-dense and failed
+INVALID_FORMAT-style: promo's `{{3}}. {{4}}` gap had no word in it, and short
+frames fell under the fixed-word ratio. Resolved with natural connective copy
+("A proposito della tua ultima visita: ", "Pensavo a te: ") — the tests caught
+what Meta would have rejected, not what reads awkwardly.
+
+**Webapp + marketing-engine alignment is NOT done — this is repo 1 of 3.** The
+variable-slot shift means the webapp must resolve and supply the last-visit
+stylist per recipient (batch), and the marketing-engine prompt must write
+observations (promo) grounded on last-visit facts. Tracking and cost also need
+work: the three generation flows debit the AI basket with no audit entry, and a
+bulk campaign runs the whole audience in one synchronous engine call before a
+single post-hoc deduction — the plan (working doc
+`docs/2026-09-02-whatsapp-template-engagement-design.md`, deleted when shipped)
+moves them onto `ai_run_ledger` reserve/charge and batches bulk generation so
+nothing runs on an empty basket.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **513 passed, 25 skipped, 0 failed** (up from
+511/25/0: the two re-voiced-marketing body tests replacing nothing, net +2 after
+the shape tests that had been failing on the first draft were satisfied). No Meta
+call made — consistent with the standing rule that template copy is verified
+against the API contract and tests, not a live WABA. Operator step after this
+merges (not automatable here): `kairo_waba.py push-templates` + Meta approval on
+Kairo's WABA, then the hourly sweep propagates the new bodies and `receipt_v1`
+to every customer WABA.
+
 ## 2026-08-31 — The propagation gate had no retry, and `push-templates` used the wrong name
 
 **Two bugs on the same path, either of which alone meant no customer WABA ever
