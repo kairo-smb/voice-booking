@@ -117,3 +117,54 @@ async def test_ensure_receipt_template_fails_closed_without_sample_url(monkeypat
 
     result = await wr.ensure_receipt_template(shop_id=SHOP, settings=no_sample)
     assert result == {"ok": False, "error": "receipt_sample_not_configured"}
+
+
+def _patch_ensure(monkeypatch, *, kairo_body):
+    async def _get_sender(shop_id):
+        return {"waba_id": "WABA1", "access_token": "tok"}
+    async def _get_template(shop_id, key):
+        return None
+    async def _fetch(**kw):
+        return meta.TemplateStatus(status="approved", rejection_reason=None,
+                                   body=kairo_body)
+    monkeypatch.setattr(wq, "get_sender", _get_sender)
+    monkeypatch.setattr(wq, "get_template", _get_template)
+    monkeypatch.setattr(meta, "fetch_template", _fetch)
+
+
+@pytest.mark.asyncio
+async def test_ensure_receipt_template_creates_it_and_records_the_body(monkeypatch):
+    from booking_engine.services.messaging import whatsapp_templates as wt
+
+    _patch_ensure(monkeypatch, kairo_body=wt.RECEIPT_TEMPLATE_BODY)
+    calls = {}
+
+    async def _create(**kw):
+        calls["create"] = kw
+        return "TPLDOC", "pending"
+    async def _upsert(**kw):
+        calls["upsert"] = kw
+        return kw
+    monkeypatch.setattr(meta, "create_document_template", _create)
+    monkeypatch.setattr(wq, "upsert_template", _upsert)
+
+    result = await wr.ensure_receipt_template(shop_id=SHOP, settings=Settings())
+
+    assert result == {"ok": True, "created": 1}
+    assert calls["create"]["example_url"] == "https://example.test/sample.pdf"
+    assert calls["upsert"]["body_hash"] == wt.body_hash(wt.RECEIPT_TEMPLATE_BODY)
+
+
+@pytest.mark.asyncio
+async def test_ensure_receipt_template_refuses_a_body_kairo_never_approved(monkeypatch):
+    """Same rule as the catalogue gate: an approved *name* is not an approved
+    body. Edit the receipt copy here and the customer WABAs wait for Kairo's
+    re-approval rather than receiving unreviewed text."""
+    _patch_ensure(monkeypatch, kairo_body="una ricevuta diversa")
+
+    async def _create(**kw):
+        raise AssertionError("Kairo's WABA has not approved this copy")
+    monkeypatch.setattr(meta, "create_document_template", _create)
+
+    result = await wr.ensure_receipt_template(shop_id=SHOP, settings=Settings())
+    assert result == {"ok": False, "error": "not_ready"}

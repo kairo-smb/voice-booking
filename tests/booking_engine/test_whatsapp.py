@@ -652,7 +652,13 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
         return "TPL1", "pending"
     async def _fetch_template(**kw):
         calls.setdefault("fetch_template", []).append(kw)
-        return meta.TemplateStatus(status="approved", rejection_reason=None)
+        # Kairo's WABA holds the catalogue's *current* body — the gate compares
+        # text, not just status, so the fake has to carry it.
+        tpl = wt.CATALOGUE.get(kw["name"].split("_", 1)[1])
+        return meta.TemplateStatus(
+            status="approved", rejection_reason=None,
+            body=tpl.body if tpl else "",
+        )
     monkeypatch.setattr(meta, "exchange_code", _exchange)
     monkeypatch.setattr(meta, "subscribe_app", _subscribe)
     monkeypatch.setattr(meta, "get_phone_number", _number)
@@ -876,17 +882,17 @@ async def test_sweep_propagates_to_an_online_shop_once_kairo_gets_approved(monke
 
     async def _none():
         return []
-    async def _missing(catalogue_size):
-        calls.setdefault("missing_query", []).append(catalogue_size)
+    async def _missing(fingerprints):
+        calls.setdefault("missing_query", []).append(fingerprints)
         return [sender]
     monkeypatch.setattr(wq, "list_verifying_senders", _none)
     monkeypatch.setattr(wq, "list_unresolved_templates", _none)
-    monkeypatch.setattr(wq, "list_senders_missing_templates", _missing)
+    monkeypatch.setattr(wq, "list_senders_needing_templates", _missing)
 
     counts = await wo.sweep(settings=FakeSettings())
 
     assert counts["propagated"] == len(wt.CATALOGUE)
-    assert calls["missing_query"] == [len(wt.CATALOGUE)]
+    assert calls["missing_query"] == [wt.catalogue_fingerprints()]
     assert [c["waba_id"] for c in calls["create_template"]] == ["WABA1"] * len(wt.CATALOGUE)
 
 
@@ -899,11 +905,11 @@ async def test_sweep_asks_kairos_waba_once_not_once_per_shop(monkeypatch):
 
     async def _none():
         return []
-    async def _three(catalogue_size):
+    async def _three(fingerprints):
         return [dict(sender, shop_id=uuid4()) for _ in range(3)]
     monkeypatch.setattr(wq, "list_verifying_senders", _none)
     monkeypatch.setattr(wq, "list_unresolved_templates", _none)
-    monkeypatch.setattr(wq, "list_senders_missing_templates", _three)
+    monkeypatch.setattr(wq, "list_senders_needing_templates", _three)
 
     await wo.sweep(settings=FakeSettings())
 
@@ -920,11 +926,11 @@ async def test_sweep_pushes_nothing_when_the_kairo_gate_is_empty(monkeypatch):
 
     async def _none():
         return []
-    async def _boom(catalogue_size):
+    async def _boom(fingerprints):
         raise AssertionError("must not even ask for shops it cannot help")
     monkeypatch.setattr(wq, "list_verifying_senders", _none)
     monkeypatch.setattr(wq, "list_unresolved_templates", _none)
-    monkeypatch.setattr(wq, "list_senders_missing_templates", _boom)
+    monkeypatch.setattr(wq, "list_senders_needing_templates", _boom)
 
     class NoKairoWaba(FakeSettings):
         meta_kairo_waba_id = ""
@@ -1044,7 +1050,14 @@ def test_push_templates_edits_a_stale_body_and_pushes_past_the_ones_that_exist(m
     # not today's wording, so a template edit doesn't fail an unrelated test.
     keys = list(wt.CATALOGUE)
     stale, missing = keys[0], keys[-1]
-    live = []
+    # The document templates are already current here — they have their own
+    # test below; this one is about the catalogue.
+    live = [
+        {"id": f"id_{doc.name}", "name": doc.name, "language": doc.language,
+         "status": "APPROVED", "category": doc.category,
+         "components": [{"type": "BODY", "text": doc.body}]}
+        for doc in wt.DOCUMENT_TEMPLATES.values()
+    ]
     for key in keys:
         if key == missing:
             continue
@@ -1076,6 +1089,199 @@ def test_push_templates_edits_a_stale_body_and_pushes_past_the_ones_that_exist(m
     # Everything else was already identical: re-submitting burns Meta's edit
     # quota and puts an approved template back into review for nothing.
     assert len(posts) == 2, posts
+
+
+def test_push_templates_creates_the_document_template_with_its_sample(monkeypatch):
+    """The receipt pushes from the repo like everything else.
+
+    It is a DOCUMENT header, so it needs a HEADER component and a publicly
+    hosted sample for Meta to review — the reason it can't ride the catalogue
+    loop, and the reason it used to be built by hand in WhatsApp Manager.
+    """
+    import argparse
+
+    mod = _load_kairo_waba()
+    monkeypatch.setenv("META_TOKEN", "t")
+    monkeypatch.setenv("META_WABA_ID", "W")
+    monkeypatch.setenv("META_RECEIPT_SAMPLE_URL", "https://example.test/sample.pdf")
+
+    # Every catalogue entry is already current; only the document is missing.
+    live = [
+        {"id": f"id_{key}", "name": wo.template_name(key, tpl.language),
+         "language": tpl.language, "status": "APPROVED", "category": tpl.category,
+         "components": [mod._body_component(tpl)]}
+        for key, tpl in wt.CATALOGUE.items()
+    ]
+    calls = []
+
+    def fake_call(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("json")))
+        return 200, ({"data": live} if method == "GET" else {"status": "PENDING"})
+
+    monkeypatch.setattr(mod, "_call", fake_call)
+    mod.push_templates(argparse.Namespace(dry_run=False))
+
+    posts = [payload for method, _, payload in calls if method == "POST"]
+    assert len(posts) == 1, posts
+    doc = wt.DOCUMENT_TEMPLATES["purchase_receipt_1"]
+    assert posts[0]["name"] == doc.name, "the preset name is used verbatim, not it_-prefixed"
+    header = posts[0]["components"][0]
+    assert header["format"] == "DOCUMENT"
+    assert header["example"]["header_handle"] == ["https://example.test/sample.pdf"]
+
+
+def test_push_templates_refuses_to_create_a_document_without_a_sample(monkeypatch):
+    """No sample URL means Meta rejects it — say so instead of submitting."""
+    import argparse
+
+    mod = _load_kairo_waba()
+    monkeypatch.setenv("META_TOKEN", "t")
+    monkeypatch.setenv("META_WABA_ID", "W")
+    monkeypatch.delenv("META_RECEIPT_SAMPLE_URL", raising=False)
+
+    live = [
+        {"id": f"id_{key}", "name": wo.template_name(key, tpl.language),
+         "language": tpl.language, "status": "APPROVED", "category": tpl.category,
+         "components": [mod._body_component(tpl)]}
+        for key, tpl in wt.CATALOGUE.items()
+    ]
+    posts = []
+
+    def fake_call(method, path, **kwargs):
+        if method == "POST":
+            posts.append(path)
+        return 200, ({"data": live} if method == "GET" else {"status": "PENDING"})
+
+    monkeypatch.setattr(mod, "_call", fake_call)
+    with pytest.raises(SystemExit):
+        mod.push_templates(argparse.Namespace(dry_run=False))
+    assert posts == []
+
+
+# ------------------------------------------------------- copy drift downstream
+
+@pytest.mark.asyncio
+async def test_ensure_templates_edits_a_template_whose_body_changed(monkeypatch):
+    """Re-voicing a template must reach the salons already carrying it.
+
+    Before `body_hash`, an existing row was an unconditional skip: every
+    connected salon kept sending the old text forever while `status` read
+    `approved` and nothing anywhere disagreed.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    key = next(iter(wt.CATALOGUE))
+
+    async def _get_template(shop_id, template_key):
+        if template_key != key:
+            return None
+        return {"template_key": key, "meta_template_id": f"id_{key}",
+                "status": "approved", "body_hash": "the-old-copy"}
+    monkeypatch.setattr(wq, "get_template", _get_template)
+
+    async def _edit(**kw):
+        calls.setdefault("edit_template", []).append(kw)
+        return "pending"
+    monkeypatch.setattr(meta, "edit_template", _edit)
+
+    result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
+
+    assert result["edited"] == 1
+    assert result["created"] == len(wt.CATALOGUE) - 1
+    edit = calls["edit_template"][0]
+    # Edited in place, on the template it belongs to: delete-and-recreate would
+    # take the salon off the air for Meta's 30-day name lock.
+    assert edit["template_id"] == f"id_{key}"
+    assert edit["body_text"] == wt.CATALOGUE[key].body
+    assert "create_template" not in [c.get("name") for c in calls.get("create_template", [])
+                                     if c.get("name") == wo.template_name(key, "it")]
+    row = next(t for t in calls["templates"] if t["template_key"] == key)
+    assert row["body_hash"] == wt.body_hash(wt.CATALOGUE[key].body)
+    assert row["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_leaves_a_current_body_alone(monkeypatch):
+    """An unchanged body must not be resubmitted: it would burn Meta's edit
+    quota and put an approved template back into review for nothing."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+
+    async def _get_template(shop_id, template_key):
+        tpl = wt.CATALOGUE[template_key]
+        return {"template_key": template_key, "meta_template_id": f"id_{template_key}",
+                "status": "approved", "body_hash": wt.body_hash(tpl.body)}
+    monkeypatch.setattr(wq, "get_template", _get_template)
+
+    async def _edit(**kw):
+        raise AssertionError("nothing changed — nothing must be pushed")
+    monkeypatch.setattr(meta, "edit_template", _edit)
+
+    result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
+
+    assert result == {"ok": True, "created": 0, "edited": 0,
+                      "failed": [], "not_ready": []}
+    assert "create_template" not in calls
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_does_not_push_new_copy_kairo_has_not_approved(monkeypatch):
+    """The gate compares the *body*, not just the status of a name.
+
+    Change the copy here and deploy before `push-templates` runs: Kairo's WABA
+    still reports APPROVED — for last month's text. A name-only gate would read
+    that as a green light and push the unreviewed copy to every customer WABA.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+
+    async def _stale(**kw):
+        return meta.TemplateStatus(status="approved", rejection_reason=None,
+                                   body="il testo che Meta ha già")
+    monkeypatch.setattr(meta, "fetch_template", _stale)
+
+    async def _get_template(shop_id, template_key):
+        return {"template_key": template_key, "meta_template_id": "id_x",
+                "status": "approved", "body_hash": "the-old-copy"}
+    monkeypatch.setattr(wq, "get_template", _get_template)
+
+    async def _edit(**kw):
+        raise AssertionError("Kairo's WABA has not approved this copy")
+    monkeypatch.setattr(meta, "edit_template", _edit)
+
+    result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
+
+    assert result["edited"] == 0
+    assert set(result["not_ready"]) == set(wt.CATALOGUE)
+    del calls
+
+
+def test_catalogue_fingerprints_move_with_the_copy():
+    """The sweep's worklist key: one entry per catalogue key, hash of its body.
+
+    Counting rows was both blind to a changed body and inflated by templates
+    outside the catalogue — a shop holding `purchase_receipt_1` and missing a
+    real template counted as complete and was never revisited.
+    """
+    fingerprints = wt.catalogue_fingerprints()
+    assert len(fingerprints) == len(wt.CATALOGUE)
+    assert all("|" in f for f in fingerprints)
+    assert wt.RECEIPT_TEMPLATE_KEY not in [f.split("|")[0] for f in fingerprints]
+    key, tpl = next(iter(wt.CATALOGUE.items()))
+    assert f"{key}|{wt.body_hash(tpl.body)}" in fingerprints
+    assert wt.body_hash(tpl.body) != wt.body_hash(tpl.body + " ")
 
 
 def test_signup_config_asks_meta_for_the_coexistence_branch():

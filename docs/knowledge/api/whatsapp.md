@@ -127,11 +127,15 @@ are just silently incorrect — so two tests in `test_whatsapp.py` pin it.
 
 ### `POST /whatsapp/templates/ensure/{shop_id}`
 
-Re-runs template injection — after a rejection, or after the catalogue (`services/messaging/whatsapp_templates.py`) gains an entry. Already-created templates are skipped: Meta blocks reusing a deleted template's name for 30 days.
+Re-runs template injection — after a rejection, after the catalogue (`services/messaging/whatsapp_templates.py`) gains an entry, **or after an existing body is edited**.
 
-**Gated on Kairo's own WABA.** A template is created by hand on Kairo's own WABA first (`scripts/kairo_waba.py push-templates`, then `scripts/kairo_waba.py templates` to watch it move to `approved`) — this endpoint only pushes a catalogue entry into a *customer's* WABA once that same template is `approved` there, checked live via `GET {waba_id}/message_templates?name=...`. Rejection is a Meta judgment on the content, identical on every WABA, so this avoids burning the same rejection (and its quality-rating hit) once per salon. Requires `META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN`; unset means nothing propagates, not "propagate unchecked."
+Three outcomes per key: **create** what the WABA doesn't have, **edit in place** what it has under an outdated body, leave the rest alone (resubmitting an identical body burns Meta's edit quota and puts an approved template back into review for nothing).
 
-Returns `{"created": N, "failed": ["key", …], "not_ready": ["key", …]}`. `not_ready` is not approved on Kairo's WABA yet (or Kairo's WABA isn't configured) — expected right after adding a new catalogue entry, before you've pushed and gotten it approved on Kairo's own WABA. One rejected template never aborts the rest of the catalogue.
+**Gated on Kairo's own WABA — status *and* body (2026-09-02).** A template is pushed to Kairo's own WABA first (`scripts/kairo_waba.py push-templates`, then `scripts/kairo_waba.py templates` to watch it move to `approved`); this endpoint only propagates a catalogue entry into a *customer's* WABA once Meta has approved **that exact body** there, read live from `GET {waba_id}/message_templates?name=…&fields=…,components`. Status alone answers a question about a *name*: change the copy here and deploy before `push-templates` runs, and a name-only gate reports "approved" for last month's text — then hands the drift path below a green light to push unreviewed copy to every salon. Rejection is a Meta judgment on content, identical on every WABA, so this avoids burning the same rejection (and its quality-rating hit) once per salon. Requires `META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN`; unset means nothing propagates, not "propagate unchecked."
+
+Returns `{"created": N, "edited": N, "failed": ["key", …], "not_ready": ["key", …]}`. `not_ready` is not approved on Kairo's WABA yet (or the approved copy there isn't the catalogue's, or Kairo's WABA isn't configured) — expected right after changing copy, before you've pushed it and had it approved on Kairo's own WABA. One rejected template never aborts the rest of the catalogue.
+
+**Copy drift is tracked by `whatsapp.templates.body_hash` (2026-09-02).** It records *which version* of the copy each WABA holds — `status = 'approved'` only ever meant "a template with this name passed review". Before it, an existing row was an unconditional skip: re-voicing a template reached Kairo's WABA and stopped there, and every connected salon kept sending the old text with nothing anywhere disagreeing. An edit keeps the name (`POST /{template_id}`), so the salon keeps sending the previously approved copy while Meta re-reviews the new one — delete-and-recreate would take them off the air for Meta's 30-day name lock. `NULL` means "unknown version" and is treated as stale, which is what every pre-migration row is.
 
 **Template names are `{locale}_{key}` — composed, never looked up (2026-09-01).** `it_promo_v1` today, `en_promo_v1` the day English copy exists. Meta scopes a name per-WABA and **cannot translate a template**, so a second language is a second template with its own name, its own submission and its own verdict on the same WABA; composing the name from the shop's locale is what lets the platform pick between them with no table in the middle. This replaced the flat `kairo_` prefix, which could only ever name one language's copy.
 
@@ -147,7 +151,9 @@ Pinned by `test_template_names_compose_the_locale_with_the_key`, `test_a_shop_on
 
 **`push-templates` reconciles, it does not blind-create (2026-09-01).** It reads the WABA's templates once, then per catalogue entry: creates what is missing, `POST /{template_id}` on a body that differs, and skips what already matches. Before this it POSTed everything and `_api` exited on the first `name already exists`, so re-running after a copy change pushed nothing *and* never reached the entries added since the last run — with no symptom, because `kairo_waba.py templates` prints names and statuses, not bodies. An edit puts the template back to `PENDING` (Meta allows it only on `APPROVED`/`REJECTED`/`PAUSED`, ~10 edits/month), so `--dry-run` prints the plan first. A **category** change is never edited — UTILITY→MARKETING doubles the cost of the highest-volume messages we send, so it is reported and skipped for a human. Pinned by `test_push_templates_edits_a_stale_body_and_pushes_past_the_ones_that_exist`.
 
-> The customer-side `ensure_templates` still skips any key the shop already has and compares no bodies: an edited template reaches Kairo's WABA only. Salons already carrying the old copy keep it — that is what `feedback_v2` exists for.
+**It also pushes the DOCUMENT templates (2026-09-02).** `whatsapp_templates.DOCUMENT_TEMPLATES` — `purchase_receipt_1` today — reconciles in the same run, in its own loop: the payload is an attachment, so it carries a `HEADER`/`DOCUMENT` component and needs `META_RECEIPT_SAMPLE_URL` (a publicly hosted sample PDF) **to create**, though not to edit, since an edit resubmits only the body. Its name is Meta's pre-built preset used **verbatim**, not `{locale}_{key}`. Only the body text is compared: Meta hands back an opaque `header_handle`, never the URL we submitted, so comparing headers would report drift on every run. Missing sample URL is reported and counted as not-pushed rather than submitted to certain rejection. Pinned by `test_push_templates_creates_the_document_template_with_its_sample`.
+
+> **The full copy-change loop:** edit the body in `whatsapp_templates.py` → `push-templates` (creates/edits on Kairo's WABA, back to `PENDING`) → Meta approves it there → the hourly tick's gate now matches on body, so `ensure_templates` edits every connected salon's copy in place and marks it `pending` → each salon's verdict arrives by `message_template_status_update` webhook → the webapp's tiles, which all gate on `status === 'approved'` from `GET /whatsapp/status`, re-enable themselves. Nothing after the first step is manual; `POST /whatsapp/templates/ensure/{shop_id}` only exists to skip the wait.
 
 **The marketing trio was re-voiced on 2026-09-02** (never live, so bodies were rewritten in place with keys kept): `promo_v1`/`winback_v1`/`rebook_v1` are now signed by the stylist of the customer's last visit (`{{2}}`, the shop moving to `{{3}}`) and close with the shared soft CTA «Se ti va, scrivimi pure.» `promo_v1`'s generated slot (now `{{4}}`) is a gentle check-in *observation* about the last visit, not an offer; `rebook_v1` never mentions money (owner rule, pinned by a test). `receipt_v1` (UTILITY, itemised visit + total) joined for a not-yet-built receipt feature — inert until a sender references it, but it enters the push list like any catalogue entry.
 
@@ -262,11 +268,17 @@ receipt can be re-sent).
 Refusals surface as a `409` whose `detail` is a bare enum (`sender_not_online`,
 `template_pending`, …), the same shape the webapp's `mapWaError` already reads.
 
-**Template is not in `CATALOGUE`.** It is referenced verbatim as
-`purchase_receipt_1` and propagated by its own `ensure_receipt_template`, gated on
-Meta having approved the same-named template on Kairo's WABA first, and requiring
-`META_RECEIPT_SAMPLE_URL` (a publicly-hosted sample PDF Meta reviews against a
-document header). Fails closed when either is unconfigured.
+**Template is not in `CATALOGUE`** — it lives in `DOCUMENT_TEMPLATES` in the same
+file (2026-09-02), which is what puts its body under version control and in
+`push-templates`' reconcile instead of leaving it to be hand-built in WhatsApp
+Manager. Separate from the catalogue because the payload is an attachment: a
+`HEADER`/`DOCUMENT` component, `create_document_template` rather than
+`create_template`, no variables to fill, and the name is Meta's preset used
+**verbatim** (`purchase_receipt_1`, never `it_purchase_receipt_1`). It propagates
+to customer WABAs by its own `ensure_receipt_template` — lazily, on the first send
+— gated on Meta having approved the same name **and the same body** on Kairo's
+WABA, and requiring `META_RECEIPT_SAMPLE_URL` (a publicly-hosted sample PDF Meta
+reviews against a document header). Fails closed when either is unconfigured.
 
 ---
 
@@ -379,7 +391,7 @@ New `suppressed_reason` values: `recently_contacted`,
 
 `POST /messaging/tick` ([Number Provisioning](number-provisioning.md)) has two WhatsApp stages, each independently wrapped so one failure can't suppress the others:
 
-- `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver, and carries the **only retry of the propagation gate**: live senders missing part of the catalogue are re-pushed once Kairo's own copy turns `approved`. Kairo's WABA is asked once per run, not once per shop — the answer is identical for everyone. An empty gate (unconfigured, or a Graph error) skips the stage entirely rather than pushing on a guess. Counts add `propagated` and `approved_on_kairo`.
+- `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver, and carries the **only retry of the propagation gate**: live senders missing part of the catalogue — **or holding an outdated body** — are pushed once Kairo's own copy of that exact text turns `approved`. The worklist (`list_senders_needing_templates`) is keyed on `template_key|body_hash` per catalogue entry rather than on a count of rows, which fixed two things at once: a count could not see a body that changed under an unchanged name, and it was inflated by templates outside the catalogue, so a shop holding `purchase_receipt_1` and missing a real template counted as complete and was never revisited. Kairo's WABA is asked once per run, not once per shop — the answer is identical for everyone. An empty gate (unconfigured, or a Graph error) skips the stage entirely rather than pushing on a guess. Counts add `propagated`, `edited` and `approved_on_kairo`.
 - `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed` (`no_consent`, `opted_out`, `recently_contacted`), `failed`, `deferred` (over daily cap, retried in an hour), `rate_capped` (Meta 131049, retried in 24h), `requeued` (claimed but never sent, recovered from a crashed tick).
 
 ---

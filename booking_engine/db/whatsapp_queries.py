@@ -130,13 +130,20 @@ async def get_template(shop_id: UUID, template_key: str) -> dict | None:
 async def upsert_template(
     *, shop_id: UUID, template_key: str, name: str, meta_template_id: str,
     language: str, category: str, status: str, variable_count: int,
+    body_hash: str | None = None,
 ) -> dict:
+    """Record what this WABA holds. `body_hash` is *which version* of the copy.
+
+    Without it, `status = 'approved'` says a template with that name passed
+    review — not that the salon is sending the text this repo currently
+    defines. It is the whole drift signal `ensure_templates` reads.
+    """
     row = await execute_one(
         """
         INSERT INTO whatsapp.templates
             (shop_id, template_key, name, meta_template_id, language,
-             category, status, variable_count)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             category, status, variable_count, body_hash)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         ON CONFLICT (shop_id, template_key) DO UPDATE
         SET name = EXCLUDED.name,
             meta_template_id = EXCLUDED.meta_template_id,
@@ -144,12 +151,13 @@ async def upsert_template(
             category = EXCLUDED.category,
             status = EXCLUDED.status,
             variable_count = EXCLUDED.variable_count,
+            body_hash = EXCLUDED.body_hash,
             rejection_reason = NULL,
             updated_at = now()
         RETURNING *
         """,
         shop_id, template_key, name, meta_template_id, language,
-        category, status, variable_count,
+        category, status, variable_count, body_hash,
     )
     return row  # type: ignore[return-value]
 
@@ -173,8 +181,8 @@ async def set_template_status(
     )
 
 
-async def list_senders_missing_templates(catalogue_size: int) -> list[dict]:
-    """Live senders that don't have the whole catalogue yet.
+async def list_senders_needing_templates(fingerprints: list[str]) -> list[dict]:
+    """Live senders missing a catalogue entry, or holding an outdated body.
 
     The gap this closes: propagation is gated on Kairo's own copy being
     approved, so a salon that onboards while a template is still pending gets
@@ -185,8 +193,15 @@ async def list_senders_missing_templates(catalogue_size: int) -> list[dict]:
     template, not a missing one. The result was a shop that could never send,
     with nothing anywhere saying why.
 
-    Cheap enough to run every tick: one count per sender, and shops with the
-    full catalogue — which is all of them, steady-state — don't come back.
+    **`key|body_hash`, not a plain count of rows.** Two bugs in one shape:
+    counting rows meant a non-catalogue template (`purchase_receipt_1`, which
+    is a document header and deliberately outside `CATALOGUE`) padded the total,
+    so a shop with the receipt and one real template missing counted as complete
+    and was never revisited. And a count of any kind cannot see a body that
+    changed under an unchanged name.
+
+    Cheap enough to run every tick: one count per sender, and shops holding the
+    current catalogue — which is all of them, steady-state — don't come back.
     """
     return await execute(
         """
@@ -194,9 +209,11 @@ async def list_senders_missing_templates(catalogue_size: int) -> list[dict]:
         WHERE s.status = 'online'
           AND s.waba_id IS NOT NULL AND s.access_token IS NOT NULL
           AND (SELECT count(*) FROM whatsapp.templates t
-               WHERE t.shop_id = s.shop_id) < $1
+               WHERE t.shop_id = s.shop_id
+                 AND t.template_key || '|' || coalesce(t.body_hash, '') = ANY($1)
+              ) < cardinality($1::text[])
         """,
-        catalogue_size,
+        fingerprints,
     )
 
 

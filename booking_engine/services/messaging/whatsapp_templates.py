@@ -19,6 +19,7 @@ rather than letting the send fail at the provider.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 
@@ -243,17 +244,61 @@ CATALOGUE: dict[str, Template] = {
 }
 
 
-# ── Smart Receipt (DOCUMENT header) ──────────────────────────────────────────
-# Deliberately NOT a CATALOGUE entry: a receipt is a document attachment, not a
-# body with variables, and the name is Meta's pre-built preset (`purchase_receipt_1`
-# under Utility › Payments › receipt attachment), used verbatim rather than
-# language-prefixed like the marketing keys. The PDF carries the whole receipt;
-# the body is a short fixed text with no variables to fill, so there is nothing
-# to personalise and nothing the model writes.
+# ── DOCUMENT-header templates ────────────────────────────────────────────────
+# Deliberately NOT CATALOGUE entries: the payload is an attachment, not a body
+# with variables, so they are created with `create_document_template` and need a
+# publicly-hosted sample file for Meta's review (`META_RECEIPT_SAMPLE_URL`) —
+# neither of which the catalogue path knows about.
+#
+# The name is Meta's pre-built preset (`purchase_receipt_1`, Utility › Payments
+# › receipt attachment), used **verbatim** rather than language-prefixed like
+# the marketing keys — hence `name` on the dataclass instead of composing it
+# from the key. They still push from here rather than being hand-made in
+# WhatsApp Manager: `kairo_waba.py push-templates` reconciles them alongside the
+# catalogue, so the body lives in one place.
+@dataclass(frozen=True)
+class DocumentTemplate:
+    name: str
+    body: str
+    language: str = "it"
+    category: str = "UTILITY"
+
+
+DOCUMENT_TEMPLATES: dict[str, DocumentTemplate] = {
+    "purchase_receipt_1": DocumentTemplate(
+        name="purchase_receipt_1",
+        body="In allegato trovi la ricevuta del tuo pagamento. Grazie e a presto!",
+    ),
+}
+
 RECEIPT_TEMPLATE_KEY = "purchase_receipt_1"
-RECEIPT_TEMPLATE_NAME = "purchase_receipt_1"
-RECEIPT_TEMPLATE_LANGUAGE = "it"
-RECEIPT_TEMPLATE_BODY = "In allegato trovi la ricevuta del tuo pagamento. Grazie e a presto!"
+_RECEIPT = DOCUMENT_TEMPLATES[RECEIPT_TEMPLATE_KEY]
+RECEIPT_TEMPLATE_NAME = _RECEIPT.name
+RECEIPT_TEMPLATE_LANGUAGE = _RECEIPT.language
+RECEIPT_TEMPLATE_BODY = _RECEIPT.body
+
+
+def body_hash(body: str) -> str:
+    """Fingerprint of one approved body — how copy drift is detected.
+
+    `whatsapp.templates.body_hash` records which version of the copy a salon's
+    WABA actually holds. Without it, editing a body in this file changed nothing
+    downstream: `ensure_templates` skips any key it already has a row for, so
+    every connected salon kept sending the old text forever, with the status
+    column cheerfully reading `approved`.
+    """
+    return hashlib.sha256(body.encode()).hexdigest()[:32]
+
+
+def catalogue_fingerprints() -> list[str]:
+    """`key|hash` per catalogue entry — the worklist key for the hourly sweep.
+
+    One array covers both questions the sweep has to ask ("is a template
+    missing?" and "is one stale?") in a single count, and being keyed on the
+    catalogue is also what stops non-catalogue rows (the receipt) from padding
+    that count until a shop missing a real template looks complete.
+    """
+    return [f"{key}|{body_hash(tpl.body)}" for key, tpl in CATALOGUE.items()]
 
 
 def clean_variable(value: str) -> str:

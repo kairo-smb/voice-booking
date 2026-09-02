@@ -17,6 +17,9 @@ Env:
     META_TOKEN    system-user or temporary token from App Dashboard > API Setup
     META_WABA_ID  the WABA id (App Dashboard > WhatsApp > API Setup)
     TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN   only for `otp`
+    META_RECEIPT_SAMPLE_URL   public sample PDF, only to CREATE a document
+                              template (`push-templates`); editing one doesn't
+                              resubmit the header, so it isn't needed then.
 """
 from __future__ import annotations
 
@@ -129,6 +132,78 @@ def _live_body(live: dict) -> dict | None:
 _EDITABLE = {"APPROVED", "REJECTED", "PAUSED"}
 
 
+def _document_component(tpl, sample_url: str) -> dict:
+    """The HEADER of a document template. Meta requires a sample to review."""
+    return {
+        "type": "HEADER",
+        "format": "DOCUMENT",
+        "example": {"header_handle": [sample_url]},
+    }
+
+
+def _push_document_templates(a, failed: list[str]) -> None:
+    """The DOCUMENT-header templates (Smart Receipt), same reconcile as above.
+
+    Separate loop, not a branch in the catalogue one: the payload is an
+    attachment rather than a body with variables, so it carries a HEADER
+    component, needs a publicly-hosted sample file, and its name is Meta's
+    pre-built preset used verbatim (`purchase_receipt_1`) rather than composed
+    from the locale. Only the BODY text is compared — Meta hands back an opaque
+    `header_handle`, never the URL we submitted, so a header comparison would
+    report drift on every run.
+    """
+    from booking_engine.services.messaging.whatsapp_templates import DOCUMENT_TEMPLATES
+
+    if not DOCUMENT_TEMPLATES:
+        return
+    sample_url = os.environ.get("META_RECEIPT_SAMPLE_URL", "")
+
+    out = _api(
+        "GET", f"{_waba()}/message_templates",
+        params={"limit": 100, "fields": "id,name,language,status,category,components"},
+    )
+    live = {(t["name"], t["language"]): t for t in out.get("data", [])}
+
+    for tpl in DOCUMENT_TEMPLATES.values():
+        have = live.get((tpl.name, tpl.language))
+        want_body = {"type": "BODY", "text": tpl.body}
+
+        if have is None:
+            if not sample_url:
+                print(f"SKIPPED    {tpl.name}  META_RECEIPT_SAMPLE_URL not set")
+                failed.append(tpl.name)
+                continue
+            if a.dry_run:
+                print(f"create     {tpl.name} (document)"); continue
+            status, body = _call("POST", f"{_waba()}/message_templates", json={
+                "name": tpl.name, "language": tpl.language, "category": tpl.category,
+                "components": [_document_component(tpl, sample_url), want_body],
+            })
+            if status >= 400:
+                print(f"FAILED     {tpl.name}  {json.dumps(body)}"); failed.append(tpl.name)
+            else:
+                print(f"created    {tpl.name}  {body.get('status', '')}")
+            continue
+
+        if (_live_body(have) or {}).get("text") == tpl.body:
+            print(f"unchanged  {tpl.name}  {have['status']}")
+            continue
+        if have["status"] not in _EDITABLE:
+            print(f"SKIPPED    {tpl.name}  status {have['status']} is not editable")
+            failed.append(tpl.name)
+            continue
+        if a.dry_run:
+            print(f"edit       {tpl.name}  ({have['status']} -> PENDING)"); continue
+
+        # The header is unchanged, so only the body is sent — re-submitting the
+        # header would need the sample URL again for no gain.
+        status, body = _call("POST", have["id"], json={"components": [want_body]})
+        if status >= 400:
+            print(f"FAILED     {tpl.name}  {json.dumps(body)}"); failed.append(tpl.name)
+        else:
+            print(f"edited     {tpl.name}  back to PENDING")
+
+
 def push_templates(a) -> None:
     """Reconcile this WABA against the repo's catalogue: create, edit, or skip.
 
@@ -138,6 +213,9 @@ def push_templates(a) -> None:
     *after* the previous run. A catalogue that has moved to v2 while Meta still
     holds v1 was invisible: the status list shows APPROVED either way, because
     it prints names, not bodies.
+
+    Covers `DOCUMENT_TEMPLATES` too, so the receipt is not the one template
+    anyone has to remember to build by hand in WhatsApp Manager.
     """
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from booking_engine.services.messaging.whatsapp_onboarding import template_name
@@ -206,6 +284,8 @@ def push_templates(a) -> None:
             print(f"FAILED     {name}  {json.dumps(body)}"); failed.append(name)
         else:
             print(f"edited     {name}  back to PENDING")
+
+    _push_document_templates(a, failed)
 
     if failed:
         sys.exit(f"\n{len(failed)} not pushed: {', '.join(failed)}")

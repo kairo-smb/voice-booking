@@ -30,7 +30,8 @@ from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging.whatsapp_templates import (
-    CATALOGUE, SUPPORTED_LANGUAGES, resolve_language,
+    CATALOGUE, SUPPORTED_LANGUAGES, body_hash, catalogue_fingerprints,
+    resolve_language,
 )
 
 logger = logging.getLogger(__name__)
@@ -223,11 +224,19 @@ async def abort(*, shop_id: UUID) -> dict:
 
 
 async def approved_on_kairo_waba(settings) -> set[tuple[str, str]]:
-    """Which (language, key) pairs Meta has approved on *Kairo's own* WABA.
+    """Which (language, key) pairs Meta has approved on *Kairo's own* WABA,
+    **with the body this file currently holds**.
 
     Keyed by locale as well as key since 2026-09-01: `it_promo_v1` being
     approved says nothing about `en_promo_v1`, which is a separate template
     with a separate verdict on the same WABA.
+
+    The body is compared, not just the status, because a status answers a
+    question about a *name*. Change the copy here and deploy before
+    `push-templates` runs, and a name-only gate would report "approved" for the
+    body Meta reviewed *last month* — and the drift path below would then push
+    the new, unreviewed copy straight to every customer WABA, which is exactly
+    the vetting rule this gate exists to enforce.
 
     Split out of `ensure_templates` so the sweep asks Meta once per run rather
     than once per shop: the answer is the same for everyone, and it was N shops
@@ -242,26 +251,40 @@ async def approved_on_kairo_waba(settings) -> set[tuple[str, str]]:
         return set()
     approved = set()
     for language in SUPPORTED_LANGUAGES:
-        for key in CATALOGUE:
+        for key, tpl in CATALOGUE.items():
             verdict = await meta.fetch_template(
                 waba_id=settings.meta_kairo_waba_id,
                 name=template_name(key, language),
                 token=settings.meta_kairo_token,
             )
-            if verdict and verdict.status == "approved":
-                approved.add((language, key))
+            if not verdict or verdict.status != "approved":
+                continue
+            if verdict.body != tpl.body:
+                logger.info(
+                    "whatsapp.kairo_body_drift name=%s — approved copy is not the "
+                    "catalogue's; run kairo_waba.py push-templates",
+                    template_name(key, language),
+                )
+                continue
+            approved.add((language, key))
     return approved
 
 
 async def ensure_templates(
     *, shop_id: UUID, settings, approved: set[tuple[str, str]] | None = None,
 ) -> dict:
-    """Inject Kairo's catalogue into the salon's own WABA.
+    """Inject Kairo's catalogue into the salon's own WABA, and keep it current.
 
     This is the call Twilio structurally could not make — a WABA it doesn't
     own is closed to it — and the reason the whole channel moved to Meta
-    direct. Already-created templates are skipped: Meta blocks reusing a
-    deleted template's name for 30 days, so resubmitting is not free.
+    direct.
+
+    **Three outcomes per key: create, edit, or nothing.** A key already on the
+    WABA with the catalogue's current body is left alone (resubmitting is not
+    free — Meta blocks reusing a deleted name for 30 days). One whose body has
+    since changed here is *edited in place*, keeping its name: before this, an
+    existing row meant an unconditional skip, so re-voicing a template changed
+    nothing for any connected salon while `status` still read `approved`.
 
     **Gated on Kairo's own copy being approved first.** A template is created
     by hand on Kairo's WABA (`scripts/kairo_waba.py push-templates`) and
@@ -285,9 +308,11 @@ async def ensure_templates(
     # snapshotted onto the sender — see `get_shop_language`.
     language = resolve_language(await wq.get_shop_language(shop_id))
 
-    created, failed, not_ready = 0, [], []
+    created, edited, failed, not_ready = 0, 0, [], []
     for key, tpl in CATALOGUE.items():
-        if await wq.get_template(shop_id, key):
+        existing = await wq.get_template(shop_id, key)
+        wanted = body_hash(tpl.body)
+        if existing and existing.get("body_hash") == wanted:
             continue
         name = template_name(key, language)
 
@@ -296,14 +321,23 @@ async def ensure_templates(
             continue
 
         try:
-            meta_id, status = await meta.create_template(
-                waba_id=row["waba_id"], token=row["access_token"],
-                name=name, language=language, category=tpl.category,
-                body_text=tpl.body, sample_variables=tpl.sample,
-            )
+            if existing:
+                # Same name, new body. The salon keeps sending the previously
+                # approved copy while Meta re-reviews this one.
+                meta_id = existing["meta_template_id"]
+                status = await meta.edit_template(
+                    template_id=meta_id, token=row["access_token"],
+                    body_text=tpl.body, sample_variables=tpl.sample,
+                )
+            else:
+                meta_id, status = await meta.create_template(
+                    waba_id=row["waba_id"], token=row["access_token"],
+                    name=name, language=language, category=tpl.category,
+                    body_text=tpl.body, sample_variables=tpl.sample,
+                )
         except meta.MetaError as exc:
             # One rejected template must not stop the rest of the catalogue.
-            logger.warning("whatsapp.template_create_failed shop=%s key=%s err=%s",
+            logger.warning("whatsapp.template_push_failed shop=%s key=%s err=%s",
                            shop_id, key, exc)
             failed.append(key)
             continue
@@ -311,10 +345,14 @@ async def ensure_templates(
             shop_id=shop_id, template_key=key, name=name,
             meta_template_id=meta_id, language=language,
             category=tpl.category, status=TEMPLATE_STATUS.get(status, "pending"),
-            variable_count=tpl.variables,
+            variable_count=tpl.variables, body_hash=wanted,
         )
-        created += 1
-    return {"ok": True, "created": created, "failed": failed, "not_ready": not_ready}
+        if existing:
+            edited += 1
+        else:
+            created += 1
+    return {"ok": True, "created": created, "edited": edited,
+            "failed": failed, "not_ready": not_ready}
 
 
 async def sweep(*, settings) -> dict:
@@ -333,7 +371,7 @@ async def sweep(*, settings) -> dict:
     would.
     """
     counts = {"senders": 0, "online": 0, "templates": 0, "approved": 0,
-              "propagated": 0, "errors": 0}
+              "propagated": 0, "edited": 0, "errors": 0}
 
     # Once per sweep, not once per shop: same question, same answer for all.
     try:
@@ -366,20 +404,22 @@ async def sweep(*, settings) -> dict:
             logger.exception("whatsapp.sender_poll_failed shop=%s", row["shop_id"])
             counts["errors"] += 1
 
-    # Live senders still missing part of the catalogue. Skipped entirely when
-    # the gate is empty — there is nothing to give them, and asking would be
-    # one pointless query per shop per hour.
+    # Live senders missing part of the catalogue, or holding an outdated body.
+    # Skipped entirely when the gate is empty — there is nothing to give them,
+    # and asking would be one pointless query per shop per hour.
     if approved:
-        for row in await wq.list_senders_missing_templates(len(CATALOGUE)):
+        for row in await wq.list_senders_needing_templates(catalogue_fingerprints()):
             try:
                 result = await ensure_templates(
                     shop_id=row["shop_id"], settings=settings, approved=approved
                 )
-                if result.get("created"):
-                    counts["propagated"] += result["created"]
+                pushed = result.get("created", 0) + result.get("edited", 0)
+                if pushed:
+                    counts["propagated"] += pushed
+                    counts["edited"] += result.get("edited", 0)
                     logger.info(
-                        "whatsapp.templates_propagated_late shop=%s created=%s",
-                        row["shop_id"], result["created"],
+                        "whatsapp.templates_propagated_late shop=%s created=%s edited=%s",
+                        row["shop_id"], result["created"], result["edited"],
                     )
             except Exception:  # noqa: BLE001 — see above
                 logger.exception("whatsapp.late_propagation_failed shop=%s",

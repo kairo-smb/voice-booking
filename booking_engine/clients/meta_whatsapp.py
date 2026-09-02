@@ -182,10 +182,14 @@ async def create_template(
 class TemplateStatus:
     status: str
     rejection_reason: str | None
+    # The BODY text Meta currently holds. The propagation gate compares it
+    # against the catalogue: "approved" alone answers a question about a *name*,
+    # and a name says nothing about which version of the copy was approved.
+    body: str = ""
 
 
 async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStatus | None:
-    """Meta's current verdict on one template, by name.
+    """Meta's current verdict on one template, by name — with the body it ruled on.
 
     Two callers: the tick's reconciler (verdicts normally arrive as
     `message_template_status_update` webhooks within minutes, and a missed one
@@ -195,15 +199,48 @@ async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStat
     """
     body = await _request(
         "GET", f"{waba_id}/message_templates", token=token,
-        params={"name": name, "fields": "name,status,rejected_reason", "limit": 5},
+        params={"name": name,
+                "fields": "name,status,rejected_reason,components", "limit": 5},
     )
     for row in body.get("data", []):
         if row.get("name") == name:
+            text = next(
+                (c.get("text", "") for c in row.get("components") or []
+                 if c.get("type") == "BODY"),
+                "",
+            )
             return TemplateStatus(
                 status=(row.get("status") or "pending").lower(),
                 rejection_reason=row.get("rejected_reason") or None,
+                body=text,
             )
     return None
+
+
+async def edit_template(
+    *, template_id: str, token: str, body_text: str, sample_variables: dict[str, str],
+) -> str:
+    """Replace an existing template's body, keeping its name. Returns the status.
+
+    The alternative — delete and recreate — is not one: Meta blocks reusing a
+    deleted name for 30 days, so it would take every connected salon off the
+    air for a month. An edit puts the template back to PENDING and Meta
+    re-reviews it; the previously approved version keeps sending meanwhile.
+
+    Only the body is sent: category is not editable this way (a UTILITY →
+    MARKETING move doubles the cost of our highest-volume messages and gets a
+    human, not a loop), and the name is the identity.
+    """
+    ordered = [sample_variables[str(i)] for i in range(1, len(sample_variables) + 1)]
+    body = await _request(
+        "POST", template_id, token=token,
+        json_body={"components": [{
+            "type": "BODY",
+            "text": body_text,
+            **({"example": {"body_text": [ordered]}} if ordered else {}),
+        }]},
+    )
+    return (body.get("status") or "PENDING").lower()
 
 
 async def delete_template(*, waba_id: str, name: str, token: str) -> None:

@@ -26,6 +26,7 @@ from booking_engine.services.messaging.whatsapp_templates import (
     RECEIPT_TEMPLATE_KEY,
     RECEIPT_TEMPLATE_LANGUAGE,
     RECEIPT_TEMPLATE_NAME,
+    body_hash,
 )
 from booking_engine.services.phone_normalize import normalize_e164
 
@@ -57,7 +58,9 @@ async def ensure_receipt_template(*, shop_id: UUID, settings) -> dict:
         name=RECEIPT_TEMPLATE_NAME,
         token=settings.meta_kairo_token,
     )
-    if not verdict or verdict.status != "approved":
+    # Body compared, not just status: an approved *name* says nothing about
+    # which copy Meta reviewed. Same rule as the catalogue gate.
+    if not verdict or verdict.status != "approved" or verdict.body != RECEIPT_TEMPLATE_BODY:
         return {"ok": False, "error": "not_ready"}
 
     try:
@@ -77,6 +80,7 @@ async def ensure_receipt_template(*, shop_id: UUID, settings) -> dict:
         name=RECEIPT_TEMPLATE_NAME, meta_template_id=meta_id,
         language=RECEIPT_TEMPLATE_LANGUAGE, category="UTILITY",
         status=TEMPLATE_STATUS.get(status, "pending"), variable_count=0,
+        body_hash=body_hash(RECEIPT_TEMPLATE_BODY),
     )
     return {"ok": True, "created": 1}
 

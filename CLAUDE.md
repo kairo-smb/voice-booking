@@ -6,6 +6,86 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-02 — Template copy can now be *changed*: body_hash, in-place edits, and a gate that reads the body
+
+**The problem, stated plainly: editing a template body changed nothing for any
+customer.** `push-templates` had learned to edit Kairo's own WABA (2026-09-01),
+but `ensure_templates` skipped every key it already had a row for, and nothing
+compared bodies anywhere downstream. So new copy reached Kairo's WABA and
+stopped there, while every connected salon kept sending the old text with
+`status = 'approved'` and nothing anywhere disagreeing. The only escape was
+`retire-template` — a kill switch with a 30-day name lock — or a new key
+(`promo_v2`), which is why the catalogue had accumulated `_v6`s.
+
+**`whatsapp.templates.body_hash` (migration 21) is the missing fact.** `status`
+only ever meant "a template *with this name* passed review". The hash says which
+version of the copy that WABA actually holds. `ensure_templates` now has three
+outcomes per key — create what's missing, **edit in place** what's stale, leave
+current copy alone — and an edit keeps the name (`POST /{template_id}`), so the
+salon keeps sending the previously approved body while Meta re-reviews the new
+one. Delete-and-recreate would have taken them off the air for a month. Existing
+rows are **not backfilled**: NULL means "unknown version", which is the truth,
+and the first sweep re-pushes each once rather than asserting an alignment
+nobody checked against Meta.
+
+**The gate now compares the body, not just the status — and it has to.** With
+drift-driven edits in the loop, a name-only gate becomes actively dangerous:
+change copy here and deploy before `push-templates` runs, and Kairo's WABA still
+answers APPROVED (for last month's text), which the drift path would read as a
+green light to push unreviewed copy to every customer WABA at once — the exact
+failure the gate exists to prevent. `fetch_template` now returns the BODY
+component and `approved_on_kairo_waba` requires an exact match. Same rule
+applied to `ensure_receipt_template`.
+
+**The sweep's worklist was wrong in two ways, both fixed by the same key.**
+`list_senders_missing_templates(len(CATALOGUE))` counted *rows* in
+`whatsapp.templates` — so `purchase_receipt_1`, deliberately outside the
+catalogue, padded the count, and a shop holding the receipt while missing a real
+template counted as complete and was never revisited. And no count can see a
+body that changed under an unchanged name. Replaced by
+`list_senders_needing_templates(fingerprints)`, matching `key|body_hash` per
+catalogue entry against `cardinality()` of the same array — one query, both
+questions, one parameter.
+
+**`purchase_receipt_1` moved into the templates file as `DOCUMENT_TEMPLATES`**
+(owner request) so its body is under version control and `push-templates`
+reconciles it alongside the catalogue instead of it being the one template
+someone has to remember to hand-build in WhatsApp Manager. Still not a
+`CATALOGUE` entry: it needs a `HEADER`/`DOCUMENT` component,
+`create_document_template`, and `META_RECEIPT_SAMPLE_URL` to create (not to
+edit — an edit resubmits only the body); its name is Meta's preset used
+verbatim, never `{locale}_{key}`. Only the body is compared, because Meta
+returns an opaque `header_handle` rather than the URL we submitted and a header
+comparison would report drift on every run. No sample URL is reported as
+not-pushed rather than submitted to certain rejection — which does mean
+`push-templates` now exits non-zero until `META_RECEIPT_SAMPLE_URL` is set.
+
+**The loop the owner asked for now closes with one manual step:** edit the body
+here → `push-templates` → Meta approves on Kairo's WABA → the hourly tick edits
+every connected salon's copy → per-shop verdicts arrive by webhook → the
+webapp's tiles re-enable themselves, since every one of them already gates on
+`status === 'approved'` from `GET /whatsapp/status`
+(`CampaignsTab`, `BulkCampaignTile`, `AutomationsTile`, `RetentionMessageModal`).
+Nothing new was needed on the webapp side. **Not covered:** the Smart Receipt
+button has no such gate, because `purchase_receipt_1` isn't in the status
+payload's `templates[]` — it fails at send time instead. Left as-is; it was not
+part of this change.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **525 passed, 25 skipped, 0 failed** (up from
+517/25/0: eight new tests — drift→edit, current-body-untouched, gate refuses
+unapproved copy, fingerprints, two document-push tests, two receipt-gate tests).
+`list_senders_needing_templates` was executed against a scratch Postgres with
+real rows rather than assumed: a shop with the current catalogue is excluded, a
+shop with a stale hash and a shop padded by `purchase_receipt_1` are both
+returned, and the query was re-run as a `PREPARE`d statement to confirm the
+single `$1` binds under both `= ANY($1)` and `cardinality($1::text[])`.
+Migration 21 applied twice, exit 0 both times. No Meta call made — as with every
+WhatsApp entry here, the Graph interactions are verified against the API
+contract and unit tests, not a live WABA. **The first `push-templates` after
+this needs `META_RECEIPT_SAMPLE_URL` set, and Meta's edit allowance (~10/month
+per template) is the real budget on how often copy can change.**
+
 ## 2026-09-02 — Smart Receipt: the receipt is a PDF document, not a text list
 
 **Decision (owner):** the receipt goes out as Meta's pre-built `purchase_receipt_1`
