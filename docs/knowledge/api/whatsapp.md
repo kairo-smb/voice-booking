@@ -149,6 +149,8 @@ Pinned by `test_template_names_compose_the_locale_with_the_key`, `test_a_shop_on
 
 > The customer-side `ensure_templates` still skips any key the shop already has and compares no bodies: an edited template reaches Kairo's WABA only. Salons already carrying the old copy keep it — that is what `feedback_v2` exists for.
 
+**The marketing trio was re-voiced on 2026-09-02** (never live, so bodies were rewritten in place with keys kept): `promo_v1`/`winback_v1`/`rebook_v1` are now signed by the stylist of the customer's last visit (`{{2}}`, the shop moving to `{{3}}`) and close with the shared soft CTA «Se ti va, scrivimi pure.» `promo_v1`'s generated slot (now `{{4}}`) is a gentle check-in *observation* about the last visit, not an offer; `rebook_v1` never mentions money (owner rule, pinned by a test). `receipt_v1` (UTILITY, itemised visit + total) joined for a not-yet-built receipt feature — inert until a sender references it, but it enters the push list like any catalogue entry.
+
 **The UTILITY pair was shortened on 2026-09-01** to `feedback_v2` = name + visit date + where to review, `reminder_v6` = name + appointment date and time + salon. The service list is gone from both, and the salon name from the review request — coexistence means that one arrives from the salon's own number under its own display name, so repeating it read like a mailshot. The reminder keeps the salon name: it may reach a number the customer never saved, and without it nothing in the message says who is waiting for them. `reminder_v6` is named for the copy actually approved on Kairo's WABA — **the catalogue key tracks Meta's template name, never the reverse**, because Meta locks an approved body and a key that drifts addresses a template that does not exist. The **date stays** — it is the anchor to the customer's own transaction, and that anchor is what keeps Meta reading these as UTILITY instead of recategorising them as MARKETING at double the price. The review **link is no longer sent**: `render_variables` still accepts `link=` and ignores it, so the `link` field on the automation rule is inert until the webapp drops it. `feedback_v1` was deleted from the catalogue the same day — no sender had ever received it, so there was nothing to retire downstream.
 
 **A `not_ready` key is retried by the hourly tick (2026-08-31).** Approval lands later, on *Kairo's* WABA, with no per-shop event attached — so without that retry a salon that onboarded while a template was pending could never send, permanently and silently. See [The hourly tick](#the-hourly-tick).
@@ -170,13 +172,14 @@ Pinned by `test_template_names_compose_the_locale_with_the_key`, `test_a_shop_on
 
 ```json
 { "shop_id": "…", "campaign_key": "bulk_at_risk_2026-08-24", "template_key": "promo_v1",
-  "recipients": [{"customer_id": "…", "variables": {"1": "Giulia", "2": "Salone X",
-                                                     "3": "taglio e piega a 35€."}}] }
+  "recipients": [{"customer_id": "…", "variables": {"1": "Giulia", "2": "Chiara",
+        "3": "Salone X", "4": "sono passate tre settimane dal tuo colore, com'è la ricrescita?"}}] }
 ```
+`{{2}}` is the stylist of the customer's last visit, `{{3}}` the shop name, and `{{4}}` the observation the LLM generator writes (see below).
 
 Up to **2000** recipients (was 500 — bulk sends to the whole consenting book are the point of the Touchpoint tile).
 
-There is **no `body` field, and there cannot be one.** A business-initiated WhatsApp marketing message is an approved template plus variable values; the caller supplies the values, the template supplies everything else. The webapp's LLM copy generator writes `{{3}}`, not the message.
+There is **no `body` field, and there cannot be one.** A business-initiated WhatsApp marketing message is an approved template plus variable values; the caller supplies the values, the template supplies everything else. The webapp's LLM copy generator writes the template's generated slot, not the message — for `promo_v1` (example above) that is `{{4}}`, the observation.
 
 Returns immediately with the schedule; nothing is sent inline:
 
@@ -343,4 +346,4 @@ New `suppressed_reason` values: `recently_contacted`,
 
 - Inbound replies are **persisted** (migration 17) and read by campaign measurement, but nothing answers them. A reply opens Meta's 24h session window, inside which free-form messages *are* allowed — the obvious next phase, and the only path to genuinely free-form personalised copy.
 - Contact / chat-history sync (`POST /{phone_number_id}/smb_app_data`). One-shot and irreversible per onboarding, and there is nowhere to put the data yet.
-- One template in the catalogue (`promo_v1`). The machinery takes N; the LLM template-picker that would make N worth having isn't built.
+- The LLM template-picker that would *choose* among the marketing templates (`promo_v1`/`winback_v1`/`rebook_v1`/`promo_manual_v1`) per customer isn't built — the webapp names the `template_key` explicitly today.

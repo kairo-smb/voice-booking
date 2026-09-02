@@ -151,9 +151,12 @@ def test_clean_variable_bounds_length():
 
 
 def test_render_produces_what_the_customer_reads():
-    text = wt.render("promo_v1", {"1": "Giulia", "2": "Salone X", "3": "sconto 20%."})
+    text = wt.render("promo_v1", {
+        "1": "Giulia", "2": "Chiara", "3": "Salone X",
+        "4": "Sono passate circa tre settimane dal tuo colore: com'è la ricrescita?",
+    })
     assert "Ciao Giulia," in text
-    assert "Salone X" in text
+    assert "sono Chiara di Salone X" in text
     assert "{{" not in text
 
 
@@ -162,6 +165,27 @@ def test_every_catalogue_template_has_a_sample_for_each_variable():
     for key, tpl in wt.CATALOGUE.items():
         for n in range(1, tpl.variables + 1):
             assert str(n) in tpl.sample, f"{key} is missing a sample for {{{{{n}}}}}"
+
+
+def test_rebook_never_mentions_money():
+    """Owner rule: rebook_v1 is about services, never amounts. Meta approves
+    bodies, so the taboo has to hold in the fixed text AND in the sample (what
+    Meta sees) AND in the guidance (what the LLM reads)."""
+    tpl = wt.CATALOGUE["rebook_v1"]
+    blob = (tpl.body + tpl.guidance + " ".join(tpl.sample.values())).lower()
+    for token in ("€", "eur", "euro", "prezzo", "sconto"):
+        assert token not in blob, f"rebook_v1 must not mention money: {token!r}"
+
+
+def test_marketing_templates_carry_the_soft_cta_tail():
+    """The shared low-pressure close is part of the approved body, not left to
+    the LLM — a hard-sell imperative reads worse and is harder to get Meta to
+    approve. promo_manual_v1 is owner copy with its own approved frame, so it
+    is deliberately excluded."""
+    for key in ("promo_v1", "winback_v1", "rebook_v1"):
+        assert "Se ti va, scrivimi pure." in wt.CATALOGUE[key].body, key
+    for key in ("promo_manual_v1", "feedback_v2", "reminder_v6", "receipt_v1"):
+        assert "Se ti va, scrivimi pure." not in wt.CATALOGUE[key].body, key
 
 
 # --------------------------------------------------------------------- gating
@@ -1462,8 +1486,8 @@ def test_template_descriptor_carries_what_the_generator_needs():
     d = _template_descriptor("winback_v1")
     assert d["template_key"] == "winback_v1"
     assert d["category"] == "MARKETING"
-    assert d["generated_slot"] == 4
-    assert "{{4}}" in d["body"]
+    assert d["generated_slot"] == 5
+    assert "{{5}}" in d["body"]
     assert d["max_chars"] == 90
     assert d["intent"] == "winback"
     assert d["guidance"]
