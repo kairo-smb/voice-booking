@@ -6,6 +6,36 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-02 — Smart Receipt: the receipt is a PDF document, not a text list
+
+**Decision (owner):** the receipt goes out as Meta's pre-built `purchase_receipt_1`
+template (Utility › Payments › receipt attachment) — a **DOCUMENT header**, not a
+body-with-variables. The webapp renders the PDF (it owns the data, pdf-lib);
+this repo uploads it and sends it as the document header. The `receipt_v1`
+(itemised *text* body, added earlier today) is removed from the catalogue — the
+owner explicitly wanted the professional PDF, not a list joined by hand.
+
+**New send path, deliberately not the campaign queue.** `POST /whatsapp/receipts`
+is synchronous and immediate — the webapp calls it right after a paid ticket
+closes — where the campaign path is queue + drip. It records into
+`whatsapp.outbound_messages` with `campaign_key = NULL`, so the campaign
+idempotency index does not apply and a receipt can legally be re-sent.
+
+**The template is NOT in `CATALOGUE`.** It is a document header, referenced
+verbatim as `purchase_receipt_1` (not language-prefixed like `it_<key>`), with its
+own `ensure_receipt_template` gate — same "approved on Kairo's WABA first" rule
+as the catalogue, plus a `META_RECEIPT_SAMPLE_URL` (the sample PDF Meta reviews
+against a document header). Fails closed when the gate or the sample URL is
+unconfigured, so an unvetted template never reaches a customer WABA.
+
+**Operator step:** create `purchase_receipt_1` on Kairo's WABA (WhatsApp Manager,
+receipt-attachment preset) and set `META_RECEIPT_SAMPLE_URL` before the template
+propagates to any customer WABA.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **517 passed, 25 skipped, 0 failed** (up from
+513/25/0: four new `test_whatsapp_receipt.py` tests). No Meta call made.
+
 ## 2026-09-02 — WhatsApp marketing templates re-voiced (stylist-signed, observation-led), and a UTILITY receipt template
 
 **Decision (owner, copy-driven):** the three LLM marketing templates read "asettici"

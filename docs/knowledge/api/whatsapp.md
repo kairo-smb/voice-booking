@@ -10,7 +10,7 @@
 
 | Routes | Scheme |
 |---|---|
-| `/whatsapp/onboarding/*`, `/whatsapp/status/*`, `/whatsapp/templates/*`, `/whatsapp/campaigns*`, `/whatsapp/messages/*` | Control-plane bearer (`CONTROL_PLANE_SECRET`) — the webapp is the only caller |
+| `/whatsapp/onboarding/*`, `/whatsapp/status/*`, `/whatsapp/templates/*`, `/whatsapp/campaigns*`, `/whatsapp/receipts`, `/whatsapp/messages/*` | Control-plane bearer (`CONTROL_PLANE_SECRET`) — the webapp is the only caller |
 | `GET /whatsapp/webhook` | Meta's handshake: `hub.verify_token` must equal `META_VERIFY_TOKEN` |
 | `POST /whatsapp/webhook` | `X-Hub-Signature-256`, HMAC-SHA256 of the **raw body** with `META_APP_SECRET` |
 
@@ -225,6 +225,48 @@ enqueued with a hand-made key (the older Touchpoint tile's `bulk_...`) have no
 Each row: `message_id` (null for holdout), `campaign_key`, `goal`,
 `personalization`, `preview` (the rendered message), `delivery_status`,
 `sent_at`, `suppressed_reason`, `arm` (`send`/`holdout`), `created_at`.
+
+---
+
+## Receipts (Smart Receipt)
+
+### `POST /whatsapp/receipts`
+
+Send one receipt PDF as a WhatsApp document, right after a paid ticket closes.
+Synchronous and immediate — **not** the queue+drip of `campaigns`. The webapp
+renders the PDF (it owns the receipt data); this endpoint uploads it to Meta and
+sends it as the `DOCUMENT` header of `purchase_receipt_1` (Meta's pre-built
+utility receipt template).
+
+```json
+{
+  "shop_id": "…",
+  "customer_id": "…",
+  "phone": "+393331112222",
+  "payment_id": "…",
+  "reference": "A1B2C3D4",
+  "filename": "ricevuta.pdf",
+  "pdf_base64": "…",
+  "requested_by": "staff-uuid",
+  "source": "receipt"
+}
+```
+
+Flow: sender must be `online` → template `purchase_receipt_1` must be `approved`
+on the shop's WABA (created lazily via `ensure_receipt_template` if missing) →
+`POST /{phone_number_id}/media` (upload) → `POST /{phone_number_id}/messages`
+with a `header` document parameter → record into `outbound_messages` with
+`campaign_key = NULL` (so the campaign idempotency index does not apply and a
+receipt can be re-sent).
+
+Refusals surface as a `409` whose `detail` is a bare enum (`sender_not_online`,
+`template_pending`, …), the same shape the webapp's `mapWaError` already reads.
+
+**Template is not in `CATALOGUE`.** It is referenced verbatim as
+`purchase_receipt_1` and propagated by its own `ensure_receipt_template`, gated on
+Meta having approved the same-named template on Kairo's WABA first, and requiring
+`META_RECEIPT_SAMPLE_URL` (a publicly-hosted sample PDF Meta reviews against a
+document header). Fails closed when either is unconfigured.
 
 ---
 
