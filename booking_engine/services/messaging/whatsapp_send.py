@@ -119,6 +119,7 @@ async def enqueue_campaign(
     recipients: list[dict],
     now: datetime | None = None,
     settings,
+    initiated_by: UUID | None = None,
 ) -> dict:
     """Queue one personalised message per recipient. Refusals are rows, not silence.
 
@@ -216,6 +217,7 @@ async def enqueue_campaign(
             variables=variables,
             preview=render(template_key, variables), scheduled_at=scheduled_at,
             status="suppressed" if reason else "queued", suppressed_reason=reason,
+            initiated_by=initiated_by,
         )
         if message_id is None:
             skipped += 1        # this campaign already reached them

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token, _get_settings
 from booking_engine.config import Settings
+from booking_engine.db import whatsapp_audit_queries as waq
 from booking_engine.db import whatsapp_automation_queries as aq
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.services.messaging import meta_limits
@@ -84,6 +85,9 @@ def _template_descriptor(key: str, language: str = DEFAULT_LANGUAGE) -> dict:
 
 class StartRequest(BaseModel):
     shop_id: UUID
+    # Acting staff id, propagated by the webapp (its JWT sub) so the audit
+    # records who did this. Sent only by the webapp; absent = system.
+    requested_by: UUID | None = None
     display_name: str = Field(min_length=1, max_length=120)
 
 
@@ -91,6 +95,7 @@ class CompleteRequest(BaseModel):
     """Everything Meta's Embedded Signup popup hands back to the browser."""
 
     shop_id: UUID
+    requested_by: UUID | None = None
     code: str = Field(min_length=1, max_length=512)
     waba_id: str = Field(min_length=1, max_length=64)
     phone_number_id: str = Field(min_length=1, max_length=64)
@@ -103,6 +108,7 @@ class Recipient(BaseModel):
 
 class AutomationRuleRequest(BaseModel):
     shop_id: UUID
+    requested_by: UUID | None = None
     rule_key: str
     enabled: bool
     params: dict[str, str | int] = Field(default_factory=dict)
@@ -110,6 +116,10 @@ class AutomationRuleRequest(BaseModel):
 
 class CampaignRequest(BaseModel):
     shop_id: UUID
+    requested_by: UUID | None = None
+    # Which webapp surface enqueued this: composer (AI) | touchpoint (bulk) |
+    # offer (single win-back). NULL if an operator ever calls the API directly.
+    source: str | None = None
     campaign_key: str = Field(min_length=1, max_length=80)
     template_key: str = "promo_v1"
     # 2000 rather than the old 500: a bulk send to the whole consenting book is
@@ -136,6 +146,14 @@ async def start(
         shop_id=payload.shop_id, display_name=payload.display_name,
         settings=settings,
     )
+    await waq.record_audit_event(
+        shop_id=payload.shop_id, event="onboarding.start",
+        actor_id=payload.requested_by,
+        response=result if result.get("ok") else None,
+        status="success" if result.get("ok") else "error",
+        http_status=None if result.get("ok") else 409,
+        error_message=result.get("error") if not result.get("ok") else None,
+    )
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
     return {"data": result}
@@ -156,6 +174,17 @@ async def complete(
         shop_id=payload.shop_id, code=payload.code, waba_id=payload.waba_id,
         phone_number_id=payload.phone_number_id, settings=settings,
     )
+    # The single-use `code` never reaches the audit — only the identity-bearing
+    # ids that say which WABA the salon connected.
+    await waq.record_audit_event(
+        shop_id=payload.shop_id, event="onboarding.complete",
+        actor_id=payload.requested_by,
+        request={"waba_id": payload.waba_id, "phone_number_id": payload.phone_number_id},
+        response=result if result.get("ok") else None,
+        status="success" if result.get("ok") else "error",
+        http_status=None if result.get("ok") else 409,
+        error_message=result.get("error") if not result.get("ok") else None,
+    )
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
     return {"data": result}
@@ -165,9 +194,15 @@ async def complete(
 async def abort_onboarding(
     shop_id: UUID,
     _auth: Annotated[bool, Depends(require_control_plane_token)],
+    requested_by: UUID | None = Query(default=None),
 ) -> dict:
     """Owner closed Meta's popup without finishing — reset so they can retry."""
-    return {"data": await onboarding.abort(shop_id=shop_id)}
+    result = await onboarding.abort(shop_id=shop_id)
+    await waq.record_audit_event(
+        shop_id=shop_id, event="onboarding.abort", actor_id=requested_by,
+        status="success",
+    )
+    return {"data": result}
 
 
 @router.get("/status/{shop_id}")
@@ -239,9 +274,16 @@ async def ensure_templates(
     shop_id: UUID,
     settings: Annotated[Settings, Depends(_get_settings)],
     _auth: Annotated[bool, Depends(require_control_plane_token)],
+    requested_by: UUID | None = Query(default=None),
 ) -> dict:
     """Re-run template injection — after a rejection, or a catalogue addition."""
     result = await onboarding.ensure_templates(shop_id=shop_id, settings=settings)
+    await waq.record_audit_event(
+        shop_id=shop_id, event="templates.ensure", actor_id=requested_by,
+        status="success" if result.get("ok") else "error",
+        http_status=None if result.get("ok") else 409,
+        error_message=result.get("error") if not result.get("ok") else None,
+    )
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
     return {"data": result}
@@ -267,6 +309,20 @@ async def campaign(
         template_key=payload.template_key,
         recipients=[r.model_dump() for r in payload.recipients],
         settings=settings,
+        initiated_by=payload.requested_by,
+    )
+    # Recipients never go into the audit — count only; the rows belong to
+    # outbound_messages.
+    await waq.record_audit_event(
+        shop_id=payload.shop_id, event="campaign.enqueue",
+        actor_id=payload.requested_by, source=payload.source,
+        campaign_key=payload.campaign_key, template_name=payload.template_key,
+        is_template=True, recipient_count=len(payload.recipients),
+        request={"campaign_key": payload.campaign_key, "template_key": payload.template_key},
+        response=result if result.get("ok") else None,
+        status="success" if result.get("ok") else "error",
+        http_status=None if result.get("ok") else 409,
+        error_message=result.get("error") if not result.get("ok") else None,
     )
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
@@ -328,6 +384,12 @@ async def put_automation(
         shop_id=shop_id, rule_key=payload.rule_key, enabled=payload.enabled,
         params=payload.params,
     )
+    await waq.record_audit_event(
+        shop_id=shop_id, event="automation.config", actor_id=payload.requested_by,
+        request={"rule_key": payload.rule_key, "enabled": payload.enabled,
+                 "params": payload.params},
+        status="success",
+    )
     return {"data": {
         "rule_key": row["rule_key"],
         "enabled": row["enabled"],
@@ -340,9 +402,16 @@ async def cancel_campaign(
     shop_id: UUID,
     campaign_key: str,
     _auth: Annotated[bool, Depends(require_control_plane_token)],
+    requested_by: UUID | None = Query(default=None),
+    source: str | None = Query(default=None),
 ) -> dict:
     """Cancel whatever hasn't gone out yet. Sent rows are untouched history."""
     cancelled = await wq.cancel_queued(shop_id=shop_id, campaign_key=campaign_key)
+    await waq.record_audit_event(
+        shop_id=shop_id, event="campaign.cancel", actor_id=requested_by,
+        source=source, campaign_key=campaign_key,
+        response={"cancelled": cancelled}, status="success",
+    )
     return {"data": {"cancelled": cancelled}}
 
 

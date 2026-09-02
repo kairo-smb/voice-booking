@@ -252,6 +252,7 @@ async def enqueue(
     to_phone: str, from_number: str, template_name: str, template_language: str,
     variables: dict, preview: str, scheduled_at, status: str = "queued",
     suppressed_reason: str | None = None,
+    initiated_by: UUID | None = None,
 ) -> UUID | None:
     """Queue one message. Returns None if this campaign already reached them.
 
@@ -259,14 +260,17 @@ async def enqueue(
     double-clicked enqueue is a no-op, not a second message. That guard earns
     its keep on the bulk path, where "invia a 400 clienti" is exactly the
     button someone double-clicks.
+
+    `initiated_by` is the staff id who queued it (NULL for the tick's
+    automation sends, which have no human in the path).
     """
     row = await execute_one(
         """
         INSERT INTO whatsapp.outbound_messages
             (shop_id, customer_id, campaign_key, to_phone, from_number,
              template_name, template_language, variables, preview,
-             scheduled_at, status, suppressed_reason)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12)
+             scheduled_at, status, suppressed_reason, initiated_by)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13)
         ON CONFLICT (shop_id, campaign_key, customer_id)
             WHERE campaign_key IS NOT NULL AND customer_id IS NOT NULL
         DO NOTHING
@@ -274,7 +278,7 @@ async def enqueue(
         """,
         shop_id, customer_id, campaign_key, to_phone, from_number,
         template_name, template_language, json.dumps(variables), preview,
-        scheduled_at, status, suppressed_reason,
+        scheduled_at, status, suppressed_reason, initiated_by,
     )
     return row["id"] if row else None
 
