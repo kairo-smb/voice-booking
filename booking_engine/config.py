@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     control_plane_secret: str = ""
     # Public base URL used for constructing Twilio webhook URLs
     public_base_url: str = ""
+    # Webapp — this repo charges the shop's AI basket over HTTP (the webapp
+    # owns ai_token_basket / ai_run_ledger). Both must be set or the charge is
+    # refused and logged loudly, never silently dropped.
+    webapp_base_url: str = ""
+    market_intel_secret: str = ""
     # Twilio
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""

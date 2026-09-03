@@ -1,20 +1,21 @@
-"""DB access for the webapp's real ai_token_basket / ai_token_log tables.
+"""Token-basket access for the voice/SMS spend path.
 
-Schema (production, owned by webapp):
-  business_app_core.ai_token_basket(shop_id PK, granted_credits, purchased_credits,
-                                     granted_expires_at, updated_at)
-  business_app_core.ai_token_log(id, shop_id, payment_id, credits_used,
-                                  source ai_credit_source, created_at,
-                                  voice_call_id)   -- voice_call_id added by Plan A
-
-`balance` here = effective granted (zero if expired) + purchased. Debits use
-granted-first, falling back to purchased — mirrors the webapp's deductCredits().
+The basket (`business_app_core.ai_token_basket`) and its ledger
+(`ai_run_ledger`) are owned by the webapp. This repo only READS the balance
+here and charges over HTTP (`booking_engine/clients/webapp_credits.py`).
+There is no local deduction arithmetic any more — the old `insert_debit_event`
+(a second, independent granted-first deduction whose only record was the
+webapp's legacy spend-log table, now being dropped) is gone. A charge POSTs a
+pre-converted credits amount to the webapp's charge-actual endpoint, which
+performs the single locked deduction and writes the ledger row.
 """
 from __future__ import annotations
 
 from uuid import UUID
 
-from booking_engine.db.connection import execute_one, execute_void
+from booking_engine.clients import webapp_credits
+from booking_engine.config import Settings
+from booking_engine.db.connection import execute_one
 
 
 async def get_balance(shop_id: UUID) -> int:
@@ -55,116 +56,26 @@ async def get_last_refill_amount(shop_id: UUID) -> int:
     return await get_balance(shop_id)
 
 
-async def insert_debit_event(
-    *,
-    shop_id: UUID,
-    tokens: int,
-    source: str,  # kept for signature compatibility; we map to 'granted'/'purchased'
-    voice_call_id: UUID | None,
-    sms_message_id: UUID | None = None,
-    whatsapp_message_id: UUID | None = None,
-) -> None:
-    """Deduct `tokens` from the basket using granted-first ordering, log to ai_token_log."""
-    amount = abs(tokens)
-    row = await execute_one(
-        """
-        SELECT granted_credits, purchased_credits, granted_expires_at
-        FROM business_app_core.ai_token_basket
-        WHERE shop_id = $1
-        FOR UPDATE
-        """,
-        shop_id,
-    )
-    if not row:
-        return
-
-    from datetime import datetime, timezone
-    expired = (
-        row["granted_expires_at"] is not None
-        and row["granted_expires_at"] < datetime.now(timezone.utc)
-    )
-    effective_granted = 0 if expired else int(row["granted_credits"])
-    purchased = int(row["purchased_credits"])
-
-    debit_source: str
-    if effective_granted >= amount:
-        debit_source = "granted"
-        await execute_void(
-            """
-            UPDATE business_app_core.ai_token_basket
-            SET granted_credits = granted_credits - $2, updated_at = now()
-            WHERE shop_id = $1
-            """,
-            shop_id, amount,
-        )
-    elif purchased >= amount:
-        debit_source = "purchased"
-        await execute_void(
-            """
-            UPDATE business_app_core.ai_token_basket
-            SET purchased_credits = purchased_credits - $2, updated_at = now()
-            WHERE shop_id = $1
-            """,
-            shop_id, amount,
-        )
-    else:
-        # Insufficient credits: drain whichever bucket has the most. The TwiML
-        # detach matrix has already gated on min_reserve, so this path is only
-        # reached for in-call overages.
-        if effective_granted >= purchased:
-            debit_source = "granted"
-            await execute_void(
-                "UPDATE business_app_core.ai_token_basket "
-                "SET granted_credits = 0, updated_at = now() WHERE shop_id = $1",
-                shop_id,
-            )
-        else:
-            debit_source = "purchased"
-            await execute_void(
-                "UPDATE business_app_core.ai_token_basket "
-                "SET purchased_credits = 0, updated_at = now() WHERE shop_id = $1",
-                shop_id,
-            )
-
-    await execute_void(
-        """
-        INSERT INTO business_app_core.ai_token_log
-            (shop_id, credits_used, source, voice_call_id,
-             sms_message_id, whatsapp_message_id, created_at)
-        VALUES ($1, $2, $3::ai_credit_source, $4, $5, $6, now())
-        """,
-        shop_id, amount, debit_source, voice_call_id,
-        sms_message_id, whatsapp_message_id,
-    )
-
-
 async def try_debit_for_message(
     *,
     shop_id: UUID,
     credits: int,
     sms_message_id: UUID | None = None,
-    whatsapp_message_id: UUID | None = None,
+    settings: Settings,
 ) -> bool:
-    """Debit for an outbound message, or refuse. Returns False without debiting.
+    """Charge for an outbound SMS, or refuse. Returns False without charging.
 
-    Unlike insert_debit_event (the voice path) this never overdraws: a live call
-    can't be un-answered, but a message can simply not be sent. See
-    docs/messaging-design.md §5.2.
+    Unlike the voice path this never bills a message the webapp refused (an
+    empty basket): the charge runs as a single locked transaction on the
+    webapp side (`deductCredits`), so two concurrent sends cannot overdraw by
+    one message — a message that can't be billed is simply not sent.
     """
     if credits <= 0:
         return True   # a free message writes no ledger row
-    # ponytail: check-then-debit, not one locked transaction. Two concurrent
-    # sends could overdraw by one message; sends are owner-triggered and
-    # effectively serial today. Wrap both in a single FOR UPDATE tx if bulk
-    # campaigns ever run concurrently.
-    if await get_balance(shop_id) < credits:
-        return False
-    await insert_debit_event(
+    return await webapp_credits.charge_actual(
         shop_id=shop_id,
-        tokens=credits,
-        source="granted",
-        voice_call_id=None,
-        sms_message_id=sms_message_id,
-        whatsapp_message_id=whatsapp_message_id,
+        run_type=webapp_credits.SMS_SEND,
+        run_ref=str(sms_message_id) if sms_message_id is not None else None,
+        credits=credits,
+        settings=settings,
     )
-    return True

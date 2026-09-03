@@ -98,14 +98,19 @@ the webapp's own migration chain, not this repo's. Grepping only this repo
 for those columns will come up empty; they're real, just owned elsewhere —
 same ownership-boundary caution as the rest of `business_app_core` above.
 
-`business_app_core.ai_token_log` gained two nullable, FK-less columns in
-the same change — `sms_message_id`, `whatsapp_message_id` — via the
-**webapp's** own migration (`46_ai_token_log_message_fk.sql`), not this
-repo's chain, since `ai_token_log` lives in `business_app_core`. They
-mirror the existing `voice_call_id` column so a credit debit for a message
-send is traceable back to the row that caused it; no FK, since
-`sms.outbound_messages`/future `whatsapp.messages` are owned by this repo
-and `ai_token_log` must not depend on a schema it doesn't own.
+**SMS sends charge the basket over HTTP — this repo no longer writes
+`ai_token_log` (or any spend table).** A send's credit cost (`2×` the
+Twilio price, `send_credits`) is recorded locally on
+`sms.outbound_messages.credits_charged`, but the actual basket deduction is a
+POST to the webapp's charge-actual endpoint
+(`booking_engine/clients/webapp_credits.py`, `run_type='sms_send'` +
+`run_ref=<message_id>`, pre-converted `credits`). The webapp performs the
+single locked deduction and writes the ledger row (`ai_run_ledger`); the old
+`ai_token_log` rows this repo used to write (`voice_call_id`,
+`sms_message_id`, `whatsapp_message_id`) are superseded — the webapp is
+backfilling the ledger from `ai_token_log` and dropping the table (see the
+webapp's `docs/knowledge/database.md`). The columns exist only so the
+backfill can attribute history; nothing in this repo writes them any more.
 
 ## `whatsapp` schema — authoritative here
 
@@ -142,9 +147,13 @@ Added 2026-08-21 (`14_whatsapp_schema.sql`), reshaped for Meta Cloud API on
   customer_id`, partial) is the idempotency: a retried or double-clicked
   campaign enqueue is a no-op, not a second message to the same person.
 
-`business_app_core.ai_token_log.whatsapp_message_id` — the column the SMS
-work added and left unused — is now written, by
-`token_basket_queries.try_debit_for_message`.
+**No Kairo-side debit happens for a WhatsApp send** (the salon pays Meta
+directly), so nothing here ever writes `ai_token_log` or charges the basket on
+this path. The SMS-only charge path is `token_basket_queries.try_debit_for_message`
+→ `booking_engine/clients/webapp_credits.py`, an HTTP POST to the webapp (see
+the [`sms` schema](#sms-schema--authoritative-here) section above); the
+`whatsapp_message_id` column on `ai_token_log` was only ever written by the
+old local debit implementation, which is gone.
 
 **No read reaches out of this schema for a limit any more (2026-08-24).**
 `whatsapp_queries.monthly_quota` used to join

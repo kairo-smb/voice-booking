@@ -1,16 +1,20 @@
-"""Token meter — warning tiers, detach decision, voice call debit."""
+"""Token meter — warning tiers, detach decision, voice call charge."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 from uuid import UUID
 
+from booking_engine.clients import webapp_credits
+from booking_engine.config import Settings
 from booking_engine.db.token_basket_queries import (
     get_balance,
     get_last_refill_amount,
-    insert_debit_event,
 )
+
+logger = logging.getLogger(__name__)
 
 
 WarningTier = Literal["low_30pct", "critical_10pct", "below_reserve"]
@@ -65,17 +69,33 @@ async def record_voice_debit(
     duration_seconds: int,
     tool_token_cost: int,
     tokens_per_second: int,
+    settings: Settings,
     previous_tier: WarningTier | None = None,
 ) -> None:
-    """Debit a completed call's tokens from the shop basket."""
+    """Bill a completed call. The basket deduction is the webapp's, over HTTP.
+
+    `tokens` (seconds × rate + tool cost) is the credit amount this call
+    costs — the meter's own number, so it is POSTed as pre-converted credits,
+    never USD. If the webapp refuses the charge (402, basket emptied) the call
+    has already happened and can't be un-answered: the client logs it loudly
+    and the basket is left exactly as the webapp's locked transaction left it.
+    We no longer drain the bucket to an arbitrary value on overage.
+    """
     tokens = duration_seconds * tokens_per_second + tool_token_cost
-    await insert_debit_event(
-        shop_id=shop_id,
-        tokens=tokens,
-        source="voice_call",
-        voice_call_id=call_id,
-    )
-    # After debit, check whether we crossed a warning threshold
+    if tokens > 0:
+        charged = await webapp_credits.charge_actual(
+            shop_id=shop_id,
+            run_type=webapp_credits.VOICE_CALL,
+            run_ref=str(call_id),
+            credits=tokens,
+            settings=settings,
+        )
+        if not charged:
+            logger.warning(
+                "voice_call.unbilled shop=%s call=%s credits=%s — charge refused",
+                shop_id, call_id, tokens,
+            )
+    # After the charge, check whether we crossed a warning threshold
     from booking_engine.services.balance_alerts import maybe_emit_balance_alert
 
     balance = await get_balance(shop_id)

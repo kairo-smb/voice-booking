@@ -45,6 +45,7 @@ async def send(
         shop_id=payload.shop_id,
         customer_id=payload.customer_id,
         body=payload.body,
+        settings=settings,
         account_sid=settings.twilio_account_sid,
         auth_token=settings.twilio_auth_token,
         public_base_url=settings.public_base_url,

@@ -109,5 +109,6 @@ async def session_ended(
         duration_seconds=body.duration_seconds,
         tool_token_cost=body.tool_token_cost,
         tokens_per_second=settings.voice_kairo_tokens_per_second,
+        settings=settings,
     )
     return Envelope[dict](ok=True, data={"finalized": True})
