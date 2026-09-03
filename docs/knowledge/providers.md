@@ -35,7 +35,7 @@ shared Kairo sender.
 
 **Key files:** `booking_engine/services/messaging/{sms_send,gsm7,send_credits}.py`, `booking_engine/db/sms_queries.py`, `booking_engine/api/routes/sms.py`, `booking_engine/services/twilio_signature.py`.
 
-**Env vars:** none new — reuses `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`. `sms_send.py` calls `twilio.rest.Client.messages.create()` directly; it does not go through `clients/twilio_numbers.py`, which is provisioning-only (search/purchase numbers).
+**Env vars:** `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` (the Twilio send) plus `WEBAPP_BASE_URL`/`MARKET_INTEL_SECRET` (the post-send charge — `sms_send.py` bills the shop by POSTing to the webapp's charge-actual endpoint via `booking_engine/clients/webapp_credits.py`; the webapp owns the basket deduction). `sms_send.py` calls `twilio.rest.Client.messages.create()` directly; it does not go through `clients/twilio_numbers.py`, which is provisioning-only (search/purchase numbers).
 
 **No in-message opt-out (STOP handling removed).** There is no inbound SMS
 webhook, no STOP-keyword parsing, and no opt-out footer — see `CLAUDE.md`'s
@@ -102,7 +102,9 @@ card to its own WABA. `try_debit_for_message` is gone from this path;
 `price_usd` is a send-time estimate that is never corrected, because Meta
 reports no amount on send or on the webhook. The plan allowance
 (`subscription_plans.whatsapp_monthly_messages`) still applies — it is a
-product limit, not cost recovery. **SMS is unchanged and still debits 2×.**
+product limit, not cost recovery. **SMS is unchanged in amount and still
+charges 2×** — the deduction now happens via an HTTP charge to the webapp's
+basket (`webapp_credits.py`), not a local write.
 
 **Env vars:** `META_APP_ID`, `META_CONFIG_ID`, `META_SOLUTION_ID` (public,
 served to the webapp so Embedded Signup has one source of truth),

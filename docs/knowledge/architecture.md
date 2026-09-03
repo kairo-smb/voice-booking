@@ -59,7 +59,8 @@ webapp (owner clicks "Invia SMS" in a modal)
     → POST /api/v1/sms/send                            (this repo, CONTROL_PLANE_SECRET)
         services/messaging/sms_send.py::send_marketing_sms
           consent gate (marketing_consent alone — no in-message opt-out) → sanitize (gsm7.py)
-          → balance check → Twilio send (with status_callback) → debit credits (token_basket_queries)
+          → balance check → Twilio send (with status_callback)
+          → charge credits via HTTP (token_basket_queries → webapp_credits → webapp charge-actual)
           → persist to sms.outbound_messages
 ```
 
@@ -70,10 +71,14 @@ staff. Twilio still POSTs delivery/price callbacks to
 `POST /api/v1/sms/webhook/status`, `X-Twilio-Signature`-verified with the
 same helper the TwiML webhook uses.
 
-**Single debit path, by design.** Only `sms_send.py` ever calls
-`try_debit_for_message` — the webapp's `send-sms` route forwards the
-request and re-checks consent but never touches credits itself, so there
-is exactly one place a send can be billed.
+**Single charge path, by design — and it is the webapp's.** Only
+`sms_send.py` ever calls `try_debit_for_message`, which POSTs a
+pre-converted credits amount to the webapp's charge-actual endpoint
+(`booking_engine/clients/webapp_credits.py`). The webapp's `send-sms` route
+forwards the request and re-checks consent but never touches credits itself,
+and the basket deduction/ledger row happen webapp-side — so there is exactly
+one place a send can be billed and exactly one implementation of the
+deduction (the webapp's).
 
 **Synchronous, not queued.** `/sms/send` blocks until Twilio accepts the
 message or the send is refused, because the caller is a salon owner

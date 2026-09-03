@@ -16,6 +16,7 @@ from uuid import UUID
 
 from twilio.rest import Client
 
+from booking_engine.config import Settings
 from booking_engine.db import sms_queries
 from booking_engine.db import token_basket_queries as tbq
 from booking_engine.services.messaging.gsm7 import encode_info, sanitize
@@ -77,11 +78,17 @@ async def send_marketing_sms(
     shop_id: UUID,
     customer_id: UUID,
     body: str,
+    settings: Settings,
     account_sid: str = "",
     auth_token: str = "",
     public_base_url: str = "",
 ) -> SendResult:
-    """Gate, build, bill, send. Every refusal is persisted, never silent."""
+    """Gate, build, bill, send. Every refusal is persisted, never silent.
+
+    `settings` carries the webapp charge-actual config (WEBAPP_BASE_URL +
+    MARKET_INTEL_SECRET) used to bill the send after Twilio accepts it — the
+    basket deduction itself lives on the webapp side, never here.
+    """
     sender = await sms_queries.get_shop_sender_number(shop_id)
     if not sender:
         return SendResult(ok=False, reason="no_sender_number")
@@ -147,11 +154,13 @@ async def send_marketing_sms(
         await sms_queries.mark_failed(message_id=message_id, error_code=str(exc)[:200])
         return SendResult(ok=False, reason="provider_error", message_id=message_id)
 
-    # ponytail: the message is already gone, so a refused debit here can only be
+    # ponytail: the message is already gone, so a refused charge here can only be
     # logged, not undone. Only reachable if the basket drained between the check
-    # above and now — owner-triggered sends are effectively serial.
+    # above and now — owner-triggered sends are effectively serial. The webapp's
+    # charge is a single locked transaction, so the refusal is authoritative.
     if not await tbq.try_debit_for_message(
-        shop_id=shop_id, credits=credits, sms_message_id=message_id
+        shop_id=shop_id, credits=credits, sms_message_id=message_id,
+        settings=settings,
     ):
         logger.warning(
             "sms.unbilled_send shop=%s message=%s credits=%s", shop_id, message_id, credits

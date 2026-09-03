@@ -6,6 +6,63 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-03 — This repo is no longer a second AI-basket writer: voice/SMS charge the webapp over HTTP
+
+**Decision:** deleted this repo's own basket-deduction implementation
+(`booking_engine/db/token_basket_queries.py::insert_debit_event` — Python
+`SELECT … FOR UPDATE`, its own granted-first ordering, writing
+`business_app_core.ai_token_log`) and replaced it with an **HTTP charge to the
+webapp's charge-actual endpoint**. The webapp owns `ai_token_basket` and its
+ledger `ai_run_ledger`; there is exactly one implementation of the deduction
+now (the webapp's `deductCredits`), and a voice call or SMS send produces
+exactly one `ai_run_ledger` row written by the webapp — nothing here writes
+`ai_token_log` any more (that table is being backfilled into the ledger and
+dropped by the webapp, plan `webapp/docs/superpowers/plans/2026-09-03-unify-ai-spend-ledger.md`, Task 6 = this change).
+
+**The seam is a new client, `booking_engine/clients/webapp_credits.py`.**
+`record_voice_debit` (voice) and `try_debit_for_message` (SMS) POST a
+**pre-converted credits amount** — `run_type='voice_call'`/`'sms_send'` +
+`run_ref=<call/message id>` + `credits=<the meter's own number>` — and treat a
+`402` (empty basket) as a refusal. Two rules that used to live here moved
+webapp-side, deliberately:
+
+- **Credits, never USD.** The voice/SMS meter already computes credits (voice:
+  seconds × rate + tool cost; SMS: 2× the Twilio price via `send_credits`).
+  The margin rule (`rawToUserCredits`, 10× LLM) lives only in the webapp's
+  `run-credits`; a second conversion on this side is gone.
+- **A refused charge is refused, not force-drained.** `insert_debit_event`
+  used to *drain the bucket to zero* on an in-call overage ("a live call can't
+  be un-answered"). Now the webapp's single locked transaction either collects
+  the real amount or returns `402`, which this side logs loudly and does not
+  invent a number for. This is a behaviour change on the voice overage path,
+  made knowingly — charging an arbitrary amount was more wrong than logging an
+  unbilled call. `try_debit_for_message` never over-drew even before (a
+  message can simply not be sent), and its `ponytail:` check-then-debit race
+  comment is deleted: the webapp's `deductCredits` is one locked transaction,
+  so two concurrent sends can no longer overdraw by one message.
+
+**New env vars** (both must be set or the charge is refused and logged loudly,
+never silently dropped): `WEBAPP_BASE_URL` and `MARKET_INTEL_SECRET` — the
+same shared secret the marketing-engine uses to call this endpoint. Config:
+`booking_engine/config.py`.
+
+**Docs:** `docs/knowledge/database.md` (both `ai_token_log` references repointed
+at the ledger + the HTTP charge), `architecture.md` (SMS flow diagram + the
+"single charge path" paragraph), `providers.md` (SMS env vars + the WhatsApp
+"still debits 2×" sentence).
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **531 passed, 25 skipped, 0 failed**. New
+`tests/booking_engine/test_webapp_credits.py` pins the wire contract (path,
+bearer, `run_type`+`credits` payload, `402`-as-refusal, fails closed when
+unconfigured); `test_token_meter.py` and `test_sms_send.py` updated to mock
+the HTTP client so the suite is hermetic (no QA webapp needed).
+
+**Still open / deploy-order note:** the webapp side of Task 6 (Step 1,
+generalising `charge-actual` to accept any run type + a `credits` bypass) lands
+in the webapp repo in parallel. The webapp must ship before Task 9 drops
+`ai_token_log` — this change is the last thing that ever wrote it.
+
 ## 2026-09-02 — Template copy can now be *changed*: body_hash, in-place edits, and a gate that reads the body
 
 **The problem, stated plainly: editing a template body changed nothing for any
