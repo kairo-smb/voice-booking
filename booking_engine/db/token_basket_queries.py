@@ -4,10 +4,10 @@ The basket (`business_app_core.ai_token_basket`) and its ledger
 (`ai_run_ledger`) are owned by the webapp. This repo only READS the balance
 here and charges over HTTP (`booking_engine/clients/webapp_credits.py`).
 There is no local deduction arithmetic any more — the old `insert_debit_event`
-(a second, independent granted-first deduction that wrote `ai_token_log`) is
-gone. A charge POSTs a pre-converted credits amount to the webapp's
-charge-actual endpoint, which performs the single locked deduction and writes
-the ledger row.
+(a second, independent granted-first deduction whose only record was the
+webapp's legacy spend-log table, now being dropped) is gone. A charge POSTs a
+pre-converted credits amount to the webapp's charge-actual endpoint, which
+performs the single locked deduction and writes the ledger row.
 """
 from __future__ import annotations
 

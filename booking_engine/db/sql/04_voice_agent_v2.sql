@@ -145,11 +145,24 @@ ADD COLUMN IF NOT EXISTS created_booking_id uuid REFERENCES business_app_core.ap
 -- The webapp's real schema stores debit events in `ai_token_log` (cols: shop_id,
 -- payment_id, credits_used, source ENUM ai_credit_source, created_at). We add a
 -- nullable voice_call_id to associate debits with the call that produced them.
-ALTER TABLE business_app_core.ai_token_log
-ADD COLUMN IF NOT EXISTS voice_call_id uuid REFERENCES voice_agent.calls(id) ON DELETE SET NULL;
+-- The webapp is backfilling `ai_token_log` into `ai_run_ledger` and will drop
+-- the table (plan webapp/docs/superpowers/plans/2026-09-03-unify-ai-spend-ledger.md,
+-- Task 9). Guard, not delete: this file is our own replayed chain, so a fresh
+-- provisioning run against a database that never had the table must still
+-- succeed — and must not recreate it. Both statements are already idempotent
+-- (IF NOT EXISTS); the guard only makes them conditional on the table existing.
+DO $$
+BEGIN
+  IF to_regclass('business_app_core.ai_token_log') IS NOT NULL THEN
+    ALTER TABLE business_app_core.ai_token_log
+    ADD COLUMN IF NOT EXISTS voice_call_id uuid REFERENCES voice_agent.calls(id) ON DELETE SET NULL;
 
-CREATE INDEX IF NOT EXISTS idx_ai_token_log_voice_call
-ON business_app_core.ai_token_log(voice_call_id)
-WHERE voice_call_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_ai_token_log_voice_call
+    ON business_app_core.ai_token_log(voice_call_id)
+    WHERE voice_call_id IS NOT NULL;
+  ELSE
+    RAISE NOTICE 'ai_token_log absent — skipping voice_call_id link (table is being dropped by the webapp).';
+  END IF;
+END $$;
 
 COMMIT;
