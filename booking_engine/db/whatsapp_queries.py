@@ -58,8 +58,8 @@ async def set_sender_fields(shop_id: UUID, **fields) -> None:
     """
     allowed = {
         "status", "waba_id", "phone_number_id", "access_token", "platform_type",
-        "phone_number", "display_name", "quality_rating", "messaging_limit",
-        "throughput_level", "offline_reason", "daily_cap",
+        "token_expires_at", "phone_number", "display_name", "quality_rating",
+        "messaging_limit", "throughput_level", "offline_reason", "daily_cap",
     }
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:

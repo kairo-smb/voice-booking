@@ -67,11 +67,20 @@ async def _request(
 
 # ------------------------------------------------------------------ onboarding
 
-async def exchange_code(*, code: str, app_id: str, app_secret: str) -> str:
+async def exchange_code(
+    *, code: str, app_id: str, app_secret: str
+) -> tuple[str, int | None]:
     """Turn Embedded Signup's one-time code into the salon's business token.
 
     This is the only call that uses Kairo's own app credentials rather than a
     customer token — it is how a customer token comes into existence.
+
+    Returns the token and its `expires_in` (seconds) when Meta reports one.
+    Whether it does is a property of the *Embedded Signup configuration*, not
+    of this code: a config set to "token expires in 60 days" mints expiring
+    tokens, and a non-expiring one omits the field entirely. Recorded either
+    way rather than assumed, because the failure mode of guessing wrong is
+    every connected salon going silent on the same day with no signal.
     """
     async with AsyncClient(timeout=_TIMEOUT) as client:
         response = await client.get(
@@ -86,7 +95,8 @@ async def exchange_code(*, code: str, app_id: str, app_secret: str) -> str:
         if response.status_code >= 400 or not body.get("access_token"):
             err = (body.get("error") or {})
             raise MetaError(err.get("code"), err.get("message") or "code_exchange_failed")
-        return body["access_token"]
+        expires_in = body.get("expires_in")
+        return body["access_token"], (int(expires_in) if expires_in else None)
 
 
 async def subscribe_app(*, waba_id: str, token: str) -> None:

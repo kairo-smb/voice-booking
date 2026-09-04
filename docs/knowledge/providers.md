@@ -106,8 +106,26 @@ product limit, not cost recovery. **SMS is unchanged in amount and still
 charges 2×** — the deduction now happens via an HTTP charge to the webapp's
 basket (`webapp_credits.py`), not a local write.
 
+**The Login Configuration behind `META_CONFIG_ID` is where two facts live that
+no code in this repo can see.** Its permission list must be exactly
+`whatsapp_business_management` + `whatsapp_business_messaging` (asset: WhatsApp
+accounts) — anything else needs its own App Review or the salon is never
+granted it. And its **token expiry** decides whether every connected sender
+dies on a timer: Kairo's config is the 60-day variant, so
+`senders.token_expires_at` is populated and nothing renews it. The config is
+not readable through Graph (`GET /{config_id}` → code 100, subcode 33) — check
+it by eye in *Accesso con Facebook per le aziende → Configurazioni*.
+
 **Env vars:** `META_APP_ID`, `META_CONFIG_ID`, `META_SOLUTION_ID` (public,
-served to the webapp so Embedded Signup has one source of truth),
+served to the webapp so Embedded Signup has one source of truth. **The
+solution id is normally empty and that is correct** — a *partner solution* is
+a joint arrangement with a Solution Partner/BSP, created against their Partner
+App ID and `Pending` until they accept it, and Kairo onboards
+[independently](https://developers.facebook.com/documentation/business-messaging/whatsapp/solution-providers/get-started-for-tech-providers):
+each salon attaches its own payment method, so there is no solution to name.
+The webapp passes it as `extras.setup.solutionID` when set and omits the field
+when not — a blank string is rejected. Do not paste `META_CONFIG_ID` here;
+they are different objects and nothing validates the difference),
 `META_APP_SECRET` (verifies `X-Hub-Signature-256` *and* signs the code
 exchange), `META_VERIFY_TOKEN` (webhook handshake),
 `META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN` (Kairo's own WABA — the template

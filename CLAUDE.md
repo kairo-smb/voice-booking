@@ -6,6 +6,110 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-04 — The salon's business token expires after 60 days, and migration 15 said it couldn't
+
+**Found by auditing the Meta app's permissions, which turned out to be the one
+thing that was fine.** The owner asked whether the app requested too many
+permissions and whether that would delay App Review. It doesn't: only
+`whatsapp_business_management` and `whatsapp_business_messaging` are submitted;
+everything else on that screen (`business_management`, `public_profile`,
+`whatsapp_business_manage_events`) sits at Standard Access and is never seen by
+a reviewer, and `email`/`manage_app_solution` aren't requested at all. The
+Login Configuration behind `META_CONFIG_ID` (`1082553207684250`) lists exactly
+those two permissions with the WhatsApp Accounts asset. Nothing to remove.
+
+**The configuration's *name* was the finding: "…con token con scadenza a 60
+giorni".** Migration 15's comment on `senders.access_token` asserted "It does
+not expire unless the salon revokes our app" — an assumption, never checked,
+and wrong. Token expiry is a property of the **Embedded Signup Login
+Configuration**, not of any code here, and ours was created from Meta's
+`WhatsApp Embedded Signup Configuration With 60 Expiration Token` template.
+Left alone, every connected salon would have stopped sending 60 days after
+onboarding — all of them, silently, with the failure arriving as generic Graph
+errors long after the cause. That token is the *only* credential for a
+customer's WABA; there is no shared parent to fall back on.
+
+**Nothing renews it, and that is not a gap in this repo.** A business token
+comes into existence by the salon completing the popup, so the renewal *is*
+redoing the popup. Meta publishes no refresh endpoint for it, and the
+"never expires" option that does exist applies to system user tokens you
+generate in your own Business Settings, not to ones minted for onboarded
+customers. So the work split in two: record the fact, then make the salon act
+on it.
+
+**Recording it:** `exchange_code` now returns `(token, expires_in)` instead of
+a bare string, `complete()` writes `token_expires_at` (migration 22) and logs
+a warning, and `GET /whatsapp/status` returns it. NULL means Meta reported no
+expiry — the truth for a config changed to non-expiring, and for any row
+predating this. Deliberately **not backfilled** with `onboarded_at + 60 days`:
+that would assert an expiry nobody read back from Meta, the same reasoning as
+migration 21's NULL `body_hash`.
+
+**Acting on it: `reconnect=true` on both onboarding calls.** Redoing the popup
+for an already-online sender was impossible — `start()` and `complete()` both
+took an "already online, nothing to do" early exit. Three deliberate
+differences under the flag:
+
+- `start` returns the signup config **without touching the row**. The sender
+  stays `online` on its old token and keeps sending for however long the popup
+  is open. Flipping it to `pending_signup` would take a working sender off the
+  air to fix a problem that hasn't happened yet.
+- `complete` skips the online early return — the exit that makes an ordinary
+  double-submit idempotent, and the one that would otherwise report success
+  while leaving the expiring token in place.
+- `complete` skips Meta's **new-customer onboarding cap** (10, or 200 after
+  Access Verification, per rolling 7 days). The cap counts new customers; a
+  salon renewing its own token is not one. Counting it would let a busy
+  onboarding week block an existing salon's renewal — its sender then dies at
+  day 60 because of someone else's signup.
+
+**The nudge is two banners, not a modal, and it is pull-only.** The webapp
+reads `token_expires_at` and asks the owner to reconnect inside the last 7
+days (`RENEW_WINDOW_DAYS`): a cockpit banner (`WhatsAppTokenBanner`, beside
+`CreditReminderBanner`) and a box in the WhatsApp panel. The cockpit one links
+to the panel rather than opening the popup itself — Meta's SDK must be loaded
+before the click or the browser blocks the popup, and a second copy of that is
+the one piece of this flow that fails silently. Closing the popup on a
+reconnect does **not** call `abortOnboarding`: on a first connection that
+cleans up a stuck `pending_signup` row, but here it would delete a working
+sender because the owner changed their mind about renewing early. Copy avoids
+the word "token" — *"il collegamento con WhatsApp scade"* — in it/en/es.
+**The owner has to open the app to see it.** Email alerts are the agreed next
+step and are not built; there is no email template in the webapp yet (Resend is
+installed, `sendEmail()` exists, every current caller sends plain text).
+
+**Two things checked and found not to be problems, recorded so nobody
+re-diagnoses them.** (1) `META_SOLUTION_ID` is unset and should stay unset: a
+*partner solution* is a joint arrangement with a Solution Partner/BSP, created
+against their Partner App ID, and Kairo onboards independently — each salon
+attaches its own payment method. It was briefly set to the config id by mistake
+during this session; a wrong value is worse than none, since the webapp omits
+the field when empty. (2) The Login Configuration is **not readable through
+Graph** (`GET /{config_id}` → code 100 subcode 33; `/{app_id}/business_login_configs`
+doesn't exist), so its permissions and token expiry can only be confirmed by
+eye in the console. Both facts are now in `providers.md`.
+
+**Decision (owner): keep the 60-day template for now** — validate the product
+before spending a new configuration on it. Swapping `META_CONFIG_ID` for a
+non-expiring variant, if one exists, is cheapest *now* while zero salons are
+connected: it does not retroactively fix tokens already issued.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **535 passed, 24 skipped, 0 failed**, against a
+baseline of 531/24 measured on this branch with `git stash` rather than taken
+from the previous entry. Four new tests: expiry recorded, NULL left alone for a
+non-expiring token, reconnect swaps the token without taking the sender
+offline, reconnect not counted against the customer cap. Migration 22 applied
+**twice** against a scratch Postgres, exit 0 both times, column and both
+`COMMENT`s confirmed by `\d`. Webapp `npx tsc --noEmit` exits 0. **No live Meta
+call made** — as with every WhatsApp entry here, verified against the API
+contract and unit tests, not a real WABA. The `expires_in` field on the code
+exchange is therefore unconfirmed against a real response: if Meta omits it
+despite the 60-day config, `token_expires_at` stays NULL and no banner ever
+appears. First real onboarding is the test.
+
+---
+
 ## 2026-09-03 — This repo is no longer a second AI-basket writer: voice/SMS charge the webapp over HTTP
 
 **Decision:** deleted this repo's own basket-deduction implementation

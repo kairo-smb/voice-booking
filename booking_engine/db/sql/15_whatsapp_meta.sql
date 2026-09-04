@@ -24,8 +24,12 @@ ALTER TABLE whatsapp.senders ADD COLUMN IF NOT EXISTS phone_number_id text;
 
 -- The customer-scoped business token from Embedded Signup's code exchange.
 -- Unlike the Twilio model there is no shared parent credential: every call
--- into a salon's WABA is authenticated with this. It does not expire unless
--- the salon revokes our app.
+-- into a salon's WABA is authenticated with this.
+--
+-- This originally claimed the token "does not expire unless the salon revokes
+-- our app". That was wrong — expiry is a property of the Login Configuration,
+-- and ours issues 60-day tokens. See migration 22 for the correction and
+-- `token_expires_at`.
 ALTER TABLE whatsapp.senders ADD COLUMN IF NOT EXISTS access_token text;
 
 -- Meta's own answer to "is this number also live on the Business App?", read

@@ -90,6 +90,9 @@ class StartRequest(BaseModel):
     # records who did this. Sent only by the webapp; absent = system.
     requested_by: UUID | None = None
     display_name: str = Field(min_length=1, max_length=120)
+    # Token refresh, not a first connection: the salon is already online and
+    # is redoing the popup before its 60-day token expires.
+    reconnect: bool = False
 
 
 class CompleteRequest(BaseModel):
@@ -100,6 +103,7 @@ class CompleteRequest(BaseModel):
     code: str = Field(min_length=1, max_length=512)
     waba_id: str = Field(min_length=1, max_length=64)
     phone_number_id: str = Field(min_length=1, max_length=64)
+    reconnect: bool = False
 
 
 class Recipient(BaseModel):
@@ -161,7 +165,7 @@ async def start(
     """
     result = await onboarding.start(
         shop_id=payload.shop_id, display_name=payload.display_name,
-        settings=settings,
+        settings=settings, reconnect=payload.reconnect,
     )
     await waq.record_audit_event(
         shop_id=payload.shop_id, event="onboarding.start",
@@ -190,6 +194,7 @@ async def complete(
     result = await onboarding.complete(
         shop_id=payload.shop_id, code=payload.code, waba_id=payload.waba_id,
         phone_number_id=payload.phone_number_id, settings=settings,
+        reconnect=payload.reconnect,
     )
     # The single-use `code` never reaches the audit — only the identity-bearing
     # ids that say which WABA the salon connected.
@@ -275,6 +280,13 @@ async def status(
         ),
         "recipient_cooldown_hours": settings.whatsapp_recipient_cooldown_hours,
         "offline_reason": sender["offline_reason"],
+        # NULL unless Meta reported an expiry on the code exchange. Nothing
+        # renews it — when it passes, this sender is dead until the salon
+        # redoes Embedded Signup, so the date has to be reachable.
+        "token_expires_at": (
+            sender["token_expires_at"].isoformat()
+            if sender["token_expires_at"] else None
+        ),
         "sent_today": await wq.sent_today(shop_id),
         "sent_last_24h": await wq.sent_last_24h(shop_id),
         # Marketing only, both of them: an appointment reminder is not a

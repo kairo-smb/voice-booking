@@ -129,11 +129,19 @@ Added 2026-08-21 (`14_whatsapp_schema.sql`), reshaped for Meta Cloud API on
 
 **Three things in this schema are load-bearing and easy to undo by accident:**
 
-- **`senders.access_token` is the whole credential.** Unlike the Twilio
-  subaccount model there is no shared parent secret: this per-customer
-  business token is the complete authority over one salon's WhatsApp. Lose it
-  and we hold a WABA we can neither reach nor unsubscribe from, which is why
-  `complete()` persists it *before* making any call that uses it.
+- **`senders.access_token` is the whole credential, and it can expire.**
+  Unlike the Twilio subaccount model there is no shared parent secret: this
+  per-customer business token is the complete authority over one salon's
+  WhatsApp. Lose it and we hold a WABA we can neither reach nor unsubscribe
+  from, which is why `complete()` persists it *before* making any call that
+  uses it. Whether it expires is a property of the **Embedded Signup Login
+  Configuration**, not of this code — Kairo's mints 60-day tokens, so
+  `token_expires_at` (migration `22_whatsapp_token_expiry.sql`) records
+  Meta's `expires_in` from the code exchange and `GET /whatsapp/status`
+  returns it. NULL means Meta reported no expiry, never "unknown": existing
+  rows are not backfilled. **Nothing renews it** — a business token is minted
+  by the salon completing the popup, so recovery is asking them to reconnect,
+  which is why the date has to be visible before the sends start failing.
 - **`senders.waba_id` is the only tenant router.** Meta posts every
   customer's traffic to one app-level webhook and identifies the shop solely
   by `entry[].id`. Hence the unique index on it.

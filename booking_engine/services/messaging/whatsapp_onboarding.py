@@ -101,17 +101,33 @@ def signup_config(settings) -> dict:
     }
 
 
-async def start(*, shop_id: UUID, display_name: str, settings) -> dict:
+async def start(
+    *, shop_id: UUID, display_name: str, settings, reconnect: bool = False,
+) -> dict:
     """Record intent and hand back the Embedded Signup config.
 
     Nothing is created provider-side here — unlike the Twilio version, which
     had to create a subaccount before the salon had done anything, and leaked
     one on every abandoned onboarding.
+
+    `reconnect` is the token-refresh path: our Login Configuration mints
+    60-day tokens and nothing renews them, so the only way to get a fresh one
+    is the salon redoing the popup. It returns the config **without touching
+    the row** — the sender stays `online` on its old token, still sending,
+    right up until `complete(reconnect=True)` swaps in the new one. Marking it
+    `pending_signup` here would take a working sender off the air for however
+    long the owner leaves the popup open, to fix a problem that hasn't
+    happened yet.
     """
     existing = await wq.get_sender(shop_id)
-    if existing and existing.get("status") == "online":
+    if existing and existing.get("status") == "online" and not reconnect:
         return {"ok": True, "status": "online",
                 "phone_number": existing["phone_number"]}
+    if reconnect:
+        if not existing:
+            return {"ok": False, "error": "not_started"}
+        return {"ok": True, "status": existing["status"],
+                "signup": signup_config(settings)}
 
     await wq.upsert_sender(shop_id=shop_id, display_name=display_name, source="coexistence")
     await wq.set_sender_fields(shop_id, status="pending_signup")
@@ -120,6 +136,7 @@ async def start(*, shop_id: UUID, display_name: str, settings) -> dict:
 
 async def complete(
     *, shop_id: UUID, code: str, waba_id: str, phone_number_id: str, settings,
+    reconnect: bool = False,
 ) -> dict:
     """The salon finished Meta's popup. Turn its output into a live sender.
 
@@ -141,23 +158,34 @@ async def complete(
     row = await wq.get_sender(shop_id)
     if not row:
         return {"ok": False, "error": "not_started"}
-    if row.get("status") == "online":
+    # The early return is what makes a double-submit idempotent. A reconnect
+    # is the one case where an online sender legitimately runs this again.
+    if row.get("status") == "online" and not reconnect:
         return {"ok": True, "status": "online"}
 
     # Meta's Tech Provider onboarding cap, checked before we spend the popup's
     # single-use code. Exceeding it fails at Meta with an opaque error and
     # leaves the salon staring at a broken flow they can't retry — refusing
     # here at least says which limit was hit and that waiting fixes it.
-    limit = meta_limits.onboarding_limit(getattr(settings, "meta_access_verified", False))
-    recent = await wq.onboarded_last_7_days()
-    if recent >= limit:
-        logger.warning("whatsapp.onboarding_limit_reached recent=%s limit=%s",
-                       recent, limit)
-        return {"ok": False, "error": "onboarding_limit_reached",
-                "onboarded_last_7_days": recent, "limit": limit}
+    #
+    # Skipped on a reconnect: the cap counts *new customers per rolling 7
+    # days*, and a salon refreshing its own token is not one. Counting it
+    # would mean a busy onboarding week silently blocks an existing salon from
+    # renewing — the sender then dies at day 60 because of someone else's
+    # signup.
+    if not reconnect:
+        limit = meta_limits.onboarding_limit(
+            getattr(settings, "meta_access_verified", False)
+        )
+        recent = await wq.onboarded_last_7_days()
+        if recent >= limit:
+            logger.warning("whatsapp.onboarding_limit_reached recent=%s limit=%s",
+                           recent, limit)
+            return {"ok": False, "error": "onboarding_limit_reached",
+                    "onboarded_last_7_days": recent, "limit": limit}
 
     try:
-        token = await meta.exchange_code(
+        token, expires_in = await meta.exchange_code(
             code=code, app_id=settings.meta_app_id,
             app_secret=settings.meta_app_secret,
         )
@@ -165,12 +193,33 @@ async def complete(
         logger.warning("whatsapp.code_exchange_failed shop=%s err=%s", shop_id, exc)
         return {"ok": False, "error": "code_exchange_failed"}
 
+    # NULL means Meta reported no expiry. Nothing renews an expiring token:
+    # a business token is minted by the salon completing Embedded Signup, so
+    # the only recovery is asking them to reconnect. Recording the date is
+    # what makes that visible before every send starts failing.
+    # The nudge that gets it renewed is the webapp's: `GET /whatsapp/status`
+    # returns this date, and the cockpit banner + panel ask the owner to
+    # reconnect inside the last 7 days (`start`/`complete` with
+    # `reconnect=True`).
+    # ponytail: pull-only — the owner has to open the app to see it. A push
+    # notification from the tick is the upgrade if a salon ever expires
+    # anyway.
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        if expires_in else None
+    )
+    if expires_in:
+        logger.warning(
+            "whatsapp.token_expires shop=%s at=%s — sender goes silent unless "
+            "the salon reconnects", shop_id, expires_at,
+        )
+
     # Written before the calls that use it: a crash after this point leaves a
     # resumable row, where losing the token would leave a WABA we can neither
     # reach nor unsubscribe from.
     await wq.set_sender_fields(
         shop_id, access_token=token, waba_id=waba_id,
-        phone_number_id=phone_number_id,
+        phone_number_id=phone_number_id, token_expires_at=expires_at,
     )
 
     try:

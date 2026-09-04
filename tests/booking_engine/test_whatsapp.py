@@ -637,7 +637,9 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
 
     async def _exchange(**kw):
         calls.setdefault("exchange", []).append(kw)
-        return "customer-token"
+        # Our Login Configuration mints 60-day tokens, so the expiring shape
+        # is the production one, not the edge case.
+        return "customer-token", 60 * 24 * 3600
     async def _subscribe(**kw):
         calls.setdefault("subscribe", []).append(kw)
     async def _number(**kw):
@@ -684,6 +686,102 @@ async def test_complete_onboards_coexistence_in_one_round_trip(monkeypatch):
     assert result["ok"] is True and result["status"] == "online"
     assert result["coexistence"] is True
     assert calls["subscribe"][0]["waba_id"] == "WABA1"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_swaps_the_token_without_taking_the_sender_offline(monkeypatch):
+    """The refresh path: an online sender legitimately redoes the popup.
+
+    Both halves matter. `start` must not mark the row `pending_signup` — the
+    salon keeps sending on the old token while the popup is open — and
+    `complete` must not take the usual "already online, nothing to do" exit,
+    which would leave the expiring token in place while reporting success.
+    """
+    sender = {"shop_id": SHOP, "source": "coexistence", "status": "online",
+              "display_name": "Salone X", "phone_number": "+393331110000"}
+    calls = _patch_onboarding(monkeypatch, sender=sender, calls={})
+
+    started = await wo.start(shop_id=SHOP, display_name="Salone X",
+                             settings=FakeSettings(), reconnect=True)
+    assert started["signup"]["config_id"]
+    assert sender["status"] == "online", "still sending while the popup is open"
+
+    await wo.complete(shop_id=SHOP, code="c0de", waba_id="W",
+                      phone_number_id="P", settings=FakeSettings(),
+                      reconnect=True)
+
+    tokens = [f["access_token"] for f in calls["fields"] if "access_token" in f]
+    assert tokens == ["customer-token"], "the new token actually landed"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_is_not_counted_against_the_new_customer_cap(monkeypatch):
+    """Meta's cap counts new customers per 7 days; a refresh is not one.
+
+    Counting it would let a busy onboarding week block an existing salon from
+    renewing — its sender then dies at day 60 over someone else's signup.
+    """
+    calls = _patch_onboarding(
+        monkeypatch,
+        sender={"shop_id": SHOP, "source": "coexistence", "status": "online",
+                "display_name": "Salone X", "phone_number": "+393331110000"},
+        calls={"onboarded_last_7_days": 999},
+    )
+
+    result = await wo.complete(shop_id=SHOP, code="c0de", waba_id="W",
+                               phone_number_id="P", settings=FakeSettings(),
+                               reconnect=True)
+
+    assert result["ok"] is True
+    assert any("access_token" in f for f in calls["fields"])
+
+
+@pytest.mark.asyncio
+async def test_complete_records_when_the_business_token_expires(monkeypatch):
+    """A 60-day token that nothing renews must leave a date behind.
+
+    Our Login Configuration mints expiring tokens. Without this the sender
+    simply stops sending on day 60 with nothing anywhere saying why — the
+    token is the only credential for that WABA, and recovery is the salon
+    redoing Embedded Signup, which nobody asks for if nobody knows.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    await wo.complete(shop_id=SHOP, code="c0de", waba_id="W", phone_number_id="P",
+                      settings=FakeSettings())
+
+    written = [f for f in calls["fields"] if "token_expires_at" in f]
+    assert len(written) == 1, "expiry written exactly once, beside the token"
+    expires_at = written[0]["token_expires_at"]
+    delta = expires_at - datetime.now(timezone.utc)
+    assert timedelta(days=59) < delta < timedelta(days=61)
+
+
+@pytest.mark.asyncio
+async def test_complete_leaves_expiry_null_for_a_non_expiring_token(monkeypatch):
+    """Meta omits `expires_in` when the config issues non-expiring tokens.
+
+    NULL then means "no expiry", not "unknown" — so nothing may invent one.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    async def _exchange(**kw):
+        return "customer-token", None
+    monkeypatch.setattr(meta, "exchange_code", _exchange)
+
+    await wo.complete(shop_id=SHOP, code="c0de", waba_id="W", phone_number_id="P",
+                      settings=FakeSettings())
+
+    written = [f for f in calls["fields"] if "token_expires_at" in f]
+    assert written and written[0]["token_expires_at"] is None
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,18 @@ Creates nothing provider-side; it records intent and returns the popup config:
 
 `feature_type` is what turns the popup's first question into *"connect your existing WhatsApp Business App account?"*. Without it the salon is offered only a brand-new WABA — i.e. told to delete their app.
 
+`solution_id` is **normally empty, and that is the correct state.** A partner solution is a joint arrangement with a Solution Partner (BSP); Kairo is an independent Tech Provider — each salon attaches its own payment method — so there is nothing to name. The webapp passes it as `extras.setup.solutionID` when set and omits the field when not, since Meta rejects a blank one.
+
+`complete` records `token_expires_at` from the code exchange's `expires_in`, returned by `GET /whatsapp/status`. Our Login Configuration mints 60-day tokens and nothing renews them: when the date passes, that sender is dead until the salon redoes Embedded Signup.
+
+**Renewing: `reconnect: true` on both onboarding calls.** Redoing the popup *is* the renewal — there is no refresh endpoint at Meta. Both `start` and `complete` take an optional `reconnect` (default `false`), and it changes three things:
+
+- `start` returns the signup config **without touching the row**. The sender stays `online` on its old token and keeps sending for as long as the owner leaves the popup open; marking it `pending_signup` would take a working sender off the air to fix a problem that hasn't happened yet.
+- `complete` skips the "already online, nothing to do" early return — the exit that makes an ordinary double-submit idempotent, and the one that would otherwise report success while leaving the expiring token in place.
+- `complete` skips Meta's **new-customer onboarding cap** (10 or 200 per rolling 7 days). That cap counts new customers; a salon renewing its own token is not one, and counting it would let a busy onboarding week block an existing salon from renewing — its sender then dies at day 60 over someone else's signup.
+
+The webapp drives this from `token_expires_at`: a cockpit banner (`WhatsAppTokenBanner`) and the WhatsApp panel both nudge inside the last 7 days, and the panel's button opens the same Embedded Signup popup with `reconnect: true`. It is **pull-only** — the owner has to open the app.
+
 ### `POST /whatsapp/onboarding/complete`
 
 ```json
