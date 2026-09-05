@@ -42,6 +42,10 @@ def create_app() -> FastAPI:
     app.include_router(voice_balance.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_heartbeat
     app.include_router(voice_heartbeat.router, prefix="/api/v1")
+    from booking_engine.api.routes import sms
+    app.include_router(sms.router, prefix="/api/v1")
+    from booking_engine.api.routes import whatsapp
+    app.include_router(whatsapp.router, prefix="/api/v1")
     from booking_engine.api.routes import voice_tools_catalog
     app.include_router(voice_tools_catalog.router)
     from booking_engine.api.routes import voice_tools_booking
@@ -54,6 +58,8 @@ def create_app() -> FastAPI:
     app.include_router(voice_memos.router)
     from booking_engine.api.routes import voice_tools_identity
     app.include_router(voice_tools_identity.router)
+    from booking_engine.api.routes import messaging_tick
+    app.include_router(messaging_tick.router, prefix="/api/v1")
 
     # Remote MCP server for OpenAI Realtime tool calls (session manager is run
     # by the production entrypoint's lifespan, see booking_engine/asgi.py).

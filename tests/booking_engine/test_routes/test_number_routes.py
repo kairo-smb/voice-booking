@@ -1,0 +1,465 @@
+"""Tests for POST /voice/numbers/request, GET /voice/numbers/request/{shop_id},
+POST /voice/numbers/release, POST /messaging/tick, and the idempotent
+POST /voice/numbers/provision path.
+"""
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+from uuid import uuid4
+
+import pytest
+from httpx import AsyncClient, ASGITransport
+
+from booking_engine.api.app import create_app
+
+AUTH = {"Authorization": "Bearer test-secret"}
+
+
+@pytest.fixture(autouse=True)
+def stub_secret(monkeypatch):
+    monkeypatch.setenv("CONTROL_PLANE_SECRET", "test-secret")
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "AC123")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "token123")
+
+
+@pytest.mark.asyncio
+async def test_request_number_requires_auth():
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.post(
+            "/api/v1/voice/numbers/request",
+            data={
+                "shop_id": str(uuid4()),
+                "business_name": "Salone Bella",
+                "contact_email": "a@b.com",
+            },
+            files={"document": ("doc.pdf", b"fake-bytes", "application/pdf")},
+        )
+        assert r.status_code in (401, 403, 503)
+
+
+@pytest.mark.asyncio
+async def test_tick_requires_auth():
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.post("/api/v1/messaging/tick")
+        assert r.status_code in (401, 403, 503)
+
+
+@pytest.mark.asyncio
+async def test_request_number_rejects_blank_business_name():
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.post(
+            "/api/v1/voice/numbers/request",
+            headers=AUTH,
+            data={
+                "shop_id": str(uuid4()),
+                "business_name": "",
+                "contact_email": "a@b.com",
+            },
+            files={"document": ("doc.pdf", b"fake-bytes", "application/pdf")},
+        )
+        assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_request_number_calls_submit_request():
+    shop_id = uuid4()
+    with patch(
+        "booking_engine.api.routes.voice_telephony.submit_request",
+        new_callable=AsyncMock,
+        return_value={"ok": True, "status": "pending_review"},
+    ) as mock_submit:
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/request",
+                headers=AUTH,
+                data={
+                    "shop_id": str(shop_id),
+                    "business_name": "Salone Bella",
+                    "contact_email": "a@b.com",
+                },
+                files={"document": ("doc.pdf", b"fake-bytes", "application/pdf")},
+            )
+        assert r.status_code == 200
+        assert r.json()["data"]["status"] == "pending_review"
+        mock_submit.assert_called_once()
+        assert mock_submit.call_args.kwargs["shop_id"] == shop_id
+        assert mock_submit.call_args.kwargs["business_name"] == "Salone Bella"
+        assert mock_submit.call_args.kwargs["contact_email"] == "a@b.com"
+        assert mock_submit.call_args.kwargs["filename"] == "doc.pdf"
+        assert mock_submit.call_args.kwargs["content"] == b"fake-bytes"
+
+
+@pytest.mark.asyncio
+async def test_get_request_status_returns_request_and_telephony():
+    shop_id = uuid4()
+    request_row = {
+        "shop_id": shop_id,
+        "status": "pending_review",
+        "regulation_sid": "RN1",
+        "bundle_sid": "BU1",
+        "end_user_sid": "EU1",
+        "document_sid": "RD1",
+        "business_name": "Salone Bella",
+        "contact_email": "a@b.com",
+        "evaluation_errors": None,
+        "rejection_reason": None,
+        "created_at": None,
+        "submitted_at": None,
+        "reviewed_at": None,
+        "updated_at": None,
+    }
+    with patch(
+        "booking_engine.api.routes.voice_telephony.rq.get_request",
+        new_callable=AsyncMock,
+        return_value=request_row,
+    ), patch(
+        "booking_engine.api.routes.voice_telephony.q.get_telephony",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get(
+                f"/api/v1/voice/numbers/request/{shop_id}", headers=AUTH
+            )
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["request"]["status"] == "pending_review"
+        assert data["telephony"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_request_status_none_when_nothing_exists():
+    shop_id = uuid4()
+    with patch(
+        "booking_engine.api.routes.voice_telephony.rq.get_request",
+        new_callable=AsyncMock,
+        return_value=None,
+    ), patch(
+        "booking_engine.api.routes.voice_telephony.q.get_telephony",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get(
+                f"/api/v1/voice/numbers/request/{shop_id}", headers=AUTH
+            )
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["request"] is None
+        assert data["telephony"] is None
+
+
+@pytest.mark.asyncio
+async def test_provision_already_provisioned_returns_existing_and_skips_purchase():
+    shop_id = uuid4()
+    existing_row = {
+        "shop_id": shop_id,
+        "kairo_number": "+37251234567",
+        "kairo_number_sid": "PN1",
+        "setup_path": "new",
+        "salon_existing_number": None,
+    }
+    with patch(
+        "booking_engine.api.routes.voice_telephony.q.get_telephony",
+        new_callable=AsyncMock,
+        return_value=existing_row,
+    ), patch(
+        "booking_engine.api.routes.voice_telephony.purchase_number"
+    ) as mock_purchase:
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/provision",
+                headers=AUTH,
+                json={
+                    "shop_id": str(shop_id),
+                    "phone_number": "+37259999999",
+                    "setup_path": "new",
+                },
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["data"]["kairo_number"] == "+37251234567"
+        mock_purchase.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_tick_with_approved_bundle_calls_provision_approved():
+    shop_id = uuid4()
+    with patch(
+        "booking_engine.api.routes.messaging_tick.list_pending_review",
+        new_callable=AsyncMock,
+        return_value=[{"shop_id": shop_id, "bundle_sid": "BU1"}],
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.get_bundle_status",
+        new_callable=AsyncMock,
+        return_value="twilio-approved",
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.set_status",
+        new_callable=AsyncMock,
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.provision_approved",
+        new_callable=AsyncMock,
+        return_value="provisioned",
+    ) as mock_provision, patch(
+        "booking_engine.api.routes.messaging_tick.check_all",
+        new_callable=AsyncMock,
+        return_value={"checked": 0, "green": 0, "red": 0, "inconclusive": 0},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.release_sweep",
+        new_callable=AsyncMock,
+        return_value={"scheduled": 0, "cleared": 0, "released": 0, "errors": 0},
+    ):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post("/api/v1/messaging/tick", headers=AUTH)
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["reviewed"] == 1
+        assert data["provisioned"] == 1
+        assert data["errors"] == 0
+        mock_provision.assert_called_once()
+        assert mock_provision.call_args.args[0] == shop_id
+
+
+@pytest.mark.asyncio
+async def test_tick_one_bad_shop_does_not_stop_the_sweep_or_health_check():
+    good_shop = uuid4()
+    bad_shop = uuid4()
+
+    async def fake_get_bundle_status(*, bundle_sid, account_sid, auth_token):
+        if bundle_sid == "BAD":
+            raise RuntimeError("twilio blew up")
+        return "twilio-approved"
+
+    with patch(
+        "booking_engine.api.routes.messaging_tick.list_pending_review",
+        new_callable=AsyncMock,
+        return_value=[
+            {"shop_id": bad_shop, "bundle_sid": "BAD"},
+            {"shop_id": good_shop, "bundle_sid": "GOOD"},
+        ],
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.get_bundle_status",
+        side_effect=fake_get_bundle_status,
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.set_status",
+        new_callable=AsyncMock,
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.provision_approved",
+        new_callable=AsyncMock,
+        return_value="provisioned",
+    ) as mock_provision, patch(
+        "booking_engine.api.routes.messaging_tick.check_all",
+        new_callable=AsyncMock,
+        return_value={"checked": 3, "green": 3, "red": 0, "inconclusive": 0},
+    ) as mock_check_all, patch(
+        "booking_engine.api.routes.messaging_tick.release_sweep",
+        new_callable=AsyncMock,
+        return_value={"scheduled": 0, "cleared": 0, "released": 0, "errors": 0},
+    ):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post("/api/v1/messaging/tick", headers=AUTH)
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["errors"] == 1
+        assert data["provisioned"] == 1
+        # The bad shop must not prevent the good shop's provisioning, and
+        # health must still run for every shop regardless.
+        mock_provision.assert_called_once()
+        assert mock_provision.call_args.args[0] == good_shop
+        mock_check_all.assert_called_once()
+        assert data["health"]["checked"] == 3
+
+
+@pytest.mark.asyncio
+async def test_release_requires_auth():
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.post(
+            "/api/v1/voice/numbers/release",
+            json={"shop_id": str(uuid4()), "reason": "owner_requested"},
+        )
+        assert r.status_code in (401, 403, 503)
+
+
+@pytest.mark.asyncio
+async def test_release_no_number_returns_404():
+    shop_id = uuid4()
+    with patch(
+        "booking_engine.api.routes.voice_telephony.release_for_shop",
+        new_callable=AsyncMock,
+        return_value="no_number",
+    ):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/release",
+                headers=AUTH,
+                json={"shop_id": str(shop_id), "reason": "owner_requested"},
+            )
+        assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_release_failed_returns_502():
+    shop_id = uuid4()
+    with patch(
+        "booking_engine.api.routes.voice_telephony.release_for_shop",
+        new_callable=AsyncMock,
+        return_value="release_failed",
+    ):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/release",
+                headers=AUTH,
+                json={"shop_id": str(shop_id), "reason": "owner_requested"},
+            )
+        assert r.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_release_success_returns_200():
+    shop_id = uuid4()
+    with patch(
+        "booking_engine.api.routes.voice_telephony.release_for_shop",
+        new_callable=AsyncMock,
+        return_value="released",
+    ) as mock_release:
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/voice/numbers/release",
+                headers=AUTH,
+                json={"shop_id": str(shop_id), "reason": "owner_requested"},
+            )
+        assert r.status_code == 200
+        assert r.json()["data"]["status"] == "released"
+        mock_release.assert_called_once()
+        assert mock_release.call_args.args[0] == shop_id
+        assert mock_release.call_args.kwargs["reason"] == "owner_requested"
+
+
+@pytest.mark.asyncio
+async def test_tick_includes_release_block():
+    with patch(
+        "booking_engine.api.routes.messaging_tick.list_pending_review",
+        new_callable=AsyncMock,
+        return_value=[],
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.check_all",
+        new_callable=AsyncMock,
+        return_value={"checked": 0, "green": 0, "red": 0, "inconclusive": 0},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.release_sweep",
+        new_callable=AsyncMock,
+        return_value={"scheduled": 1, "cleared": 0, "released": 2, "errors": 0},
+    ) as mock_sweep:
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post("/api/v1/messaging/tick", headers=AUTH)
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["release"] == {
+            "scheduled": 1, "cleared": 0, "released": 2, "errors": 0,
+        }
+        mock_sweep.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_tick_release_sweep_failure_does_not_fail_tick_or_hide_health():
+    with patch(
+        "booking_engine.api.routes.messaging_tick.list_pending_review",
+        new_callable=AsyncMock,
+        return_value=[],
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.check_all",
+        new_callable=AsyncMock,
+        return_value={"checked": 5, "green": 5, "red": 0, "inconclusive": 0},
+    ) as mock_check_all, patch(
+        "booking_engine.api.routes.messaging_tick.release_sweep",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("twilio blew up"),
+    ):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post("/api/v1/messaging/tick", headers=AUTH)
+        # The endpoint must still return 200 even though the release sweep
+        # raised — the cron treats any non-2xx as a failed run, and one
+        # shop's Twilio hiccup during release must not mask the rest of
+        # the tick's work.
+        assert r.status_code == 200
+        data = r.json()["data"]
+        # Health must still have run and be present/populated — it runs
+        # before the release sweep specifically so a release failure can
+        # never prevent it.
+        mock_check_all.assert_called_once()
+        assert data["health"] == {"checked": 5, "green": 5, "red": 0, "inconclusive": 0}
+        # The failure must be counted, not silently swallowed.
+        assert data["errors"] >= 1
+
+
+def test_telephony_out_carries_health_and_release_fields():
+    """These three drive the health dot and the grace-period warning.
+
+    TelephonyOut lists its fields explicitly, so anything unnamed is dropped
+    silently — the UI then renders 'unknown' forever and the release warning
+    never appears. That is invisible rather than broken, so it needs its own
+    test rather than relying on an endpoint assertion.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    from booking_engine.api.routes.voice_telephony import _telephony_out
+
+    when = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    out = _telephony_out({
+        "shop_id": uuid4(), "kairo_number": "+37258989650",
+        "kairo_number_sid": "PN1", "setup_path": "new",
+        "salon_existing_number": None,
+        "health_status": "red", "health_detail": "webhook_drift",
+        "release_scheduled_at": when,
+    })
+
+    assert out["health_status"] == "red"
+    assert out["health_detail"] == "webhook_drift"
+    assert out["release_scheduled_at"].startswith("2026-09-01")
+
+
+def test_telephony_out_defaults_when_columns_are_absent():
+    """A row from before migration 13 must not blow up the endpoint."""
+    from uuid import uuid4
+
+    from booking_engine.api.routes.voice_telephony import _telephony_out
+
+    out = _telephony_out({
+        "shop_id": uuid4(), "kairo_number": "+37258989650",
+        "kairo_number_sid": "PN1", "setup_path": "new",
+        "salon_existing_number": None,
+    })
+
+    assert out["health_status"] == "unknown"
+    assert out["release_scheduled_at"] is None

@@ -6,12 +6,13 @@
 
 ## Ownership boundary
 
-Two schemas in one Neon Postgres database:
+Three schemas in one Neon Postgres database:
 
 | Schema | Owner | This repo's access |
 |---|---|---|
 | `business_app_core` | the `webapp` Control Plane repo | reads/writes narrowly through `booking_engine/db/queries.py`; **never alters its DDL** |
 | `voice_agent` | this repo | owns it fully — DDL lives in `booking_engine/db/sql/`, applied in order by `scripts/migrate.sh` |
+| `sms` | this repo | owns it fully, added 2026-08-12 — see [`sms` schema](#sms-schema--authoritative-here) below |
 
 **Do not hand-copy `business_app_core`'s schema into a doc.** That has already gone stale and caused real bugs at least twice (`CLAUDE.md` §2026-07-24 "Repo cleanup..." and the schema-mismatch history it references). The accurate, current mapping is `booking_engine/db/queries.py`, exercised against real Neon-shaped data by `tests/live_db/*`. Read that file for column names, not this one.
 
@@ -38,28 +39,150 @@ The Control Plane (`webapp`) has full CRUD on all of the above except `appointme
 
 **Other stable conventions:** soft deletes via `is_active = false` (never hard-delete a row with dependent appointments); timezone is hardcoded `Europe/Rome` for all slot calculations (`ZoneInfo("Europe/Rome")` in `queries.py`).
 
+**`customers.marketing_consent*` columns appear in no migration in this repo.** They arrive via the webapp's own migration chain, not this repo's — noted here so nobody re-diagnoses that as a missing-migration bug (found while grounding the 2026-08-14 number-provisioning docs; see `CLAUDE.md`).
+
 ## `voice_agent` schema — authoritative here
 
-DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `10_shop_config_voice_preset_default.sql`, applied in filename order. `01_schema.sql`/`02_seed_data.sql` are a **separate, local-only bootstrap pair** with fake data and unqualified table names — `scripts/migrate.sh` explicitly skips both; never run them against real Neon.
+DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `13_number_release.sql`, applied in filename order. `01_schema.sql`/`02_seed_data.sql` are a **separate, local-only bootstrap pair** with fake data and unqualified table names — `scripts/migrate.sh` explicitly skips both; never run them against real Neon.
 
 | Table | Added in | Purpose |
 |---|---|---|
 | `calls` | 03, extended 04/08 | one row per inbound call — caller number, matched/created customer, outcome, and (08) a structured hairstylist `service_brief` |
 | `call_transcripts` | 03 | per-turn transcript rows for a call |
 | `call_events` | 03 | tool-call/event log for a call |
-| `shop_telephony` | 04, extended 09 | provisioned Twilio number per shop, `setup_path` (new/forward), `provider` (defaults `'twilio'` since 09) |
+| `shop_telephony` | 04, extended 09/12/13 | provisioned Twilio number per shop, `setup_path` (new/forward), `provider` (defaults `'twilio'` since 09), `health_status`/`health_detail`/`health_checked_at` (12, green/red semaphore — see below), `release_scheduled_at` (13, grace-period release deadline — see below) |
 | `shop_config` | 04, extended 06/07/10 | Layer 1 voice config: `enabled`, `display_name`, greetings, `voice_preset`, `tone_id` (06, FK to `voice_tones`, replaced an inline `tone_preset` string), `business_hours`, `answer_mode`, token top-up settings |
 | `callback_memos` | 04 | merchant callback reminders created by `escalate_to_merchant` |
 | `auth_events` | 04 | identity-verification audit trail |
 | `system_policy` | 04 | disclosure/consent text (seeded it-IT) |
 | `voice_tones` | 06 | 8 seeded presets (`is_preset=true`) plus room for shop-authored custom tones (`created_by_shop_id`); seeded names: professionale, amichevole, efficiente, luxury, tecnico, casual, empatico, conciso |
+| `number_requests` | 12, extended 13 | one row per shop, PK `shop_id`: self-service Estonian-number regulatory-bundle lifecycle (`status` draft→evaluating→pending_review→approved/rejected→provisioned→**released** (13), the Twilio `regulation_sid`/`bundle_sid`/`end_user_sid`/`document_sid`, `evaluation_errors` jsonb verbatim from Twilio, `rejection_reason`, `released_at`/`released_number` (13, kept for history — see below)). Polled hourly by `POST /api/v1/messaging/tick`. See [Architecture](architecture.md#self-service-number-provisioning-path-2-onboarding) and `CLAUDE.md` §2026-08-14. |
+
+**`shop_telephony`'s health semaphore (12):** `health_status` (`unknown`/`green`/`red`, default `unknown`) records whether a provisioned number still exists at Twilio with its voice webhook pointed at us. A Twilio-unreachable probe deliberately leaves the prior status untouched rather than flipping to red — only a confirmed 404 or voice-webhook drift changes the light (`services/number_health.py::decide_health`). `sms_url` is deliberately not checked — there is no inbound SMS handler any more (STOP handling removed; see `CLAUDE.md`), so there is nothing for it to correctly point at.
+
+**Grace-period number release (13), closes the cancellation gap flagged in `CLAUDE.md` §2026-08-14.** When a shop's plan lapses (`shops.plan_id` goes `NULL`), the hourly tick doesn't release the number immediately — it stamps `shop_telephony.release_scheduled_at = now() + 14 days` the first time it notices, clears it if the plan comes back before that deadline, and only calls Twilio to release the number once the deadline has passed (`services/number_release.py::decide_release`/`sweep`). The deadline lives here, in `voice_agent`, derived from when *we* first observed the lapse — deliberately not a `plan_lapsed_at` column on `business_app_core.shops`, which is the webapp repo's schema. On release, `shop_telephony`'s row is deleted (Twilio confirms first, row deletion second — a lost Twilio call must not delete a row we're still paying for) and `number_requests.status` moves to `released` with `released_at`/`released_number` stamped so the history survives after the row is gone.
 
 `business_app_core.shops` also gained two columns directly in migration 03: `voice` (default `'alloy'`) and `language` (default `'it'`) — the one place this repo's migrations touch the other schema, both additive/nullable-safe.
 
+## `sms` schema — authoritative here
+
+Added 2026-08-12 (`booking_engine/db/sql/11_sms_schema.sql`), owned by this
+repo like `voice_agent`. Phase 1 of a larger SMS/WhatsApp messaging design —
+see [Architecture → SMS marketing send](architecture.md#sms-marketing-send-phase-1-of-messaging)
+and `CLAUDE.md` §2026-08-12. WhatsApp now has its own schema — see
+[`whatsapp` schema](#whatsapp-schema--authoritative-here) below.
+
+| Table | Purpose |
+|---|---|
+| `campaigns` | batch-send container (`draft → approved → sending → sent/cancelled`). **Exists, nothing writes to it yet** — Phase 1 is one-off sends only. |
+| `outbound_messages` | one row per send attempt, including refused ones (`status='suppressed'`, `suppressed_reason` — a refusal is always persisted, never silently dropped). `credits_charged`/`price_usd` are the billed figures; `campaign_id IS NULL` means a one-off send. Unique on `(campaign_id, customer_id)` where both are set, so re-running a batch send can't double-message a customer. |
+| `opt_outs` | **unused as of the STOP-removal (see `CLAUDE.md`).** Kept in the schema, no `DROP TABLE` — intentionally left behind rather than dropped — but nothing reads or writes it any more. |
+
+**STOP handling removed; suppression is `customers.marketing_consent`
+alone.** This repo previously reimplemented STOP-keyword parsing in
+application code (Twilio's automatic STOP handling doesn't cover the
+Estonian DID) and wrote both `sms.opt_outs` and
+`customers.marketing_consent = false` on a recognised STOP reply. The owner
+decided to remove that entirely — opt-out is now handled in-store, by a
+staff member clearing marketing consent in the app. There is no inbound SMS
+webhook and no opt-out footer any more; `sms_send.py`'s only suppression
+check is `customers.marketing_consent`/`_granted_at`/`_withdrawn_at`. See
+`CLAUDE.md`'s STOP-removal entry for the full reasoning, including the
+explicit note that this is a weaker position under Italian marketing rules,
+accepted as the owner's decision.
+
+**Gap worth knowing:** `business_app_core.customers.marketing_consent`,
+`_granted_at`, `_withdrawn_at`, `_source` exist on the live database but
+appear in **no migration file inside this repo** — they were added through
+the webapp's own migration chain, not this repo's. Grepping only this repo
+for those columns will come up empty; they're real, just owned elsewhere —
+same ownership-boundary caution as the rest of `business_app_core` above.
+
+**SMS sends charge the basket over HTTP — this repo no longer writes
+`ai_token_log` (or any spend table).** A send's credit cost (`2×` the
+Twilio price, `send_credits`) is recorded locally on
+`sms.outbound_messages.credits_charged`, but the actual basket deduction is a
+POST to the webapp's charge-actual endpoint
+(`booking_engine/clients/webapp_credits.py`, `run_type='sms_send'` +
+`run_ref=<message_id>`, pre-converted `credits`). The webapp performs the
+single locked deduction and writes the ledger row (`ai_run_ledger`); the old
+`ai_token_log` rows this repo used to write (`voice_call_id`,
+`sms_message_id`, `whatsapp_message_id`) are superseded — the webapp is
+backfilling the ledger from `ai_token_log` and dropping the table (see the
+webapp's `docs/knowledge/database.md`). The columns exist only so the
+backfill can attribute history; nothing in this repo writes them any more.
+
+## `whatsapp` schema — authoritative here
+
+Added 2026-08-21 (`14_whatsapp_schema.sql`), reshaped for Meta Cloud API on
+2026-08-24 (`15_whatsapp_meta.sql`). Owned by this repo. See
+[Architecture → WhatsApp marketing](architecture.md#whatsapp-marketing-one-waba-per-salon),
+[Providers → WhatsApp](providers.md#whatsapp-meta-cloud-api-tech-provider),
+[API → WhatsApp](api/whatsapp.md), and `CLAUDE.md` §2026-08-24.
+
+| Table | Purpose |
+|---|---|
+| `senders` | one row per shop: the salon's `waba_id`, `phone_number_id`, the customer-scoped `access_token` from Embedded Signup, `platform_type` (`COEXISTENCE` when the number is also live on the WhatsApp Business App), display name, `quality_rating`, and **two different Meta ceilings**: `messaging_limit` (the volume tier — conversations per *rolling* 24h) and `throughput_level` (messages per second). `daily_cap` is Kairo's own drip rate and only ever narrows the tier — see `meta_limits.effective_daily_cap()`. `source` is always `coexistence` (BYO WABA only — the `new`-provisioning path was removed 2026-08-30, migration 18); `status` is `pending_signup → online` (or `verifying`/`offline`/`failed`). |
+| `templates` | one row per (shop, template_key). A template is per-WABA, so the same skeleton must be **created separately in every salon's WABA** and approved separately. `name` (`it_promo_v1`) is deliberately the same across shops — Meta scopes names per-WABA — so status updates key on `(shop_id, name)`, never on name alone. `status` tracks Meta's verdict. `body_hash` (migration `21_whatsapp_template_body_hash.sql`, 2026-09-02) is *which version of the copy* this WABA holds: `status = 'approved'` only says a template with that name passed review, so without it an edited body reached Kairo's WABA and no salon's, silently. NULL = unknown version, treated as stale and re-pushed on the next tick (gated, as ever, on Kairo's WABA having approved that same body). |
+| `outbound_messages` | queue **and** log in one table. A row is written the moment a send is planned and never deleted: `queued → sending → sent → delivered/read`, or `suppressed`/`failed`/`cancelled`. `template_name` + `template_language` are how Meta addresses a template; `variables` (jsonb) are its parameters; `preview` is the rendered body, stored so a row says what the customer actually read. `provider_sid` is Meta's `wamid`. `price_usd` is our **send-time estimate** — Meta never reports an amount — and `credits_charged` is unused: the salon pays Meta directly. `initiated_by` (added 2026-09-02, migration `20_whatsapp_audit.sql`) is the staff id who queued the message — NULL for the tick's automation sends, which have no human in the path. |
+| `audit_events` | who-did-what for WABA actions (migration `20_whatsapp_audit.sql`, added 2026-09-02): one row per campaign enqueue/cancel, automation config, onboarding step, or template-ensure. `event` names the action; `actor_id` is the acting staff id (NULL = the tick/system acted; **no FK** so a deleted staff row never drops the trail); `source` is the webapp surface (`composer`/`touchpoint`/`offer`); `status`/`http_status`/`error_message` record the outcome, with sanitized `request`/`response` (never recipient lists, never the single-use onboarding `code`). Complements `outbound_messages` (which trails the per-message outcome) — this log's insert is fail-open by design: a dead audit DB must not break the send it logs. |
+
+**Three things in this schema are load-bearing and easy to undo by accident:**
+
+- **`senders.access_token` is the whole credential, and it can expire.**
+  Unlike the Twilio subaccount model there is no shared parent secret: this
+  per-customer business token is the complete authority over one salon's
+  WhatsApp. Lose it and we hold a WABA we can neither reach nor unsubscribe
+  from, which is why `complete()` persists it *before* making any call that
+  uses it. Whether it expires is a property of the **Embedded Signup Login
+  Configuration**, not of this code — Kairo's mints 60-day tokens, so
+  `token_expires_at` (migration `22_whatsapp_token_expiry.sql`) records
+  Meta's `expires_in` from the code exchange and `GET /whatsapp/status`
+  returns it. NULL means Meta reported no expiry, never "unknown": existing
+  rows are not backfilled. **Nothing renews it** — a business token is minted
+  by the salon completing the popup, so recovery is asking them to reconnect,
+  which is why the date has to be visible before the sends start failing.
+- **`senders.waba_id` is the only tenant router.** Meta posts every
+  customer's traffic to one app-level webhook and identifies the shop solely
+  by `entry[].id`. Hence the unique index on it.
+- **`outbound_messages.status = 'sending'` is a claim, not a provider state.**
+  The drip sweep flips rows into it in the same statement that selects them
+  (`whatsapp_queries.claim_due`, `FOR UPDATE … SKIP LOCKED`), so two
+  overlapping ticks or two Fly machines can never both send the same row. A
+  row stuck there — a tick that died mid-send — is requeued by the next
+  sweep (`requeue_stuck`), not abandoned.
+- **`whatsapp_outbound_campaign_customer_uniq`** (`shop_id, campaign_key,
+  customer_id`, partial) is the idempotency: a retried or double-clicked
+  campaign enqueue is a no-op, not a second message to the same person.
+
+**No Kairo-side debit happens for a WhatsApp send** (the salon pays Meta
+directly), so nothing here ever writes `ai_token_log` or charges the basket on
+this path. The SMS-only charge path is `token_basket_queries.try_debit_for_message`
+→ `booking_engine/clients/webapp_credits.py`, an HTTP POST to the webapp (see
+the [`sms` schema](#sms-schema--authoritative-here) section above); the
+`whatsapp_message_id` column on `ai_token_log` was only ever written by the
+old local debit implementation, which is gone.
+
+**No read reaches out of this schema for a limit any more (2026-08-24).**
+`whatsapp_queries.monthly_quota` used to join
+`business_app_core.shops → subscription_plans` for `whatsapp_monthly_messages`
+(webapp migration 54). It is deleted: Meta bills the salon's own card under the
+Tech Provider model, so a Kairo-side ceiling recovered no cost of ours. The
+webapp column survives, unread — dropping it would be destructive and it is
+harmless. Meta's own tier (`senders.messaging_limit` → `meta_limits`) is now
+the only volume ceiling, and it is one this repo already reads.
+
+**`sent_today`, `sent_this_month` and `recently_contacted` count marketing
+only**, joining `whatsapp.templates` on `(shop_id, name)` for
+`category = 'MARKETING'`. `sent_last_24h` counts everything, because Meta's
+tier is measured in business-initiated conversations including utility. Getting
+this backwards breaks nothing and silently corrupts every number, so the split
+is pinned by tests rather than left to a comment.
+
 ## Cross-schema references
 
-`voice_agent.calls` FKs into `business_app_core.shops`/`customers`/`appointments` — cross-schema foreign keys are used deliberately rather than duplicating those rows into `voice_agent`.
+`voice_agent.calls` FKs into `business_app_core.shops`/`customers`/`appointments` — cross-schema foreign keys are used deliberately rather than duplicating those rows into `voice_agent`. `sms.outbound_messages`/`sms.opt_outs` do the same into `business_app_core.shops`/`customers`, as do all three `whatsapp` tables.
 
 ## Connection
 
-`booking_engine/db/connection.py` — a single asyncpg pool (`pool_min_size=2`, `pool_max_size=10`, both from `Settings`). **No `pool.acquire()` timeout is configured anywhere in this codebase** — under enough concurrent calls the pool itself becomes a contention point with no bound on the wait (flagged, not yet actioned, in `CLAUDE.md` §2026-07-21 "Cost-gated pricing..."; not urgent while call volume is near zero).
+`booking_engine/db/connection.py` — a single asyncpg pool (`pool_min_size=2`, `pool_max_size=10`, both from `Settings`). **No `pool.acquire()` timeout is configured anywhere in this codebase** — under enough concurrent calls the pool itself becomes a contention point with no bound on the wait (flagged, not yet actioned, in `CLAUDE.md` §2026-07-24 "Root-caused session 'dead air'..."; not urgent while call volume is near zero).

@@ -36,3 +36,4 @@ build/
 .claude/skills/impeccable/
 .github/skills/impeccable/
 .github/hooks/impeccable.json
+.agents/skills/impeccable/*

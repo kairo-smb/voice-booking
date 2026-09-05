@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from booking_engine.db.connection import execute_one
+from booking_engine.db.connection import execute_one, execute_void
 
 
 async def upsert_telephony(
@@ -37,6 +37,38 @@ async def upsert_telephony(
     )
 
 
+async def insert_telephony(
+    *,
+    shop_id: UUID,
+    provider: str,
+    kairo_number: str,
+    kairo_number_sid: str,
+    salon_existing_number: str | None,
+    setup_path: str,
+    activation_status: str = "active",
+) -> dict | None:
+    """Claim the shop's one telephony row. Returns None if it already existed.
+
+    Deliberately NOT upsert_telephony: overwriting swaps kairo_number and
+    orphans the previously purchased number, which stays billed by Twilio with
+    nothing referencing it. A None here means the caller just bought a number it
+    cannot store and MUST release it.
+    See docs/number-provisioning-design.md §3.1.
+    """
+    return await execute_one(
+        """
+        INSERT INTO voice_agent.shop_telephony
+            (shop_id, provider, kairo_number, kairo_number_sid,
+             salon_existing_number, setup_path, activation_status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        ON CONFLICT (shop_id) DO NOTHING
+        RETURNING *
+        """,
+        shop_id, provider, kairo_number, kairo_number_sid,
+        salon_existing_number, setup_path, activation_status,
+    )
+
+
 async def get_telephony(shop_id: UUID) -> dict | None:
     return await execute_one(
         "SELECT * FROM voice_agent.shop_telephony WHERE shop_id = $1",
@@ -48,4 +80,18 @@ async def get_telephony_by_kairo_number(kairo_number: str) -> dict | None:
     return await execute_one(
         "SELECT * FROM voice_agent.shop_telephony WHERE kairo_number = $1",
         kairo_number,
+    )
+
+
+async def delete_telephony(shop_id: UUID) -> None:
+    """Drop the shop's telephony row once its number has been released.
+
+    Called only after the number has been confirmed released at Twilio
+    (services/number_release.py) — deleting first would leave us paying for
+    a number we no longer track, the same orphan class as the insert-only
+    guarantee above protects against.
+    """
+    await execute_void(
+        "DELETE FROM voice_agent.shop_telephony WHERE shop_id = $1",
+        shop_id,
     )

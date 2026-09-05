@@ -6,6 +6,1201 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-04 — The salon's business token expires after 60 days, and migration 15 said it couldn't
+
+**Found by auditing the Meta app's permissions, which turned out to be the one
+thing that was fine.** The owner asked whether the app requested too many
+permissions and whether that would delay App Review. It doesn't: only
+`whatsapp_business_management` and `whatsapp_business_messaging` are submitted;
+everything else on that screen (`business_management`, `public_profile`,
+`whatsapp_business_manage_events`) sits at Standard Access and is never seen by
+a reviewer, and `email`/`manage_app_solution` aren't requested at all. The
+Login Configuration behind `META_CONFIG_ID` (`1082553207684250`) lists exactly
+those two permissions with the WhatsApp Accounts asset. Nothing to remove.
+
+**The configuration's *name* was the finding: "…con token con scadenza a 60
+giorni".** Migration 15's comment on `senders.access_token` asserted "It does
+not expire unless the salon revokes our app" — an assumption, never checked,
+and wrong. Token expiry is a property of the **Embedded Signup Login
+Configuration**, not of any code here, and ours was created from Meta's
+`WhatsApp Embedded Signup Configuration With 60 Expiration Token` template.
+Left alone, every connected salon would have stopped sending 60 days after
+onboarding — all of them, silently, with the failure arriving as generic Graph
+errors long after the cause. That token is the *only* credential for a
+customer's WABA; there is no shared parent to fall back on.
+
+**Nothing renews it, and that is not a gap in this repo.** A business token
+comes into existence by the salon completing the popup, so the renewal *is*
+redoing the popup. Meta publishes no refresh endpoint for it, and the
+"never expires" option that does exist applies to system user tokens you
+generate in your own Business Settings, not to ones minted for onboarded
+customers. So the work split in two: record the fact, then make the salon act
+on it.
+
+**Recording it:** `exchange_code` now returns `(token, expires_in)` instead of
+a bare string, `complete()` writes `token_expires_at` (migration 22) and logs
+a warning, and `GET /whatsapp/status` returns it. NULL means Meta reported no
+expiry — the truth for a config changed to non-expiring, and for any row
+predating this. Deliberately **not backfilled** with `onboarded_at + 60 days`:
+that would assert an expiry nobody read back from Meta, the same reasoning as
+migration 21's NULL `body_hash`.
+
+**Acting on it: `reconnect=true` on both onboarding calls.** Redoing the popup
+for an already-online sender was impossible — `start()` and `complete()` both
+took an "already online, nothing to do" early exit. Three deliberate
+differences under the flag:
+
+- `start` returns the signup config **without touching the row**. The sender
+  stays `online` on its old token and keeps sending for however long the popup
+  is open. Flipping it to `pending_signup` would take a working sender off the
+  air to fix a problem that hasn't happened yet.
+- `complete` skips the online early return — the exit that makes an ordinary
+  double-submit idempotent, and the one that would otherwise report success
+  while leaving the expiring token in place.
+- `complete` skips Meta's **new-customer onboarding cap** (10, or 200 after
+  Access Verification, per rolling 7 days). The cap counts new customers; a
+  salon renewing its own token is not one. Counting it would let a busy
+  onboarding week block an existing salon's renewal — its sender then dies at
+  day 60 because of someone else's signup.
+
+**The nudge is two banners, not a modal, and it is pull-only.** The webapp
+reads `token_expires_at` and asks the owner to reconnect inside the last 7
+days (`RENEW_WINDOW_DAYS`): a cockpit banner (`WhatsAppTokenBanner`, beside
+`CreditReminderBanner`) and a box in the WhatsApp panel. The cockpit one links
+to the panel rather than opening the popup itself — Meta's SDK must be loaded
+before the click or the browser blocks the popup, and a second copy of that is
+the one piece of this flow that fails silently. Closing the popup on a
+reconnect does **not** call `abortOnboarding`: on a first connection that
+cleans up a stuck `pending_signup` row, but here it would delete a working
+sender because the owner changed their mind about renewing early. Copy avoids
+the word "token" — *"il collegamento con WhatsApp scade"* — in it/en/es.
+**The owner has to open the app to see it.** Email alerts are the agreed next
+step and are not built; there is no email template in the webapp yet (Resend is
+installed, `sendEmail()` exists, every current caller sends plain text).
+
+**Two things checked and found not to be problems, recorded so nobody
+re-diagnoses them.** (1) `META_SOLUTION_ID` is unset and should stay unset: a
+*partner solution* is a joint arrangement with a Solution Partner/BSP, created
+against their Partner App ID, and Kairo onboards independently — each salon
+attaches its own payment method. It was briefly set to the config id by mistake
+during this session; a wrong value is worse than none, since the webapp omits
+the field when empty. (2) The Login Configuration is **not readable through
+Graph** (`GET /{config_id}` → code 100 subcode 33; `/{app_id}/business_login_configs`
+doesn't exist), so its permissions and token expiry can only be confirmed by
+eye in the console. Both facts are now in `providers.md`.
+
+**Decision (owner): keep the 60-day template for now** — validate the product
+before spending a new configuration on it. Swapping `META_CONFIG_ID` for a
+non-expiring variant, if one exists, is cheapest *now* while zero salons are
+connected: it does not retroactively fix tokens already issued.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **535 passed, 24 skipped, 0 failed**, against a
+baseline of 531/24 measured on this branch with `git stash` rather than taken
+from the previous entry. Four new tests: expiry recorded, NULL left alone for a
+non-expiring token, reconnect swaps the token without taking the sender
+offline, reconnect not counted against the customer cap. Migration 22 applied
+**twice** against a scratch Postgres, exit 0 both times, column and both
+`COMMENT`s confirmed by `\d`. Webapp `npx tsc --noEmit` exits 0. **No live Meta
+call made** — as with every WhatsApp entry here, verified against the API
+contract and unit tests, not a real WABA. The `expires_in` field on the code
+exchange is therefore unconfirmed against a real response: if Meta omits it
+despite the 60-day config, `token_expires_at` stays NULL and no banner ever
+appears. First real onboarding is the test.
+
+---
+
+## 2026-09-03 — This repo is no longer a second AI-basket writer: voice/SMS charge the webapp over HTTP
+
+**Decision:** deleted this repo's own basket-deduction implementation
+(`booking_engine/db/token_basket_queries.py::insert_debit_event` — Python
+`SELECT … FOR UPDATE`, its own granted-first ordering, writing
+`business_app_core.ai_token_log`) and replaced it with an **HTTP charge to the
+webapp's charge-actual endpoint**. The webapp owns `ai_token_basket` and its
+ledger `ai_run_ledger`; there is exactly one implementation of the deduction
+now (the webapp's `deductCredits`), and a voice call or SMS send produces
+exactly one `ai_run_ledger` row written by the webapp — nothing here writes
+`ai_token_log` any more (that table is being backfilled into the ledger and
+dropped by the webapp, plan `webapp/docs/superpowers/plans/2026-09-03-unify-ai-spend-ledger.md`, Task 6 = this change).
+
+**The seam is a new client, `booking_engine/clients/webapp_credits.py`.**
+`record_voice_debit` (voice) and `try_debit_for_message` (SMS) POST a
+**pre-converted credits amount** — `run_type='voice_call'`/`'sms_send'` +
+`run_ref=<call/message id>` + `credits=<the meter's own number>` — and treat a
+`402` (empty basket) as a refusal. Two rules that used to live here moved
+webapp-side, deliberately:
+
+- **Credits, never USD.** The voice/SMS meter already computes credits (voice:
+  seconds × rate + tool cost; SMS: 2× the Twilio price via `send_credits`).
+  The margin rule (`rawToUserCredits`, 10× LLM) lives only in the webapp's
+  `run-credits`; a second conversion on this side is gone.
+- **A refused charge is refused, not force-drained.** `insert_debit_event`
+  used to *drain the bucket to zero* on an in-call overage ("a live call can't
+  be un-answered"). Now the webapp's single locked transaction either collects
+  the real amount or returns `402`, which this side logs loudly and does not
+  invent a number for. This is a behaviour change on the voice overage path,
+  made knowingly — charging an arbitrary amount was more wrong than logging an
+  unbilled call. `try_debit_for_message` never over-drew even before (a
+  message can simply not be sent), and its `ponytail:` check-then-debit race
+  comment is deleted: the webapp's `deductCredits` is one locked transaction,
+  so two concurrent sends can no longer overdraw by one message.
+
+**New env vars** (both must be set or the charge is refused and logged loudly,
+never silently dropped): `WEBAPP_BASE_URL` and `MARKET_INTEL_SECRET` — the
+same shared secret the marketing-engine uses to call this endpoint. Config:
+`booking_engine/config.py`.
+
+**Docs:** `docs/knowledge/database.md` (both `ai_token_log` references repointed
+at the ledger + the HTTP charge), `architecture.md` (SMS flow diagram + the
+"single charge path" paragraph), `providers.md` (SMS env vars + the WhatsApp
+"still debits 2×" sentence).
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **531 passed, 25 skipped, 0 failed**. New
+`tests/booking_engine/test_webapp_credits.py` pins the wire contract (path,
+bearer, `run_type`+`credits` payload, `402`-as-refusal, fails closed when
+unconfigured); `test_token_meter.py` and `test_sms_send.py` updated to mock
+the HTTP client so the suite is hermetic (no QA webapp needed).
+
+**Still open / deploy-order note:** the webapp side of Task 6 (Step 1,
+generalising `charge-actual` to accept any run type + a `credits` bypass) lands
+in the webapp repo in parallel. The webapp must ship before Task 9 drops
+`ai_token_log` — this change is the last thing that ever wrote it.
+
+## 2026-09-02 — Template copy can now be *changed*: body_hash, in-place edits, and a gate that reads the body
+
+**The problem, stated plainly: editing a template body changed nothing for any
+customer.** `push-templates` had learned to edit Kairo's own WABA (2026-09-01),
+but `ensure_templates` skipped every key it already had a row for, and nothing
+compared bodies anywhere downstream. So new copy reached Kairo's WABA and
+stopped there, while every connected salon kept sending the old text with
+`status = 'approved'` and nothing anywhere disagreeing. The only escape was
+`retire-template` — a kill switch with a 30-day name lock — or a new key
+(`promo_v2`), which is why the catalogue had accumulated `_v6`s.
+
+**`whatsapp.templates.body_hash` (migration 21) is the missing fact.** `status`
+only ever meant "a template *with this name* passed review". The hash says which
+version of the copy that WABA actually holds. `ensure_templates` now has three
+outcomes per key — create what's missing, **edit in place** what's stale, leave
+current copy alone — and an edit keeps the name (`POST /{template_id}`), so the
+salon keeps sending the previously approved body while Meta re-reviews the new
+one. Delete-and-recreate would have taken them off the air for a month. Existing
+rows are **not backfilled**: NULL means "unknown version", which is the truth,
+and the first sweep re-pushes each once rather than asserting an alignment
+nobody checked against Meta.
+
+**The gate now compares the body, not just the status — and it has to.** With
+drift-driven edits in the loop, a name-only gate becomes actively dangerous:
+change copy here and deploy before `push-templates` runs, and Kairo's WABA still
+answers APPROVED (for last month's text), which the drift path would read as a
+green light to push unreviewed copy to every customer WABA at once — the exact
+failure the gate exists to prevent. `fetch_template` now returns the BODY
+component and `approved_on_kairo_waba` requires an exact match. Same rule
+applied to `ensure_receipt_template`.
+
+**The sweep's worklist was wrong in two ways, both fixed by the same key.**
+`list_senders_missing_templates(len(CATALOGUE))` counted *rows* in
+`whatsapp.templates` — so `purchase_receipt_1`, deliberately outside the
+catalogue, padded the count, and a shop holding the receipt while missing a real
+template counted as complete and was never revisited. And no count can see a
+body that changed under an unchanged name. Replaced by
+`list_senders_needing_templates(fingerprints)`, matching `key|body_hash` per
+catalogue entry against `cardinality()` of the same array — one query, both
+questions, one parameter.
+
+**`purchase_receipt_1` moved into the templates file as `DOCUMENT_TEMPLATES`**
+(owner request) so its body is under version control and `push-templates`
+reconciles it alongside the catalogue instead of it being the one template
+someone has to remember to hand-build in WhatsApp Manager. Still not a
+`CATALOGUE` entry: it needs a `HEADER`/`DOCUMENT` component,
+`create_document_template`, and `META_RECEIPT_SAMPLE_URL` to create (not to
+edit — an edit resubmits only the body); its name is Meta's preset used
+verbatim, never `{locale}_{key}`. Only the body is compared, because Meta
+returns an opaque `header_handle` rather than the URL we submitted and a header
+comparison would report drift on every run. No sample URL is reported as
+not-pushed rather than submitted to certain rejection — which does mean
+`push-templates` now exits non-zero until `META_RECEIPT_SAMPLE_URL` is set.
+
+**The loop the owner asked for now closes with one manual step:** edit the body
+here → `push-templates` → Meta approves on Kairo's WABA → the hourly tick edits
+every connected salon's copy → per-shop verdicts arrive by webhook → the
+webapp's tiles re-enable themselves, since every one of them already gates on
+`status === 'approved'` from `GET /whatsapp/status`
+(`CampaignsTab`, `BulkCampaignTile`, `AutomationsTile`, `RetentionMessageModal`).
+Nothing new was needed on the webapp side. **Not covered:** the Smart Receipt
+button has no such gate, because `purchase_receipt_1` isn't in the status
+payload's `templates[]` — it fails at send time instead. Left as-is; it was not
+part of this change.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **525 passed, 25 skipped, 0 failed** (up from
+517/25/0: eight new tests — drift→edit, current-body-untouched, gate refuses
+unapproved copy, fingerprints, two document-push tests, two receipt-gate tests).
+`list_senders_needing_templates` was executed against a scratch Postgres with
+real rows rather than assumed: a shop with the current catalogue is excluded, a
+shop with a stale hash and a shop padded by `purchase_receipt_1` are both
+returned, and the query was re-run as a `PREPARE`d statement to confirm the
+single `$1` binds under both `= ANY($1)` and `cardinality($1::text[])`.
+Migration 21 applied twice, exit 0 both times. No Meta call made — as with every
+WhatsApp entry here, the Graph interactions are verified against the API
+contract and unit tests, not a live WABA. **The first `push-templates` after
+this needs `META_RECEIPT_SAMPLE_URL` set, and Meta's edit allowance (~10/month
+per template) is the real budget on how often copy can change.**
+
+## 2026-09-02 — Smart Receipt: the receipt is a PDF document, not a text list
+
+**Decision (owner):** the receipt goes out as Meta's pre-built `purchase_receipt_1`
+template (Utility › Payments › receipt attachment) — a **DOCUMENT header**, not a
+body-with-variables. The webapp renders the PDF (it owns the data, pdf-lib);
+this repo uploads it and sends it as the document header. The `receipt_v1`
+(itemised *text* body, added earlier today) is removed from the catalogue — the
+owner explicitly wanted the professional PDF, not a list joined by hand.
+
+**New send path, deliberately not the campaign queue.** `POST /whatsapp/receipts`
+is synchronous and immediate — the webapp calls it right after a paid ticket
+closes — where the campaign path is queue + drip. It records into
+`whatsapp.outbound_messages` with `campaign_key = NULL`, so the campaign
+idempotency index does not apply and a receipt can legally be re-sent.
+
+**The template is NOT in `CATALOGUE`.** It is a document header, referenced
+verbatim as `purchase_receipt_1` (not language-prefixed like `it_<key>`), with its
+own `ensure_receipt_template` gate — same "approved on Kairo's WABA first" rule
+as the catalogue, plus a `META_RECEIPT_SAMPLE_URL` (the sample PDF Meta reviews
+against a document header). Fails closed when the gate or the sample URL is
+unconfigured, so an unvetted template never reaches a customer WABA.
+
+**Operator step:** create `purchase_receipt_1` on Kairo's WABA (WhatsApp Manager,
+receipt-attachment preset) and set `META_RECEIPT_SAMPLE_URL` before the template
+propagates to any customer WABA.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **517 passed, 25 skipped, 0 failed** (up from
+513/25/0: four new `test_whatsapp_receipt.py` tests). No Meta call made.
+
+## 2026-09-02 — WhatsApp marketing templates re-voiced (stylist-signed, observation-led), and a UTILITY receipt template
+
+**Decision (owner, copy-driven):** the three LLM marketing templates read "asettici"
+(impersonal, seller-voiced). Re-voiced to be warm and human: **signed by the
+stylist of the customer's last visit** — `sono {{2}} di {{3}}`, stylist + shop —
+and tuned to that visit rather than pitching. promo_v1's generated slot is now a
+gentle **observation** about the last visit (check-in, never a price, never
+urgency), not an offer; winback_v1 and rebook_v1 keep their proposal slot. All
+three close with the same soft fixed CTA, **«Se ti va, scrivimi pure.»** — a
+hard-sell imperative reads worse and is harder to get Meta to approve. `rebook_v1`
+never mentions money (owner rule; pinned by a test). Keys kept, bodies rewritten
+**in place**, because no marketing body had ever been approved on any WABA
+(verified with the owner) — the one case where an edit is not a new key.
+
+**Variable slots moved** (the meanings are the contract the webapp/engine fill):
+promo_v1 went 3→4 vars (`{{1}}` name, `{{2}}` **stylist**, `{{3}}` shop,
+`{{4}}` observation); winback_v1 and rebook_v1 went 4→5 (`{{4}}` gap/cadence,
+`{{5}}` proposal). The stylist is the **primary staff of the customer's last
+visit** (owner: "first if several"; per-service staff is overkill for this).
+A new UTILITY `receipt_v1` (itemised visit + total) was added for a not-yet-built
+"send me the receipt" feature — inert until a sender references it, but it enters
+the push list like any catalogue entry.
+
+**Structural constraint that shaped the final copy:** `tests/booking_engine/
+test_template_shape.py` encodes Meta's submission rules as tests (≥3 words of
+fixed copy per variable + 1; variables separated by real words, punctuation
+does not count). The first drafts were too variable-dense and failed
+INVALID_FORMAT-style: promo's `{{3}}. {{4}}` gap had no word in it, and short
+frames fell under the fixed-word ratio. Resolved with natural connective copy
+("A proposito della tua ultima visita: ", "Pensavo a te: ") — the tests caught
+what Meta would have rejected, not what reads awkwardly.
+
+**Webapp + marketing-engine alignment is NOT done — this is repo 1 of 3.** The
+variable-slot shift means the webapp must resolve and supply the last-visit
+stylist per recipient (batch), and the marketing-engine prompt must write
+observations (promo) grounded on last-visit facts. Tracking and cost also need
+work: the three generation flows debit the AI basket with no audit entry, and a
+bulk campaign runs the whole audience in one synchronous engine call before a
+single post-hoc deduction — the plan (working doc
+`docs/2026-09-02-whatsapp-template-engagement-design.md`, deleted when shipped)
+moves them onto `ai_run_ledger` reserve/charge and batches bulk generation so
+nothing runs on an empty basket.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **513 passed, 25 skipped, 0 failed** (up from
+511/25/0: the two re-voiced-marketing body tests replacing nothing, net +2 after
+the shape tests that had been failing on the first draft were satisfied). No Meta
+call made — consistent with the standing rule that template copy is verified
+against the API contract and tests, not a live WABA. Operator step after this
+merges (not automatable here): `kairo_waba.py push-templates` + Meta approval on
+Kairo's WABA, then the hourly sweep propagates the new bodies and `receipt_v1`
+to every customer WABA.
+
+## 2026-08-31 — The propagation gate had no retry, and `push-templates` used the wrong name
+
+**Two bugs on the same path, either of which alone meant no customer WABA ever
+received a template.** Found while wiring the webapp's Connetti WhatsApp button
+end to end.
+
+**1. `kairo_waba.py push-templates` submitted the bare catalogue key.** It
+posted `promo_v1`; the gate (`ensure_templates`) reads Kairo's WABA back looking
+for `template_name(key)` — `kairo_promo_v1`. The two never agreed, so
+`fetch_template` returned `None` for everything and every key landed in
+`not_ready` forever. The gate was working exactly as designed and failing
+closed on a question it was asking about a name that didn't exist. Fixed to
+push `template_name(key)`; pinned by an AST test, because this is a
+cross-file naming agreement with nothing else holding it together.
+
+**2. Nothing ever re-ran the gate for a live shop.** `ensure_templates` ran at
+onboarding, in the sweep for `list_verifying_senders()` (`verifying` /
+`pending_signup` only), and behind a webapp button shown *only* for a
+`rejected` template. So the ordinary sequence — salon onboards Monday while
+Kairo's copy is pending, Meta approves ours Tuesday — had no step that went
+back for that salon. It could never send, and the approval that unblocked it
+arrived on Kairo's WABA with no per-shop event attached, so nothing anywhere
+would have said why.
+
+Fixed by adding `list_senders_missing_templates()` to the sweep. Kairo's
+verdict is now computed **once per run** (`approved_on_kairo_waba`) rather than
+once per shop — same question, same answer for everyone, and it was previously
+N shops × M keys of identical Graph calls every hour. An empty gate
+(unconfigured, or a Graph error) skips the stage rather than pushing on a
+guess, so "fails closed" survives the change.
+
+**Also added: `retire-template`, deliberately outside the tick.** Deleting a
+template from Kairo's WABA now fans the delete out to every customer WABA and
+drops the rows. The tick *could* infer "gone from Kairo's WABA → delete
+downstream", and that was rejected: one transient Graph read error would then
+wipe the template from every customer at once. A destructive fan-out gets an
+explicit operator behind it. Kairo's copy is deleted **first** — the reverse
+leaves the gate answering "approved" if a later step fails, and the next tick
+re-pushes everything just deleted; ours-first closes the gate so a partial run
+stops dead and re-running finishes it.
+
+Note this makes delete a **kill switch, not an editing workflow**: Meta blocks
+reusing a deleted name for 30 days, so changing copy means `promo_v2`, not
+delete-and-recreate.
+
+**Docs:** `docs/knowledge/api/whatsapp.md` (templates/ensure, new "Retiring a
+template", the hourly tick).
+
+## 2026-08-30 — WhatsApp is BYO WABA only; the `source='new'` provisioning path is removed
+
+**Decision:** dropped the second onboarding path entirely — owner's call, "we
+will stick with the solely customer BYO WABA." Every sender is now
+`coexistence`: the salon connects a WABA it already has, full stop. There is
+no longer a path where Kairo provisions a brand-new WABA on a number the
+salon doesn't yet have on WhatsApp.
+
+**What came out, together:** `whatsapp_onboarding.py::SOURCES` and its
+validation (source is no longer a caller-supplied input at all — `start()`
+hardcodes `"coexistence"`); the `if row["source"] == "new": register…` branch
+and the `pin` parameter threading through `complete()` and `CompleteRequest`;
+`meta.register_phone_number()` in the Graph client, now fully dead (no
+remaining caller — `scripts/kairo_waba.py`'s own `register` command talks to
+Graph directly for Kairo's *own* number and was never this function).
+Migration `18_whatsapp_coexistence_only.sql` narrows
+`senders_source_check` from `IN ('coexistence','new')` to `= 'coexistence'`,
+following migration 15's own drop-constraint/backfill/re-add shape — safe
+because, per the 2026-08-24 entry, no live Meta call has ever gone through
+this path, so the backfill `UPDATE` has nothing real to touch.
+
+**Why removing it is safe to do outright, not just deprecate:** `source='new'`
+was flagged as a rare, unexercised path from the day it shipped (2026-08-24:
+*"one template per shop and a rare `source='new'` path"*) and never had a
+UI — the webapp's `WhatsAppPanel.tsx` only ever offered a disabled "Bring your
+own number (coming soon)" teaser button for it, never a working control. There
+was nothing live depending on it in either repo.
+
+**Kept, deliberately:** `whatsapp.senders.source` the column, and
+`GET /whatsapp/status`'s `source` field — even at one legal value, it is
+still meaningful provenance on the row, and dropping the column outright would
+be schema churn for no behavioural gain. The `list_verifying_senders`
+reconciler also survives untouched: it was never really about `source='new'`
+availability polling (nothing sets `status='verifying'` anywhere in this
+codebase, on either path) — it is what catches `complete()` crashing after
+persisting the token/waba/phone_number_id but before flipping to `online`,
+which can happen on a coexistence onboarding too.
+
+**Webapp (own repo, own commit): the disabled BYON teaser came out too.**
+`WhatsAppPanel.tsx`'s "Bring your own number (coming soon)" button never
+called the removed path — it was inert, disabled from the start — but leaving
+dead-end UI for a permanently removed capability is worse than no button, so
+it's deleted along with its `byon_label`/`byon_teaser` i18n keys (all three
+locales) and the now-meaningless `source`/`pin` plumbing in the two onboarding
+proxy routes and `lib/whatsapp/client.ts` (Pydantic ignores unknown fields by
+default, so these weren't breaking anything — just sending values the
+`source`/`pin` upstream no longer looks at).
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **470 passed, 14 skipped, 0 failed** (down
+from 472/14/0: two tests deleted outright —
+`test_complete_registers_the_number_only_for_a_brand_new_waba` and
+`test_complete_rejects_an_unknown_source`, both asserting behaviour that no
+longer exists — and `test_complete_subscribes_to_webhooks_before_anything_else`
+was rewritten to assert subscribe-before-read-the-number instead of
+subscribe-before-register, since register no longer exists to order against).
+Migration 18 not applied against a live/scratch Postgres in this pass — no
+live Meta call has been made on this feature at all yet, per every WhatsApp
+entry above, so there's no real `source='new'` row anywhere to backfill; the
+`UPDATE … WHERE source <> 'coexistence'` is exercised only by migration 15's
+own test coverage of the identical pattern, not re-verified here.
+
+---
+
+## 2026-08-30 — Template propagation gated on Kairo's own WABA approving it first
+
+**Decision:** `ensure_templates` (`services/messaging/whatsapp_onboarding.py`)
+no longer pushes a catalogue entry into a salon's WABA unconditionally. It now
+checks, live via Graph, that the same-named template is `approved` on **Kairo's
+own WABA** first — the one `scripts/kairo_waba.py push-templates` submits to
+by hand, for App Review evidence. Two new settings,
+`META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN`; unset means the gate fails closed —
+every catalogue entry comes back in a new `not_ready` list, nothing is created
+on any customer WABA — rather than falling back to the old unchecked behavior.
+
+**Why:** a template rejection is Meta's judgment on the *content* — identical
+whichever WABA it's submitted to. Pushing an unvetted catalogue entry straight
+into every salon's WABA meant a bad template got rejected once per salon
+instead of once, each rejection also costing that WABA's quality rating. Owner
+wants the actual workflow to be: add/edit a template by hand on Kairo's own
+WABA, watch it get approved there, and only then let `ensure_templates`
+(already running at onboarding and hourly via `sweep()`) submit it — for
+approval, independently — to every customer's WABA. That per-customer
+submission was already the entire mechanism; the only change is refusing to
+attempt it before Kairo's own copy is a known-good template.
+
+**Not built: syncing template *content* from Kairo's WABA.** The gate only
+reads a status (`approved`/not), not the template body — `whatsapp_templates.py`'s
+`CATALOGUE` stays the one place body text and variable positions
+(`{{1}}`=name, `{{2}}`=salon, `{{3}}`=offer) are defined, since
+`whatsapp_send.py`/the webapp need to know what each variable *means*, not
+just what text Meta currently has on file. Kairo's WABA is the approval gate,
+not a content source.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — 472 passed, 14 skipped, 0 failed (up from
+471/14/0 the same day, from the two new gate tests). No live Meta call made —
+same as every WhatsApp entry below, this is unverified against a real Kairo
+WABA, which doesn't exist yet (see the standing "Still needed" list on the
+2026-08-24 entry).
+
+---
+
+## 2026-08-29 — Graph API pinned v25.0 → v26.0
+
+**Decision:** bump the pinned `GRAPH` base URL from `v25.0` to `v26.0` in both
+callers (`booking_engine/clients/meta_whatsapp.py`, `scripts/kairo_waba.py`),
+plus the `docs/knowledge/providers.md` note that says "all v25.0, pinned".
+
+**Why now:** owner-requested. The webhook verification mechanism (verify token
+on `GET`, HMAC `X-Hub-Signature-256` with the app secret on `POST`) is
+version-independent — nothing there changes with the Graph version, so this
+touches only the REST base URL, not the tokens. None of the endpoints in use
+(`oauth/access_token`, `subscribed_apps`, `register`, `message_templates`,
+`messages`) showed a breaking change in v26.0 when checked; they are the
+stable core of the Cloud API and have carried shape across many versions.
+
+**Unverified, flagged:** Meta's own changelog pages are JS-rendered and not
+readable via plain fetch, and no secondary source turned up a v26.0
+breaking-change list for these endpoints — so this is a pin bump on the
+"no change found" evidence, not a verified upgrade. As before (2026-08-24
+entry), **no live Meta call has been made**, so the bump cannot be exercised
+against a real WABA from this repo; the first real onboarding/send is the
+effective test.
+
+---
+
+## 2026-08-25 — Per-customer history: campaign_key is the market_intel campaign id
+
+**Decision:** the WhatsApp campaigns feature (webapp design
+`2026-08-24-whatsapp-campaigns-design.md`) links what was *sent* here to what
+was *decided* in marketing-engine by the text `campaign_key`. When the webapp
+enqueues an AI-built campaign it passes `campaign_key = market_intel.campaigns.id`,
+so `whatsapp.outbound_messages` joins back to `market_intel.campaigns` on
+`id::text = campaign_key` for the goal. Hand-made keys from the older
+Touchpoint tile (`bulk_...`) have no `market_intel` row and come back with a
+null goal — accepted: the per-customer tab is about AI campaigns.
+
+**New read:** `GET /whatsapp/messages/{shop_id}?customer_id=` — the first
+reader of `outbound_messages` (previously flagged as "no reader" in
+providers.md). It returns every message sent to a person plus the campaigns
+they were assigned to but never received (the holdout arm, from
+`market_intel.campaign_recipients`), and doubles as the GDPR subject-access
+artifact. Reads `market_intel` across schemas — the same shared-DB pattern as
+this repo's existing `business_app_core` reads, and `market_intel` already
+reads this repo's `whatsapp.outbound_messages` for the audience cooldown, so
+the two schemas are already mutually dependent in the read direction.
+
+**Second signal needed, second change:** campaign measurement's "replies within
+72h" had nothing to read — the inbound webhook logged and discarded replies.
+Migration `17_whatsapp_inbound.sql` adds `whatsapp.inbound_messages` and the
+webhook persists each reply there. A reply is matched back to the message it
+answers by phone (`from_phone` == the sent message's `to_phone`), no sender
+identity required. Still nothing *answers* the reply — the 24h session window
+it opens stays a future phase.
+
+**Verification:** full non-`live_db` suite green (469 passed, 15 skipped).
+
+---
+
+## 2026-08-24 — Meta's limits become a floor nothing may cross; our counters sit on top
+
+**Follow-up to the migration entry below, same day.** That change moved
+WhatsApp onto Meta but left our commercial numbers and Meta's platform
+ceilings as unrelated things that happened to be far apart. This makes the
+relationship structural.
+
+**Decision:** `services/messaging/meta_limits.py` is the single home of every
+Meta-imposed ceiling, and every commercial knob is composed with it by
+`min()`, never independently.
+
+```
+Meta's limits    — platform facts. Never exceeded, by construction.
+    ↓  min()
+Kairo's limits   — commercial knobs: daily_cap, the plan allowance.
+    ↓
+the queue
+```
+
+**Three real ways we could have exceeded a Meta limit, all closed:**
+
+1. **`daily_cap` had no relationship to the sender's actual tier.** It was a
+   hand-set column defaulting to 50, and *nothing read `messaging_limit` at
+   all* — the field was stored and never consulted. Setting it to 5000 on a
+   Tier-250 sender would have sent 5000. `effective_daily_cap()` is now
+   `min(Meta's tier, ours)`, and `GET /whatsapp/status` returns that binding
+   number as `daily_cap` with the raw column demoted to
+   `configured_daily_cap`. A commercial decision can only ever narrow.
+2. **`sent_today` counted the calendar day; Meta counts a rolling 24 hours.**
+   A sender at its ceiling at 23:00 was handed a full fresh allowance ninety
+   minutes later — nearly two tiers' worth inside one of Meta's windows. New
+   `sent_last_24h()` is the Meta check. `sent_today()` survives *only* as the
+   owner-facing counter, where "quanti ne ho mandati oggi" is what the number
+   honestly means, and its docstring says never to use it for a ceiling.
+3. **Migration 15 stored the wrong field in `messaging_limit`.** It was
+   populated from the phone number's `throughput.level` — messages per
+   *second* — while the name and every downstream reader mean conversations
+   per 24h. Two different ceilings with different consequences, silently
+   swapped. Migration 16 adds `throughput_level` for the real thing and nulls
+   any pre-existing `messaging_limit` that isn't a `TIER_*` value, so the
+   fallback path fails closed to 250 until the next sweep reads the truth.
+
+**Everything fails closed, and the tests are about the direction of a
+mistake.** An unrecognised tier is the unverified 250; an unknown throughput
+is the slowest rate that exists. If Meta invents `TIER_5K` we under-send until
+someone adds the row — recoverable. Over-sending costs quality rating, tier,
+and eventually the sender.
+
+**The per-recipient cooldown is the by-design half of `131049`.** The
+migration entry below handled that error *reactively* (requeue +24h). But
+reacting costs the send and a quality-rating hit, and Meta never publishes the
+per-user threshold, so reacting is the only way to find it. The cooldown
+(`WHATSAPP_RECIPIENT_COOLDOWN_HOURS`, default 168) means we simply stay under
+it: one batched query at enqueue, re-checked at send for the same reason
+consent is re-read — a row on a multi-day drip can be overtaken by another
+campaign. It counts `sent_at`, so a message that never left never starts a
+cooldown, which keeps the 131049 retry path coherent with it. New
+`suppressed_reason` values: `recently_contacted`,
+`marketing_blocked_destination`.
+
+**No per-number pacer, deliberately — the invariant is enforced once
+instead.** `MAX_SENDS_PER_MINUTE` is `COEXISTENCE_MPS × 60` = 1200. Below
+that, no single number can be over-driven however the claimed batch happens to
+fall across shops, because 20 mps (coexistence) is the slowest per-number
+throughput Meta grants. So `send_due` *clamps* `WHATSAPP_SENDS_PER_MINUTE`
+rather than trusting it, and a second per-number mechanism would be dead
+machinery at any sane configuration. A test asserts the clamp on the `Pacer`
+the loop actually constructs, so raising the env var to something absurd
+cannot silently remove the ceiling.
+
+**Two more limits that would have failed opaquely:** marketing to `+1`
+recipients (Meta paused it entirely on 2025-04-01) is now refused at enqueue
+instead of queued as a certain provider failure; and the Tech Provider
+onboarding cap — **10 new customers per rolling 7 days** until Access
+Verification, 200 after (`META_ACCESS_VERIFIED`) — is checked in `complete()`
+*before* the popup's single-use code is spent, so the 11th salon gets a named
+error and a "wait" instead of a broken flow they cannot retry.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **471 passed, 14 skipped, 0 failed**, up from
+441 earlier the same day. Migrations 14→16 applied **twice** in sequence
+against a scratch Postgres, both passes exit 0. Migration 16's corrective
+`UPDATE` was checked in both directions against real rows rather than assumed:
+a stale `messaging_limit = 'STANDARD'` is cleared to NULL, and a legitimate
+`'TIER_1K'` survives a re-run untouched — the `NOT LIKE 'TIER\\_%'` guard is
+what makes it safe to re-apply. `sent_last_24h`, the batched
+`recently_contacted` lookup and `onboarded_last_7_days` were each executed
+against that DB with real rows, and both new partial indexes confirmed
+created.
+
+**Flagged, not actioned:** template *creation* rate (100/hour/WABA) and the
+number registration cap (10 per number per 72h, error 133016) are not
+enforced — one template per shop and a rare `source='new'` path make them
+unreachable today, but they belong in `meta_limits.py` the day either
+assumption stops holding.
+
+---
+
+## 2026-08-24 — WhatsApp leaves Twilio: Meta Cloud API direct, coexistence, and the salon pays Meta
+
+**This supersedes the 2026-08-21 entry's architecture entirely.** That entry
+recorded "one WABA per salon, in its own Twilio subaccount" as *forced by
+external rules, not chosen*. One of those two rules was real and remains
+true (marketing = pre-approved template only). The other — "one WABA per
+Twilio account, therefore a subaccount per salon" — turned out to be the
+wrong problem to solve, because **Twilio cannot hold a salon's existing WABA
+at all**, at any account granularity.
+
+**Decision:** WhatsApp moves off Twilio onto **Meta Cloud API direct**, with
+Kairo as a Meta **Tech Provider**. New `clients/meta_whatsapp.py`,
+`services/meta_signature.py`, `services/messaging/pacer.py`, migration
+`15_whatsapp_meta.sql`; `clients/twilio_whatsapp.py` deleted. Twilio keeps
+voice and SMS, unchanged.
+
+**Three facts killed the Twilio model, and all three are documented by
+Twilio itself.** (1) Registration requires Twilio to attach the WABA to
+*Twilio's* Meta credit line, and Meta only permits a payment method to be
+revoked, never removed — so a WABA created anywhere else fails with error
+`63103`. Twilio's Self Sign-up doc states the rule outright: *"Don't select
+a WABA that's been created outside of Twilio."* (2) Twilio's migration path
+for an existing number warns *"You won't be able to continue using WhatsApp
+or WhatsApp Business App with the same phone number."* Our customer is a
+hairdresser who runs their business from that app; asking them to delete it
+is not friction, it is a refusal. (3) Templates cannot be created in a WABA
+Twilio does not own — and injecting Kairo's flow templates into the salon's
+WABA *is* the feature.
+
+**Coexistence is what makes the whole thing sellable, and only Meta has it.**
+Meta's Embedded Signup (May 2025) connects a number already live on the
+WhatsApp Business App to Cloud API and keeps both active: the salon keeps
+chatting from their phone, we send templates through the API. One flag —
+`featureType: "whatsapp_business_app_onboarding"` — no allowlist request, but
+it does require Advanced access to `whatsapp_business_management`. 360dialog
+was evaluated as the "delegate it to a BSP" option and rejected on price:
+~€49/number/month is roughly 3× the cost of the messages themselves at 50/day.
+
+**Onboarding collapsed from three round-trips to one, and the entire OTP
+apparatus is deleted.** Meta's popup performs verification itself, so
+`/whatsapp/webhook/otp`, the temporary inbound-SMS webhook binding,
+`handle_otp_sms` and `submit_code` are all gone — as is the `source='kairo'`
+path that reused the Estonian voice number. That path only ever existed to
+dodge a second number purchase under Twilio's model; with coexistence the
+salon's own number is the entire point. `source` is now
+`('coexistence','new')`. `start()` also stops creating anything
+provider-side: the old version created a Twilio subaccount before the salon
+had done anything, and leaked one on every abandoned onboarding.
+
+**Ordering inside `complete()` is load-bearing, not stylistic.** Exchange the
+code and *persist the token before using it* (a crash after that point leaves
+a resumable row; losing the token leaves a WABA we can neither reach nor
+unsubscribe from). Then `subscribed_apps` **before anything else**, because
+forgetting it fails in the worst possible direction: every send still
+succeeds while we receive no delivery status, no template verdicts and no
+opt-outs. Then register the number — **skipped for coexistence**, where it is
+already registered and Meta's guidance is explicitly not to call it. Then
+read the number back from Meta rather than trusting what the popup told the
+browser. A test asserts the subscribe-before-register order rather than
+leaving it to comment discipline.
+
+**Billing changes materially, and this is the consequential decision here.**
+A Tech Provider, unlike a Solution Partner, has **no credit line to share**:
+each salon attaches its own card to its own WABA and Meta bills it directly.
+Continuing to debit `send_credits()` on top would charge the salon twice for
+one message, so `try_debit_for_message` is removed from the WhatsApp path and
+`ai_token_log.whatsapp_message_id` goes back to being unwritten — the column
+the 2026-08-21 entry noted "nothing has written until now" is unwritten
+again. `whatsapp_pricing.py` loses Twilio's flat fee, which incidentally
+restores `docs/messaging-design.md` §5.1's original "$0 for a free-form
+message": the 2026-08-22 entry's correction was right for Twilio and is now
+moot. **The SMS path is untouched and still debits 2×** — there Kairo really
+does pay Twilio. What survives is the **plan allowance**: it is a product
+limit, not cost recovery, and the 2026-08-22 reasoning for it holds exactly.
+
+**`price_usd` is now an estimate that is never corrected.** Meta reports no
+amount on send and none on the status webhook, so unlike the SMS path there
+is no later reconciliation to a real price. The column's docstring and a
+`COMMENT ON COLUMN` both say so, because a number called `price_usd` that
+isn't a price is exactly the kind of thing someone builds a report on.
+
+**`131049` and `131050` look alike and must not behave alike — the Twilio
+version conflated them.** `63033`/`63050` were one "stop asking" bucket.
+Meta's `131050` is the real opt-out (the recipient used the native "Stop
+promotions" button) and is permanent. `131049` is the per-user, **cross-brand**
+marketing cap — the recipient has had enough marketing today, from *anyone*,
+possibly having never heard from this salon. Treating it as an opt-out
+permanently silences a customer who did nothing; treating it as an ordinary
+retry hammers Meta. It gets a third outcome: requeued 24 hours out.
+
+**Webhooks are one URL for every tenant, signed over the raw body.** Meta
+posts all customers' traffic to a single app-level endpoint and identifies
+the shop only by `entry[].id`, the WABA id — hence a unique index on it and
+`get_sender_by_waba` as the sole route from payload to shop. Signature is
+`X-Hub-Signature-256`, HMAC-SHA256 with the **app secret**, over the bytes as
+received: re-serialising the parsed JSON changes whitespace and key order and
+every genuine request starts failing. `senders.subaccount_auth_token` is
+therefore dropped. The handler always answers 200 on a genuine request —
+Meta retries otherwise and disables a webhook that keeps failing, which would
+silently cost every delivery status and every opt-out.
+
+**Template verdicts now arrive by webhook, and the poll survives anyway.**
+`message_template_status_update` lands within minutes instead of on the next
+hourly tick. The tick's poll is deliberately kept as a **reconciler**, not
+deleted: a missed webhook leaves a template `pending` forever, which blocks
+every send for that shop and looks like nothing at all. Two mechanisms for
+one fact is normally the wrong shape; here the failure mode of the fast one
+is silent and unbounded. Status updates key on `(shop_id, name)` and never on
+name alone — every salon's copy of the catalogue carries the *same* name
+(`kairo_promo_v1`), since Meta scopes names per-WABA, so a global update
+would rule on every shop at once from one shop's webhook.
+
+**The scheduler: two different problems, two different fixes.** (1) `spread()`
+only ever laid messages across a single day and `enqueue_campaign` *rejected*
+anything over `daily_cap` — which makes bulk impossible. It now chunks by the
+cap and rolls onto following days, and the `over_daily_cap` rejection is
+deleted, because spreading **is** the correct handling. Piling 400 recipients
+onto today would just hand `send_due` 350 rows to defer by an hour,
+repeatedly, until the queue is unreadable and the owner cannot tell when
+anyone gets contacted. The monthly plan allowance remains the only hard
+ceiling. (2) One tick claims up to 200 rows across every tenant and fired
+them as fast as the loop ran. Meta's per-number ceiling (20/s, fixed, under
+coexistence) is far above anything one salon does; the limit that can
+actually be tripped is the **Graph API's app-level** one, shared by all
+tenants. `send_due` now paces every send through a process-wide `Pacer` at
+`WHATSAPP_SENDS_PER_MINUTE` (default 60). Dispatch stays **serial** on
+purpose: the loop mutates per-shop remaining-cap counters as it goes, and
+making it concurrent would turn those into locks for throughput nobody needs.
+
+**Webapp (own repo, own commits): a bulk tile in Marketing → Touchpoint
+Clienti.** The existing tile is per-customer win-back — pick one at-risk
+name, generate bespoke copy, send. Bulk is a different verb, so it is a
+different tile: pick an audience (a rischio / VIP / tutti i consenzienti),
+write one offer line, watch it drip. New `BulkCampaignTile.tsx` plus
+`/api/v1/hair-salon/whatsapp/{campaign,status}` proxies. **The audience is
+filtered client-side from the list the tab already loaded**, and the engine
+gained no audience query: the webapp's `payments/analytics` →
+`retention_risk` is already the definition of "a rischio" the owner is
+looking at, and a second one in this repo's SQL would drift from it. The
+recipient cap on `POST /whatsapp/campaigns` went 500 → 2000. The tile also
+renders the assembled template around the owner's `{{3}}`, so "why isn't my
+text the whole message?" doesn't arrive as a support question.
+
+**Flagged, not actioned:**
+- **Coexistence credit lines cannot be migrated to another provider.** Meta
+  requires a new WABA to move. That is real lock-in of the salon onto Kairo
+  — good commercially, and it should be said during the sale rather than
+  discovered later.
+- **`senders.access_token` is stored in plaintext**, like
+  `subaccount_auth_token` was. It is now a strictly bigger secret: full
+  authority over one salon's WhatsApp, with no shared parent credential
+  behind it. Encryption at rest wasn't in scope and isn't done.
+- **Inbound replies are still logged and discarded**, and contact/chat-history
+  sync (`smb_app_data`) is not built — one-shot and irreversible per
+  onboarding, with nowhere to put the data yet.
+- **Migration 15 drops columns rather than backfilling**, which is only safe
+  because nothing has ever been sent through migration 14's tables.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **440 passed, 14 skipped, 0 failed**, up from
+the 404/14/0 baseline recorded on 2026-08-22. Migrations 14+15 were applied
+**twice** in sequence against a scratch Postgres (stub `business_app_core`
+tables, same pattern as 12–15 before) — both passes exited 0, and the second
+pass proved the `DROP CONSTRAINT IF EXISTS` + re-add of `senders_source_check`
+is genuinely idempotent rather than accidentally working once. The generated
+constraint name was confirmed against the live `\\d` output, not assumed. The
+non-trivial statements were then run against that scratch DB with real rows:
+`enqueue`'s `ON CONFLICT … WHERE` correctly inferred the partial unique index
+and the second identical insert returned zero rows; `claim_due`'s CTE +
+`FOR UPDATE OF … SKIP LOCKED` claimed and flipped a row, returning the new
+`template_name`/`template_language`; `monthly_quota`'s inner join returned
+400; `campaign_progress` counted correctly; and `set_template_status` was
+confirmed to scope by `shop_id`. Webapp: `npx tsc --noEmit` exits 0. **No
+live Meta call has been made** — every Graph interaction here is verified
+against the API contract and unit tests, not against a real WABA.
+
+**Still needed before this can be switched on** (see the Providers
+page's WhatsApp section for the full clickpath): Meta app + Business
+Verification for Kairo, Kairo's own WABA (`scripts/kairo_waba.py` drives it),
+App Review for Advanced access to `whatsapp_business_management` +
+`whatsapp_business_messaging`, Tech Provider onboarding for the Solution ID,
+Access Verification to raise the onboarding limit from 10 to 200 customers per
+rolling 7 days, then `META_APP_SECRET`/`META_SOLUTION_ID`/`META_VERIFY_TOKEN`
+as Fly secrets and Meta's Embedded Signup JS (**v4** — v2 is deprecated
+2026-10-15) in the webapp.
+
+---
+
+## 2026-08-22 — WhatsApp sends are capped by the subscription plan, and the price list has one home
+
+**Decision:** how many WhatsApp messages a salon may send per month is a
+property of its **plan**, read from
+`business_app_core.subscription_plans.whatsapp_monthly_messages` (webapp
+migration 54). Enforced twice — at `enqueue_campaign` and again in `send_due`
+— and surfaced in the webapp's Inbox → Configurazione counter bar.
+
+**Why the plan row and not a constant, a config var, or a column on `shops`.**
+An allowance is a commercial term, so it changes for commercial reasons and at
+commercial speed. On the plan row, changing one is
+`UPDATE … SET whatsapp_monthly_messages = 400 WHERE tier = 'base'` — no deploy,
+no per-shop backfill, and every shop on that tier moves together, which is what
+"the Base plan includes 400 messages" actually means. A per-shop column would
+have made the same change a migration over the whole customer table, and would
+have quietly invited per-shop haggling as the default.
+
+**Fails closed at zero.** `monthly_quota()` inner-joins `shops` to
+`subscription_plans`; a shop with no plan matches no row and gets 0, sending
+nothing. That is the §5.3 rule ("provisioning requires an active paid plan")
+finally applied to *traffic* as well as to provisioning — before this, the only
+ceiling on sending was `senders.daily_cap`, which is a Meta tier limit and has
+nothing to do with what the salon paid for.
+
+**Over quota suppresses; over the daily cap still defers.** They look alike and
+must not behave alike. The daily cap clears at midnight, so a deferred row is a
+promise the next tick keeps. A plan allowance clears on the 1st, so deferring
+would leave rows re-scheduling themselves hourly for up to a month — a queue
+nobody can read, and an owner who never learns why nothing went out. Suppressed
+with `suppressed_reason = 'over_monthly_quota'` is a fact on a row.
+
+**The counter counts `sent_at`, not rows.** A queued row that never left (no
+consent, cancelled, out of credit) must not consume an allowance the salon
+paid for.
+
+**Correction to `docs/messaging-design.md` §5.1:** it priced a free-form
+message inside the 24h session window at **$0 total**. Meta's share is zero;
+Twilio's flat per-outbound-message platform fee is not, and applies to every
+category (`channels-messaging-outbound` in Twilio's usage categories, and
+"Every WhatsApp message sent through Twilio incurs a Twilio per-message fee"
+in their WhatsApp FAQ). New `services/messaging/whatsapp_pricing.py` holds the
+one table — Meta's per-category Italian rate plus that fee — and everything
+else derives from it: the balance pre-check, the `MARKETING_USD` constant that
+used to be a hand-copied `0.0741` literal, and the `pricing` block that
+`GET /whatsapp/status/{shop_id}` now returns for the webapp to render. A price
+the owner is quoted and a price we pre-authorise cannot drift apart if there is
+only one of them.
+
+**Still an estimate, deliberately.** The table prices a send before it happens;
+the status callback writes the real `price_usd` after. The quoted number exists
+to inform a decision, not to be the invoice.
+
+---
+
+## 2026-08-21 — WhatsApp marketing: one WABA per salon, in its own Twilio subaccount; templates, not free-form copy
+
+**Decision:** personalised marketing moves from SMS to WhatsApp, one sender
+per salon, ~50 messages/day dripped across opening hours. New `whatsapp`
+schema (`booking_engine/db/sql/14_whatsapp_schema.sql`), new client
+`clients/twilio_whatsapp.py`, three new services under
+`services/messaging/whatsapp_{onboarding,send,templates}.py`, new routes
+`booking_engine/api/routes/whatsapp.py`, and two new stages on the hourly
+`POST /messaging/tick`.
+
+**The architecture is forced by two external rules, not chosen.** (1) A
+business-initiated WhatsApp marketing message can only be a template Meta
+approved in advance — there is no free-form path outside Meta's 24h
+customer-initiated session window. (2) Twilio allows exactly **one WABA per
+account** ("You can't use multiple WABAs in one Twilio account"), so a
+salon's WhatsApp Business Account cannot sit in Kairo's account alongside
+every other salon's. Hence: Kairo is a Meta **Tech Provider**, each salon
+gets a Twilio **subaccount** holding its own WABA, its own sender, and its
+own approved templates. This is the same audited "do not reuse your own
+business identity for a customer" rule the 2026-08-14 regulatory-bundle
+entry already established, arriving from Meta's side this time.
+
+**This directly contradicts the 2026-08-12 entry's reasoning for choosing
+SMS, and that entry stands — the conclusion changed, the fact didn't.** That
+entry said WhatsApp "forbids free-form business-initiated messages outside a
+24h customer-initiated session — only pre-approved templates, which can't
+carry the per-customer LLM-generated copy this feature exists to send." The
+constraint is exactly as described. What changed is the answer to it:
+personalisation now lives *inside template variables* — a fixed, Meta-approved
+skeleton plus a per-customer offer line the LLM writes (`{{3}}` in
+`promo_v1`). That is a genuine downgrade in expressive range from SMS, and
+it is recorded as one rather than dressed up: the alternative, a template
+whose body is essentially one big `{{1}}`, is the single most common cause of
+Meta rejecting a template outright, and a rejected template sends nothing at
+all. The webapp's existing win-back copy generator now writes a variable,
+not a message.
+
+**Onboarding is two round-trips because a WABA can only be created by the
+salon, in Meta's browser popup.** No server-side API creates a WABA on a
+customer's behalf. So `POST /whatsapp/onboarding/start` creates the
+subaccount and hands back the Embedded Signup config; the salon completes
+Meta's popup in the webapp; `POST /whatsapp/onboarding/waba` registers the
+sender via `POST messaging.twilio.com/v2/Channels/Senders` with
+`account_type: ISVSubAccount`.
+
+**The number is not a new purchase — `source='kairo'` reuses the voice
+number.** `voice_agent.shop_telephony.kairo_number` is already bought,
+already SMS-capable (which the 2026-07-16 entry chose Estonia *Mobile* over
+*Local* specifically to guarantee), and already sits under the salon's own
+regulatory bundle. Reusing it avoids a second ~$3/mo per salon **and** avoids
+the real trap in the obvious alternative: buying a number inside the
+subaccount would need a regulatory bundle inside that subaccount, since
+bundles don't cross accounts — re-running the entire 2026-08-14 KYC flow per
+salon a second time, for a number they don't need. Transferring the existing
+number into the subaccount was rejected too: `number_health`,
+`number_release`, and the TwiML signature check all address it with parent
+credentials, and moving it would have broken three working things to fix
+none. `source='salon'` imports the salon's own number instead (they must
+first delete its WhatsApp/WhatsApp Business App account).
+
+**Meta's ownership OTP is the one place the two number paths diverge, and
+the Kairo path needed an inbound-SMS webhook back.** For `source='salon'`
+the code lands on the salon's phone and they type it in. For
+`source='kairo'` it lands on a number *we* own, whose SMS webhook has been
+deliberately unset since 2026-08-15. So `attach_waba` temporarily binds
+`/whatsapp/webhook/otp`, and `_finalize` unbinds it the moment the sender
+goes online. **This is not a reintroduction of STOP handling:** nothing
+parses message content beyond a 6-digit run, it only fires for a shop
+actually mid-verification, and the hook does not survive onboarding.
+
+**WhatsApp gives back the self-service opt-out the 2026-08-15 STOP removal
+gave up — from Meta, not from us.** Every marketing template carries Meta's
+native "Stop promotions" button. A refusal comes back as error `63033`/
+`63050` on the status webhook, which writes `marketing_consent = false` into
+`business_app_core.customers`. So for this channel the "materially weaker
+position under Italian marketing-SMS rules" that entry recorded plainly does
+not apply: there *is* an always-available, per-message, self-service opt-out,
+and honouring it also stops the next campaign burning a send on a guaranteed
+failure. The SMS entry's tradeoff is unchanged for SMS; this is a second
+channel, not a revision of that decision.
+
+**Webhook signatures needed a per-subaccount token — the one security detail
+that would have failed closed and looked like a Twilio outage.** Twilio signs
+a webhook with the auth token of the account that *owns the resource*, so a
+salon's WhatsApp traffic is signed with that subaccount's token, not
+`TWILIO_AUTH_TOKEN`. Validating against the parent token would have rejected
+100% of genuine callbacks. `services/twilio_signature.py` gained an
+`auth_token` override (the single shared verifier stays single, per the
+2026-08-12 "one verifier, not two, or they drift" precedent) and
+`whatsapp.senders.subaccount_auth_token` stores the token Twilio returns
+exactly once, at subaccount creation. Note the asymmetry: API calls *into* a
+subaccount need no per-salon secret at all (subaccount SID as basic-auth
+username, parent token as password) — only inbound signature validation does.
+
+**Sending is queued, the opposite of `/sms/send`, because "50 per day
+distributed across the day" is the feature.** `enqueue_campaign` writes one
+row per recipient with a `scheduled_at` spread evenly across 09:00–20:00
+Europe/Rome; the hourly tick claims what is due and sends it. The schedule is
+decided at enqueue time rather than as a per-tick quota so the owner can see
+exactly when each customer will be contacted, and cancelling is deleting
+queued rows. `spread()` is a pure function — the awkward cases (before the
+window, inside it, after it → roll to tomorrow) are unit-tested without a
+clock.
+
+**Consent is re-read at send time, not trusted from enqueue.** A queued row
+can sit for hours. A customer whose consent is cleared in-store at 11:00 must
+not receive the message scheduled for 15:00 — the same trust-boundary
+reasoning as `sms_send.py`'s re-check, but it actually bites here, where the
+SMS path's re-check was near-simultaneous with the send.
+
+**Over the daily cap means later, not never.** A claimed message for a shop
+that has exhausted `daily_cap` is requeued +60 min, not dropped: the owner
+scheduled it and believes it is going out. Meta caps an unverified WABA at
+250 business-initiated conversations/24h; 50 sits well inside that, which is
+why Meta **Business Verification is not a prerequisite** for this feature
+(it is for higher tiers, and for WhatsApp Business Calling).
+
+**`status = 'sending'` is a claim, not a provider state.** `claim_due` flips
+rows into it in the same statement that selects them (`FOR UPDATE … SKIP
+LOCKED`), so two overlapping ticks — or two Fly machines — can never both
+send the same row. A row stuck there because a tick died mid-send is requeued
+by the next sweep rather than silently lost. Idempotency at the campaign
+level is a partial unique index on `(shop_id, campaign_key, customer_id)`, so
+a retried or double-clicked enqueue is a no-op, matching how
+`sms.outbound_messages` already guards batch sends.
+
+**Billing reuses the SMS path unchanged**: `send_credits()` (2×
+pass-through, not the webapp's 10× LLM margin), balance checked before the
+provider call, debited only *after* Twilio accepts. It writes
+`ai_token_log.whatsapp_message_id` — the column the webapp's own migration
+`46_ai_token_log_message_fk.sql` added on 2026-08-12 and nothing has written
+until now.
+
+**Flagged, not actioned:**
+- **Number release doesn't deregister the WhatsApp sender.**
+  `services/number_release.py` hands the Estonian number back to Twilio on a
+  lapsed plan, but nothing closes the salon's subaccount or deregisters its
+  sender — same class as the "Cancellation gap" the 2026-08-14 entry flagged
+  for numbers, now reopened one layer up. A closed subaccount is not billed,
+  so this is a hygiene/orphan problem, not a cost leak.
+- **Inbound replies are logged and discarded.** A reply opens Meta's 24h
+  session window, inside which free-form messages *are* allowed — the obvious
+  next phase (conversational booking over WhatsApp), and the only path to
+  sending genuinely free-form personalised copy. `/whatsapp/webhook/inbound`
+  exists because the sender registration requires a callback URL, and does
+  nothing else.
+- **One template in the catalogue** (`promo_v1`). The machinery takes N; the
+  LLM template-picker that would make N worth having isn't built.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **404 passed, 14 skipped, 0 failed**, up
+from a 382/14/0 baseline measured on this branch by re-running the suite with
+`tests/booking_engine/test_whatsapp.py` excluded (not the 373 recorded in the
+2026-08-15 release entry — 9 tests landed between). All 22 new tests are in
+that one file; no existing test was modified. Migration 14 was applied
+**twice** against a scratch Postgres (stub `business_app_core.shops`/
+`customers`, the same pattern migrations 12 and 13 were verified with) — both
+runs exited 0. The three non-trivial statements were then executed against
+that scratch DB with real rows rather than assumed correct: `enqueue`'s
+`ON CONFLICT … WHERE` correctly inferred the partial unique index and the
+second identical insert returned zero rows; `claim_due`'s CTE + `FOR UPDATE
+OF … SKIP LOCKED` claimed and flipped the row; `requeue_stuck` correctly
+no-opped on a fresh row while `requeue_one` pushed `scheduled_at` forward.
+Confirmed `connection.py` registers no jsonb codec, so asyncpg really does
+hand `variables` back as **text** — the `isinstance(variables, str)` branch in
+`send_due` is the production path, not a defensive one, and has its own test.
+
+**Still needed before this can be switched on** — none of it automatable
+from this repo: create a Meta app and get it approved, accept Twilio's
+Partner Solution link (~3–4 weeks, per Twilio's own estimate), turn on 2FA
+and complete Meta business verification for Kairo's Business Portfolio,
+register a WhatsApp sender for Kairo itself via Self Sign-up first (Meta
+requires this before a portfolio is eligible), then set `META_APP_ID` /
+`META_CONFIG_ID` and integrate Meta's Embedded Signup JS in the webapp. No
+live send has been made; every Twilio interaction here is verified against
+the API contract and unit tests, not against a real WABA.
+
+## 2026-08-15 — Grace-period number release, closing the 2026-08-14 "Cancellation gap"
+
+**Decision:** built `services/number_release.py`, closing the gap the
+2026-08-14 self-service-provisioning entry flagged but didn't fix: when a
+shop's subscription lapses (webapp's `billing/webhook/process-event.ts`
+nulls `shops.plan_id`), nothing in this repo released the shop's Twilio
+number — it kept costing ~$3/mo with no plan behind it. Not an instant
+release: releasing the moment a plan lapses gives the salon no warning and
+Twilio does not hold a released number for them to reclaim if they
+resubscribe. Instead, a pure `decide_release(inp, now)` policy function
+(`has_plan`, `release_scheduled_at`) → `('none'|'schedule'|'clear'|'release',
+deadline)` drives an hourly-tick-shaped `sweep()`: the first tick that sees a
+number with no plan behind it schedules a 14-day deadline
+(`GRACE_DAYS`), a later tick clears it if the plan comes back in time, and
+only a tick that finds the deadline already passed calls `release_for_shop`.
+
+**The one rule that makes this safe under repeated hourly ticks:** "no plan,
+already scheduled, deadline still in the future" must return `('none',
+existing_deadline)`, not re-schedule — re-stamping `now() + 14 days` on
+every tick would push the deadline forward forever and the number would
+never actually be released. Covered by a regression test that runs
+`decide_release` twice, an hour apart, and asserts the deadline didn't move.
+
+**The deadline lives in `voice_agent`, not `business_app_core`, on
+purpose** — a `plan_lapsed_at` column would belong on `shops`, which is the
+webapp repo's schema, not this one's to alter. `shop_telephony.release_scheduled_at`
+(migration `13_number_release.sql`) is derived from when *this* repo's tick
+first noticed, which is all it needs to be.
+
+**`release_for_shop` order is deliberate: Twilio first, the local row
+second** — same orphan-prevention shape as `insert_telephony`'s
+insert-only guarantee (2026-08-14 entry above). Deleting
+`shop_telephony`'s row before Twilio confirms the number is gone would
+leave us paying for a number nothing tracks anymore. A Twilio 404 is
+treated as "already released" (e.g. a prior run released it and crashed
+before deleting the row) and still proceeds to delete + record; any other
+Twilio failure leaves the row untouched so the next tick retries — never
+silently drops the shop from future consideration.
+
+**`number_requests.status` gained `'released'`**, plus `released_at`/
+`released_number` columns, so a released shop's history survives after its
+`shop_telephony` row is deleted (and so a later re-provision starts from a
+known prior state, not a gap). The status CHECK constraint (created inline
+in migration 12) had to be dropped and re-added to widen it — its generated
+name (`number_requests_status_check`) was confirmed by querying
+`pg_constraint` against a scratch DB built from the full migration chain
+through 12, rather than assumed. Idempotency proved by applying the entire
+`booking_engine/db/sql/` chain twice against a fresh scratch DB (stub
+`business_app_core.shops`/`customers`/`appointments`/`ai_token_log` tables,
+same pattern migration 12 was verified with) — both runs exited 0, and
+`'released'` was accepted while a bogus status was still rejected,
+re-checked after the double apply specifically (not just the first).
+
+**Wired into the hourly tick** as a third stage, after the health check, in
+`booking_engine/api/routes/messaging_tick.py` — this entry originally
+covered the release mechanism only (matching that task's explicit scope,
+whose commit list didn't touch `messaging_tick.py`); the wiring landed in a
+follow-up change the same day. Runs last so a failure in the release sweep
+can never suppress the health refresh above it, wrapped in its own
+try/except so it's counted under `errors` rather than 500ing the tick. Also
+added in that follow-up: an explicit owner-initiated `POST
+/voice/numbers/release` endpoint (`voice_telephony.py`) that calls
+`release_for_shop` directly, bypassing the grace period on purpose — a
+salon giving up its number deliberately, not a lapsed-plan guess. Still
+needed: a QA-branch check that a shop with `plan_id IS NULL` and a live
+`shop_telephony` row gets the flow it's supposed to.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — 373 passed, 14 skipped, 0 failed (up from
+the 359/14/0 baseline recorded in the 2026-08-15 STOP-handling entry below,
++14 new `test_number_release.py` tests, no existing test touched).
+
+## 2026-08-15 — Removed STOP handling entirely; suppression is `marketing_consent` alone (owner decision)
+
+**Decision (owner's, not a recommendation — implemented as directed, not
+re-litigated):** marketing SMS no longer carries an in-message opt-out.
+Removed, together, both halves of the old mechanism — the appended footer
+(`" Rispondi STOP per non ricevere piu'."`) and the code that honoured a
+STOP reply — on the reasoning that leaving either one alone is worse than
+either clean end state (promising an opt-out we don't offer, or silently
+dropping the promise while still parsing replies nobody can act on).
+Suppression is now `business_app_core.customers.marketing_consent` alone;
+opt-out happens in-store, when a staff member clears marketing consent in
+the app.
+
+**What was deleted:** `sms_send.py`'s `OPT_OUT_FOOTER` constant and the
+append; its `is_opted_out` gate and `_suppress("opted_out")` branch
+(`_has_active_consent` is now the *only* suppression rule — its docstring
+says so); `services/messaging/sms_inbound.py` (STOP-keyword parsing) and its
+test file entirely; the `POST /sms/webhook/inbound` route and its
+`X-Twilio-Signature` verification (`POST /sms/webhook/status` is
+untouched); `sms_queries.py`'s `is_opted_out`/`record_opt_out`/
+`withdraw_marketing_consent`/`get_shop_by_sender_number` (that last one
+existed only to route inbound messages to a shop); the `sms_url` parameter
+on `twilio_numbers.py::purchase_number` and its two callers
+(`number_provisioning.py`, `voice_telephony.py`) — a purchased number no
+longer gets an SMS webhook bound at all, since nothing would answer it.
+
+**`sms.opt_outs` is left in place, not dropped.** `11_sms_schema.sql` no
+longer creates it (removed the `CREATE TABLE` block, replaced with a
+one-line comment pointing here), but no `DROP TABLE` was added either —
+environments that already have the table keep it, harmlessly empty and
+unread by any code path now.
+
+**`number_health.py::decide_health` now checks `voice_url` only.** It used
+to flag `webhook_drift` unless *both* `voice_url` and `sms_url` pointed back
+at us; with no inbound SMS handler there is nothing for `sms_url` to
+correctly point at, so requiring it would have permanently flagged every
+number red. `HealthProbe` dropped its `sms_url` field to match. (Twilio's
+own `NumberStatus`/`fetch_number` still read `sms_url` back from the API —
+harmless, unrelated to the health verdict — left alone since nothing asked
+for it and it costs nothing to keep reading.)
+
+**Bundled into the same pass: fixed `_twilio_send` never passing
+`status_callback`.** Verified against a live send that Twilio's status
+webhook (`POST /sms/webhook/status`) could never fire without it — the
+`sms.outbound_messages` row stayed `status='sent'`/`price_usd=NULL` forever
+even though Twilio has the real price. `send_marketing_sms` now takes
+`public_base_url` and threads a `status_callback` (`{public_base_url}/api/v1/sms/webhook/status`,
+mount prefix confirmed against `api/app.py` rather than assumed) through to
+`_twilio_send`, which now passes it to `client.messages.create()`.
+
+**This is a materially weaker position under Italian marketing-SMS rules —
+recorded plainly, not softened.** An in-message STOP reply is common
+practice for demonstrating an always-available, per-message opt-out to the
+Garante; relying solely on staff clearing consent in-store means a customer
+who wants to stop receiving messages has no self-service channel and must
+rely on the salon acting on their request. This tradeoff was made
+knowingly by the owner, not discovered and left unaddressed — restated here
+so it isn't mistaken for an oversight later.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — 359 passed, 14 skipped, 0 failed (down from
+365 passed before this change: net of deleting `test_sms_inbound.py`'s 5
+tests and `test_opted_out_phone_is_suppressed`, replacing
+`test_opt_out_footer_is_appended_server_side` with an equivalent
+no-suffix assertion, and adding 2 new `status_callback` tests).
+`tests/live_db/test_sms_live.py` (not run in this environment — no
+`TEST_DATABASE_URL` — but checked for dangling references) had its
+`TestOptOutLive` class and `test_unrouteable_number_resolves_to_no_shop`
+removed, since they exercised the deleted query functions directly against
+real Neon. GSM-7 segment counts in the surviving tests did not change —
+recomputed rather than assumed: every existing test body is short enough
+(well under 160 GSM-7 chars) that removing ~37 characters of footer doesn't
+cross a segment boundary either before or after.
+
 ## Documentation
 
 Human-oriented docs (architecture, database, voice-agent logic, providers,
@@ -20,6 +1215,278 @@ rule updates the matching `docs/knowledge/*.md` file in the same change** —
 not as a follow-up. See `docs/knowledge/README.md` for the full rule.
 
 ---
+
+## 2026-08-14 — Self-service Estonian number provisioning: the 2026-07-16 shared-bundle model is SUPERSEDED for this path
+
+**The 2026-07-16 "one Kairo-entity bundle, reused across every shop, no
+per-salon KYC" decision (below) does not hold for self-service.** Twilio's
+ISV guidance is explicit: *"Each customer needs their own bundle. Do not
+reuse your business information in customer bundles. End-User records must
+reflect the actual end-user, not you. Twilio audits this."* A salon
+requesting its own number through the webapp now gets its own regulatory
+bundle, built from a form it fills in — not a slot in Kairo's shared one.
+**This supersedes only the self-service path**: the shared-bundle
+`TWILIO_BUNDLE_SID` and the manual `POST /voice/numbers/search` +
+`/voice/numbers/provision` pair are untouched and still live, still used for
+Path 1 (forwarding) and ops-triggered onboarding — reusing Kairo's own info
+across *Kairo-triggered* provisioning was never the audited case Twilio's
+rule is about. Only reselling to a salon under its own name required a
+bundle-per-customer.
+
+**What Estonia Mobile actually requires — queried, never hardcoded.**
+`GET /v2/RegulatoryCompliance/Regulations?IsoCountry=EE&NumberType=mobile`
+returns exactly one regulation (`RN26dca8d0e541a6c8fce4abd46e518506`,
+business-only — no individual option, a sole trader with no company
+registration cannot get a number at all): one End-User field
+(`business_name`) and one supporting document
+(`commercial_registrar_excerpt`, an Italian *visura camerale*). No address,
+VAT, or personal ID — lighter than the 2026-07-16 research suggested, and
+**sending fields the regulation doesn't ask for is a known cause of
+evaluation failure**, so nothing beyond that is collected. The regulation is
+looked up at request time and stored on the request row rather than
+hardcoded, since Twilio's own docs say these can change;
+`tests/live_twilio/test_estonia_regulation.py` is the canary — a red run
+there means Estonia's rules moved, not a code bug.
+
+**Twilio is the validator, not us.** `POST /Bundles/{sid}/Evaluations` is
+synchronous and returns field-level violations, shown back to the salon
+verbatim. Verified against a live noncompliant evaluation while building
+this: the response objects have **no `description` field** — the human
+explanation is in `failure_reason`. Parsing `description` doesn't error, it
+just silently returns empty explanations; a genuine dead end that surfaced
+because two people happened to eyeball the raw response rather than trust
+the SDK's shape.
+
+**Reintroduces the exact friction the 2026-07-16 decision eliminated, and
+that's accepted, not a regression.** Per-salon KYC is unavoidable once Kairo
+is reselling under each salon's own name rather than its own. It puts a
+document fetch plus a multi-day Twilio review between "salon pays" and
+"salon has a number" — see the "waiting experience" states in
+`src/lib/numbers/request-state.ts` (webapp) for how that gap is surfaced
+rather than left to look broken. No specific completion date is shown
+(decided 2026-08-13): "pochi giorni lavorativi" instead of a number, since
+there's no observed review-time data for Estonian mobile bundles yet and a
+date that slips reads worse than no date. `REVIEW_BUSINESS_DAYS = 3`
+(webapp) drives only the switch to "taking longer than expected" copy.
+
+**A real bug this closed: the upsert orphaned purchased numbers.**
+`upsert_telephony`'s `ON CONFLICT (shop_id) DO UPDATE` meant a second
+provision call bought a second number and overwrote the row — the first
+stayed billed by Twilio (~$3/mo) with nothing in the DB referencing it. The
+primary key guaranteed one *row*, not one *purchase*, and self-service makes
+a double-click a real path to hitting this, not just a theoretical race.
+Fixed with a new `insert_telephony` (`ON CONFLICT DO NOTHING RETURNING *`)
+used only by the provisioning paths (`upsert_telephony` itself is untouched,
+still used for legitimate updates like activation status): check-first
+(idempotent replay of a double-tick), insert-only, and on a lost race
+`release_number` the just-purchased number back to Twilio rather than leak
+it. A failed release is logged loudly, not raised — raising would abort that
+shop's tick and the next run takes the `already_provisioned` path, so
+nothing would ever look at the leaked number again.
+
+**The health semaphore is outage-safe by construction.**
+`services/number_health.py::decide_health` returns `None` (no verdict) for
+an inconclusive probe — Twilio unreachable — which only stamps
+`health_checked_at` and leaves `health_status` alone. Only a confirmed 404
+or webhook drift is allowed to flip the light. Without this, a transient
+Twilio outage during the hourly tick would repaint every salon's number red
+at once.
+
+**The gate is `shops.plan_id IS NOT NULL`, not a new 'gratis' plan row** —
+free is the *absence* of a plan, matching how Gratis already works
+elsewhere in the webapp (see that repo's `decisions.md`). This is the
+**first** subscription gate in the webapp; gating is otherwise entirely by
+vertical bundle and role — deliberately kept to one predicate
+(`hasActiveSubscription`), no tier concept introduced.
+
+**`send_push` is a stub that only logs** (`clients/push_notifications.py`,
+unchanged by this work — flagged since 2026-07-24 below). Events
+(`number_request_approved`/`number_request_rejected`) are still emitted for
+consistency with the existing call-lifecycle/balance-alert emitters, so they
+become real the day that stub is wired — nobody is actually notified today;
+the salon learns the outcome by opening Inbox.
+
+**Flagged, not actioned:**
+- **Cancellation gap.** When a subscription lapses, the webapp's
+  `process-event.ts` nulls `plan_id` but nothing releases the shop's number
+  — it keeps costing ~$3/mo with no one paying for it. A product decision
+  (grace period vs. release vs. bill separately), not a provisioning defect.
+- **Crash-between-purchase-and-insert gap.** If the process dies between
+  `purchase_number` and `insert_telephony` succeeding, the number is bought
+  Twilio-side with no local row and no release path — the existing
+  lost-race release only fires when the *insert* loses, not when the
+  process never reaches it. Needs a reconciliation job; not built.
+- `business_app_core.customers.marketing_consent*` columns appear in no
+  migration in this repo — they arrive via the webapp's own chain. Noted in
+  `docs/knowledge/database.md` so this doesn't get re-diagnosed as a missing
+  migration.
+
+**Docs:** `docs/knowledge/architecture.md` (new "Self-service number
+provisioning" section), `database.md` (`number_requests` table,
+`shop_telephony` health columns), `providers.md` (Twilio section — the two
+coexisting bundle models, the regulation/evaluation gotchas), and a new
+`docs/knowledge/api/number-provisioning.md` page (linked from `api/README.md`
+and `_sidebar.md`). `docs/number-provisioning-design.md` (the working design
+doc this entry and those pages were written from) is deleted as of this
+change — superseded by the shipped docs above.
+
+---
+## 2026-08-12 — Phase 1 messaging: SMS marketing send (schema, send/inbound/status, fail-closed billing)
+
+**Decision:** first shipped piece of a larger SMS/WhatsApp messaging design
+(full draft: `docs/messaging-design.md`, a working document deleted once the
+whole design ships — this entry plus `docs/knowledge/{architecture,database,
+providers}.md` and `docs/knowledge/api/sms.md` are the durable record).
+Phase 1: a salon owner can send one personalised marketing SMS to one
+consenting customer, from the shop's own Twilio DID, billed as AI credits.
+New `sms` schema (`booking_engine/db/sql/11_sms_schema.sql`:
+`campaigns`/`outbound_messages`/`opt_outs`), new package
+`booking_engine/services/messaging/` (`gsm7.py`, `send_credits.py`,
+`sms_send.py`, `sms_inbound.py`), new routes `POST /api/v1/sms/send` +
+`/sms/webhook/{inbound,status}`. Companion webapp change (own commits, own
+repo): Marketing's Customers tab renamed "Salute Clienti" → "Touchpoint
+Clienti", and its existing win-back-copy generator modal gained an "Invia
+SMS" button.
+
+**SMS for marketing, not WhatsApp.** WhatsApp forbids free-form
+business-initiated messages outside a 24h customer-initiated session — only
+pre-approved templates, which can't carry the per-customer LLM-generated
+copy this feature exists to send. SMS has no such restriction. (WhatsApp
+booking/reminders are a later phase of the same design, not built yet.)
+
+**Billing: 2× Twilio cost via AI credits, through a dedicated converter —
+not the webapp's `rawToUserCredits()`.**
+`booking_engine/services/messaging/send_credits.py` implements
+`ceil(twilio_usd * 2 * 1000)`. Deliberately not the webapp's existing
+10×-margin, floor-at-1 converter: 10× is the LLM margin, wrong for a
+pass-through send cost; a floor of 1 would charge a credit for a free
+WhatsApp service message once that phase ships, quietly inverting the
+"customer speaks first, and it's free" economics that phase depends on.
+
+**Credits are debited after Twilio accepts the send, not before —
+reversed mid-implementation (commit `4883814`).** The first cut checked
+the balance and debited before calling Twilio; a Twilio-side rejection then
+left the shop billed for a message that was never sent, on a call that cost
+Kairo nothing. Fixed to check balance → send → debit only after a
+successful Twilio accept, logging (not blocking) the narrow case where the
+balance drains in that window — sends are owner-triggered and effectively
+serial today, so this is an accepted race, not a real gap.
+`booking_engine/db/token_basket_queries.py::try_debit_for_message` is
+fail-closed either way: unlike the voice path's `insert_debit_event`
+(drains-and-proceeds, because a live call can't be un-answered), a message
+that can't be billed is never sent — the row is marked
+`suppressed_reason='insufficient_credits'` instead.
+
+**Consent lives in `business_app_core.customers`, the single source of
+truth shared with the webapp; `sms.opt_outs` is the suppression list of
+last resort.** A STOP reply must be honoured even from a phone number
+matching no `customers` row (import, wrong number, deleted customer) —
+nothing in `business_app_core` to flip in that case, hence the standalone
+table. When the phone *does* match a customer,
+`services/messaging/sms_inbound.py` writes **both**: the `opt_outs` row
+(unconditional) and `customers.marketing_consent = false` (keeps the
+webapp's own consent UI honest, since it reads `business_app_core`
+directly). `opt_outs` also doubles as the legal evidence trail for the
+Garante.
+
+**The opt-out footer is appended server-side, never left to the LLM.**
+Legally required on every Italian marketing SMS
+(`" Rispondi STOP per non ricevere piu'."`). `sms_send.py` appends it
+before sanitizing/encoding, so the segment count and any consent-suppressed
+row both reflect the real wire text.
+
+**Twilio's automatic STOP handling doesn't cover this number.** It's
+US/Canada-long-code-only; the Estonian DID (2026-07-16 decision) gets none
+of it, so `sms_inbound.py` reimplements STOP parsing as application code —
+whole-message match against an IT/EN keyword list (`stop`, `alt`,
+`cancella`, `basta`, `disiscrivimi`, … — widened in `4883814` after review),
+never a substring match, so "non fermatevi, stop mai!" is not misread as an
+opt-out.
+
+**Generation and sending are two separate charges.** The webapp's existing
+`retention-message` route already billed generation at 10× LLM cost; this
+adds a second, independent charge for the send at 2× Twilio. A regenerate
+costs only the former, "Invia SMS" only the latter.
+
+**The webapp never deducts credits for a send — one debit path, full
+stop.** `POST /api/v1/hair-salon/customers/[id]/send-sms` (webapp)
+re-checks consent and forwards to this repo's `/api/v1/sms/send`; only
+`sms_send.py` here ever calls `try_debit_for_message`. Two debit paths for
+the same charge would eventually double-charge or drift.
+
+**`/sms/send` is synchronous**, unlike the tick-based batch/reminder
+mechanism the rest of the messaging design calls for (not built this
+phase) — the caller is a salon owner watching a modal, who needs "Inviato"
+or "Credito insufficiente" now, not within the hour.
+
+**Segment/encoding counting is intentionally duplicated, not shared,
+across the two repos.** `booking_engine/services/messaging/gsm7.py`
+(authoritative, at send time) and the webapp's
+`src/lib/messaging/sms-preview.ts` (a pre-click cost preview shown before
+the owner clicks "Invia") independently implement the same GSM-7
+septet/segment logic — the alternative is a network round-trip on every
+keystroke while the owner is still typing. Small drift between the two is
+accepted; a real send always goes through `gsm7.py`.
+
+**Twilio signature verification now has one implementation for three
+routes.** Extracted `_twilio_signature_valid` out of `voice_twiml.py` into
+`booking_engine/services/twilio_signature.py`; the TwiML webhook and both
+new SMS webhooks all call it — matching the 2026-07-16 entry's own
+"one verifier, not two, or they drift" precedent from the Telnyx→Twilio
+migration. Still a no-op (accepts unsigned requests) if `TWILIO_AUTH_TOKEN`
+is unset — same known gap as before, not introduced or closed by this
+change.
+
+**Found in passing, not fixed here (out of this task's scope):**
+`business_app_core.customers.marketing_consent`/`_granted_at`/
+`_withdrawn_at`/`_source` — read directly by `sms_send.py`'s consent gate —
+exist on the live database but appear in **no migration file inside this
+repo**; they were added through the webapp's own migration chain. A
+contributor grepping only this repo for those columns would wrongly
+conclude they don't exist. Documented in `database.md`.
+
+**Still needed:** live-DB verification (`tests/live_db/test_sms_live.py`)
+and one real SMS sent to a real handset — both still open per
+`docs/messaging-plan-phase1.md` Task 15 (not run in this environment,
+`TEST_DATABASE_URL`/live Twilio not available here). WhatsApp (reminders +
+self-booking), campaign batches (`sms.campaigns` exists, nothing writes it
+yet), and number provisioning are later phases of the same design, not
+started.
+
+## 2026-07-24 — CI: migration ownership moved to the webapp repo (logged retroactively 2026-08-10)
+
+**Recorded after the fact.** Commit `4124013` ("Updated CI") shipped this change
+without an entry here or a matching `docs/knowledge/` update — found during a
+2026-08-10 doc-alignment pass, when `operations.md`/`providers.md` still
+described the superseded behaviour. The entry is dated to the change, not to
+when it was written down.
+
+**Decision:** this repo no longer applies migrations to the real QA or
+production Neon branches. `deploy-qa.yml`'s `promote-qa` job and
+`deploy-fly-prod.yml`'s `migrate-prod` job were both replaced by a single
+`migrate-via-webapp` job that dispatches `kairo-smb/webapp`'s
+`migrate-qa.yml`/`migrate-prod.yml` (via `benc-uk/workflow-dispatch@v1`,
+`wait-for-completion`, 20 min timeout) and blocks the Fly deploy on it. The
+QA-branch restore-from-production step moved there too.
+
+**Why:** the shared Neon DB now has three schemas with a required application
+order (`business_app_core` → `voice_agent` → `market_intel`) owned by three
+repos. Each repo migrating its own schema independently means the order is
+whatever the CI race happens to produce. Making `webapp` the single parent that
+applies all three keeps the order deterministic and guarantees this service
+never deploys ahead of its schema.
+
+**Unchanged:** the ephemeral-branch validation from the 2026-07-18 entry below
+still runs first, identically, in all three workflows — a throwaway
+copy-on-write branch off production, migrated + seeded + `live_db`-tested, then
+deleted. That remains the only Neon branch this repo migrates itself, and it
+still gates the release. `scripts/migrate.sh` is unchanged and still the local
+path.
+
+**New GitHub Actions secret:** `WEBAPP_MIGRATE_DISPATCH_TOKEN` — needs
+`actions:write` on `kairo-smb/webapp`. It is a CI secret, not a Fly app secret;
+without it neither environment can deploy at all, since the deploy job now
+depends on the dispatch job.
 
 ## 2026-07-24 — Repo cleanup: deleted dead docs/scripts, rewrote two stale docs, closed a dependency drift
 
