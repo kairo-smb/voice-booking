@@ -108,6 +108,13 @@ class TestCreateCustomer:
         assert result["full_name"] == "Test"
         mock_void.assert_called_once()  # INSERT customer
         mock_one.assert_called_once()   # SELECT back
+        # The flag the webapp's "Creati dall'assistente" badge is driven by, and
+        # the only thing that ever puts this customer in front of a human. It is
+        # asserted on the SQL rather than the call count because the count was
+        # all this test checked, and the columns were missing the whole time.
+        sql = mock_void.call_args[0][0]
+        assert "source" in sql and "verified" in sql
+        assert "'voice_agent', false" in sql
 
     @patch("booking_engine.db.queries.execute_void", new_callable=AsyncMock)
     @patch("booking_engine.db.queries.execute_one", new_callable=AsyncMock)
