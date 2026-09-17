@@ -75,9 +75,18 @@ async def create_customer(
     shop_id: UUID, full_name: str, phone_number: str | None = None,
 ) -> dict:
     cid = uuid4()
+    # source/verified are not decoration: nothing reaches this function except
+    # through the booking engine, so the row is by definition something the
+    # assistant made rather than something the owner typed. The webapp's
+    # anagrafiche badge is driven by `verified = false` ALONE — a row created
+    # here without it is indistinguishable from a hand-typed one and no human
+    # will ever be prompted to look at it. insert_customer_from_call() has set
+    # both since it was written; this path was left on the column defaults
+    # (`manual` / `true`) and quietly wasn't.
     await execute_void(
-        "INSERT INTO business_app_core.customers (id, shop_id, full_name, created_at) "
-        "VALUES ($1, $2, $3, NOW())",
+        "INSERT INTO business_app_core.customers "
+        "(id, shop_id, full_name, source, verified, created_at) "
+        "VALUES ($1, $2, $3, 'voice_agent', false, NOW())",
         cid, shop_id, full_name,
     )
     customer = await execute_one("SELECT * FROM business_app_core.customers WHERE id = $1", cid)
