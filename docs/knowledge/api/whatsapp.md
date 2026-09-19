@@ -56,15 +56,21 @@ The webapp drives this from `token_expires_at`: a cockpit banner (`WhatsAppToken
 ### `POST /whatsapp/onboarding/complete`
 
 ```json
-{ "shop_id": "…", "code": "AQD…", "waba_id": "1234567890",
-  "phone_number_id": "9876543210" }
+{ "shop_id": "…", "code": "AQD…" }
 ```
 
-Everything Meta's popup hands back to the browser.
+**Only `code` is required (2026-09-19).** `waba_id` and `phone_number_id` are accepted and optional, and in practice never sent: Meta posts them to the browser on a `WA_EMBEDDED_SIGNUP` message that it emits **only through its JS SDK**, and this flow cannot use the SDK — it routes `FB.login` through FedCM, dropping `config_id`, so the popup that opens is a plain OIDC login Meta then refuses with *"this app needs at least one supported permission"*. The webapp builds the dialog URL by hand instead, which gets the real coexistence flow and the `code`, and nothing else.
+
+So both ids are read back from the exchanged token server-side, which is the better source regardless — Meta reporting what it granted, rather than the browser relaying what it was shown:
+
+- **`waba_id`** from `GET /debug_token?input_token=<business token>` (authenticated with the *app* token), taking the union of `granular_scopes[].target_ids` for `whatsapp_business_management` and `whatsapp_business_messaging`.
+- **`phone_number_id`** from `GET /{waba_id}/phone_numbers`.
+
+Neither zero nor several can be resolved by guessing — picking one would attach the salon's sender to someone else's WhatsApp account, unrecoverably and with nothing downstream disagreeing — so they return `waba_ambiguous` / `phone_ambiguous` and write no sender.
 
 Server-side, in this order — and the order is load-bearing:
 
-1. Exchange the one-time `code` for the salon's business token, and **persist it before using it**. A crash after this point leaves a resumable row; losing the token leaves a WABA we can neither reach nor unsubscribe from.
+1. Exchange the one-time `code` for the salon's business token, and **persist it before using it**. A crash after this point leaves a resumable row; losing the token leaves a WABA we can neither reach nor unsubscribe from. The id lookups above happen between the exchange and the write, since both need that token.
 2. `POST /{waba_id}/subscribed_apps`. Without it every send still succeeds while we receive no delivery status, no template verdicts and no opt-outs — broken in the one way nothing surfaces. No `/register` call follows it: a coexistence number is already registered, and Meta's own guidance is not to call it on one.
 3. Read the number back (`is_on_biz_app`, `platform_type`) rather than trusting what the popup told the browser.
 4. Inject the template catalogue.

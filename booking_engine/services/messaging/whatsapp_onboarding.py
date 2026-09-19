@@ -135,7 +135,8 @@ async def start(
 
 
 async def complete(
-    *, shop_id: UUID, code: str, waba_id: str, phone_number_id: str, settings,
+    *, shop_id: UUID, code: str, settings,
+    waba_id: str | None = None, phone_number_id: str | None = None,
     reconnect: bool = False,
 ) -> dict:
     """The salon finished Meta's popup. Turn its output into a live sender.
@@ -213,6 +214,44 @@ async def complete(
             "whatsapp.token_expires shop=%s at=%s — sender goes silent unless "
             "the salon reconnects", shop_id, expires_at,
         )
+
+    # The popup's ids are optional, and normally absent. Meta only posts
+    # `WA_EMBEDDED_SIGNUP` — the message carrying waba_id and phone_number_id —
+    # when the flow runs through its JS SDK, and ours cannot: the SDK routes
+    # `FB.login` through FedCM and drops `config_id`, so the popup that opens
+    # is a plain OIDC login Meta then refuses. The browser therefore has only
+    # the code, and the ids are read back from the token here.
+    #
+    # Better this way round regardless. The old version trusted two strings the
+    # browser had been handed; this asks Meta what it actually granted. They
+    # are still accepted when supplied, so an SDK-based caller keeps working.
+    if not waba_id:
+        try:
+            granted = await meta.waba_ids_for_token(
+                token=token, app_id=settings.meta_app_id,
+                app_secret=settings.meta_app_secret,
+            )
+        except meta.MetaError as exc:
+            logger.warning("whatsapp.waba_lookup_failed shop=%s err=%s", shop_id, exc)
+            return {"ok": False, "error": "waba_lookup_failed"}
+        # Neither zero nor several can be resolved by guessing: zero means the
+        # grant did not include a WABA, several means we cannot tell which one
+        # the salon meant. Both are named errors rather than a wrong sender.
+        if len(granted) != 1:
+            logger.warning("whatsapp.waba_ambiguous shop=%s ids=%s", shop_id, granted)
+            return {"ok": False, "error": "waba_ambiguous", "waba_ids": granted}
+        waba_id = granted[0]
+
+    if not phone_number_id:
+        try:
+            numbers = await meta.list_phone_number_ids(waba_id=waba_id, token=token)
+        except meta.MetaError as exc:
+            logger.warning("whatsapp.phone_lookup_failed shop=%s err=%s", shop_id, exc)
+            return {"ok": False, "error": "phone_lookup_failed"}
+        if len(numbers) != 1:
+            logger.warning("whatsapp.phone_ambiguous shop=%s ids=%s", shop_id, numbers)
+            return {"ok": False, "error": "phone_ambiguous", "phone_number_ids": numbers}
+        phone_number_id = numbers[0]
 
     # Written before the calls that use it: a crash after this point leaves a
     # resumable row, where losing the token would leave a WABA we can neither

@@ -661,6 +661,17 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
             status="approved", rejection_reason=None,
             body=tpl.body if tpl else "",
         )
+    # The two lookups that replace what the popup used to tell the browser.
+    # `calls["waba_ids"]` / `calls["phone_number_ids"]` let a test make the
+    # answer empty or ambiguous.
+    async def _waba_ids(**kw):
+        calls.setdefault("waba_lookup", []).append(kw)
+        return calls.get("waba_ids", ["W-from-token"])
+    async def _phone_ids(**kw):
+        calls.setdefault("phone_lookup", []).append(kw)
+        return calls.get("phone_number_ids", ["P-from-waba"])
+    monkeypatch.setattr(meta, "waba_ids_for_token", _waba_ids)
+    monkeypatch.setattr(meta, "list_phone_number_ids", _phone_ids)
     monkeypatch.setattr(meta, "exchange_code", _exchange)
     monkeypatch.setattr(meta, "subscribe_app", _subscribe)
     monkeypatch.setattr(meta, "get_phone_number", _number)
@@ -1825,3 +1836,68 @@ def test_descriptor_reports_who_fills_the_slot():
     assert _template_descriptor("promo_v1")["filled_by"] == "llm"
     assert _template_descriptor("promo_manual_v1")["filled_by"] == "owner"
     assert _template_descriptor("feedback_v2")["filled_by"] is None
+
+
+@pytest.mark.asyncio
+async def test_complete_reads_the_ids_back_from_the_token(monkeypatch):
+    """The browser has only the code, so the ids come from Meta, not the popup.
+
+    `WA_EMBEDDED_SIGNUP` — the message carrying waba_id and phone_number_id —
+    is only posted when the flow runs through Meta's JS SDK, and ours cannot
+    (the SDK routes FB.login through FedCM and drops `config_id`). Observed on
+    a real signup: the code arrived, that message never did.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    result = await wo.complete(shop_id=SHOP, code="c0de", settings=FakeSettings())
+
+    assert result["ok"] is True
+    written = [f for f in calls["fields"] if "waba_id" in f]
+    assert written[0]["waba_id"] == "W-from-token"
+    assert written[0]["phone_number_id"] == "P-from-waba"
+    # The phone lookup must ask the WABA we just derived, not some default.
+    assert calls["phone_lookup"][0]["waba_id"] == "W-from-token"
+
+
+@pytest.mark.asyncio
+async def test_complete_refuses_an_ambiguous_waba_instead_of_guessing(monkeypatch):
+    """Two granted WABAs cannot be resolved by picking one.
+
+    Guessing wrong attaches the salon's sender to someone else's WhatsApp
+    account — unrecoverable without noticing, and nothing downstream would
+    disagree. A named error is the only honest outcome.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={"waba_ids": ["W1", "W2"]},
+    )
+
+    result = await wo.complete(shop_id=SHOP, code="c0de", settings=FakeSettings())
+
+    assert result["ok"] is False
+    assert result["error"] == "waba_ambiguous"
+    assert not any("waba_id" in f for f in calls.get("fields", [])), \
+        "no sender written on an unresolved WABA"
+
+
+@pytest.mark.asyncio
+async def test_complete_still_accepts_ids_supplied_by_the_caller(monkeypatch):
+    """An SDK-based caller that does have them keeps working, and skips the lookup."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    result = await wo.complete(shop_id=SHOP, code="c0de", waba_id="W-explicit",
+                               phone_number_id="P-explicit", settings=FakeSettings())
+
+    assert result["ok"] is True
+    written = [f for f in calls["fields"] if "waba_id" in f]
+    assert written[0]["waba_id"] == "W-explicit"
+    assert "waba_lookup" not in calls, "no lookup when the caller already knows"

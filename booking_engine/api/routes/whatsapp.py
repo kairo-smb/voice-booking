@@ -96,13 +96,21 @@ class StartRequest(BaseModel):
 
 
 class CompleteRequest(BaseModel):
-    """Everything Meta's Embedded Signup popup hands back to the browser."""
+    """What Meta's Embedded Signup popup hands back to the browser.
+
+    Only `code` is required. The ids ride on a `WA_EMBEDDED_SIGNUP`
+    postMessage that Meta sends solely through its JS SDK, which this flow no
+    longer uses, so in practice the browser has nothing else to send — the
+    service reads both back from the exchanged token instead. Kept accepted,
+    not removed: they are still correct when present, and refusing them would
+    break any caller that does go through the SDK.
+    """
 
     shop_id: UUID
     requested_by: UUID | None = None
     code: str = Field(min_length=1, max_length=512)
-    waba_id: str = Field(min_length=1, max_length=64)
-    phone_number_id: str = Field(min_length=1, max_length=64)
+    waba_id: str | None = Field(default=None, max_length=64)
+    phone_number_id: str | None = Field(default=None, max_length=64)
     reconnect: bool = False
 
 

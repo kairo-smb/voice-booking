@@ -110,6 +110,54 @@ async def subscribe_app(*, waba_id: str, token: str) -> None:
     await _request("POST", f"{waba_id}/subscribed_apps", token=token)
 
 
+async def waba_ids_for_token(*, token: str, app_id: str, app_secret: str) -> list[str]:
+    """Which WABAs this business token was actually granted access to.
+
+    The Embedded Signup popup tells the *browser* the waba_id, over a
+    `WA_EMBEDDED_SIGNUP` postMessage — but only when the flow runs through
+    Meta's JS SDK. Ours does not (the SDK drops `config_id` into a FedCM login;
+    see the webapp's WhatsAppPanel), so that message never arrives and the id
+    has to come from the token itself. Which is the better source anyway: this
+    is Meta reporting what it granted, not the browser relaying what it was
+    shown.
+
+    Read through `debug_token`, which needs an *app* token rather than the
+    business one — the call inspects a credential, so it is authenticated as
+    the app that issued it.
+    """
+    body = await _request(
+        "GET", "debug_token",
+        token=f"{app_id}|{app_secret}",
+        params={"input_token": token},
+    )
+    scopes = (body.get("data") or {}).get("granular_scopes") or []
+    ids: list[str] = []
+    for scope in scopes:
+        # Both WhatsApp permissions carry the same WABA as their target; taking
+        # the union and de-duplicating avoids depending on which one Meta lists
+        # first, or on both being present.
+        if scope.get("scope") in ("whatsapp_business_management",
+                                  "whatsapp_business_messaging"):
+            for target in scope.get("target_ids") or []:
+                if target not in ids:
+                    ids.append(target)
+    return ids
+
+
+async def list_phone_number_ids(*, waba_id: str, token: str) -> list[str]:
+    """Every business phone number on this WABA, as ids.
+
+    The other half the popup would have told the browser. A coexistence WABA
+    holds exactly one number (Meta's own constraint), so in practice this
+    returns a single id — but it is returned as a list so the caller can refuse
+    an ambiguous WABA instead of silently picking one.
+    """
+    body = await _request(
+        "GET", f"{waba_id}/phone_numbers", token=token, params={"fields": "id"},
+    )
+    return [n["id"] for n in body.get("data") or [] if n.get("id")]
+
+
 @dataclass(frozen=True)
 class PhoneNumber:
     id: str
