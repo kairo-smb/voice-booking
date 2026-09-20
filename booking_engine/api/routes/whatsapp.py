@@ -111,6 +111,11 @@ class CompleteRequest(BaseModel):
     code: str = Field(min_length=1, max_length=512)
     waba_id: str | None = Field(default=None, max_length=64)
     phone_number_id: str | None = Field(default=None, max_length=64)
+    # The origin the dialog was opened with. Meta binds the code to it and
+    # refuses an exchange that does not repeat it verbatim, so it comes from
+    # the browser that built the URL rather than from config here — the webapp
+    # is served on several origins and this service knows none of them.
+    redirect_uri: str | None = Field(default=None, max_length=512)
     reconnect: bool = False
 
 
@@ -202,7 +207,7 @@ async def complete(
     result = await onboarding.complete(
         shop_id=payload.shop_id, code=payload.code, waba_id=payload.waba_id,
         phone_number_id=payload.phone_number_id, settings=settings,
-        reconnect=payload.reconnect,
+        redirect_uri=payload.redirect_uri, reconnect=payload.reconnect,
     )
     # The single-use `code` never reaches the audit — only the identity-bearing
     # ids that say which WABA the salon connected.

@@ -68,12 +68,19 @@ async def _request(
 # ------------------------------------------------------------------ onboarding
 
 async def exchange_code(
-    *, code: str, app_id: str, app_secret: str
+    *, code: str, app_id: str, app_secret: str, redirect_uri: str | None = None
 ) -> tuple[str, int | None]:
     """Turn Embedded Signup's one-time code into the salon's business token.
 
     This is the only call that uses Kairo's own app credentials rather than a
     customer token — it is how a customer token comes into existence.
+
+    `redirect_uri` must be **byte-identical** to the one the OAuth dialog was
+    opened with, because that is how Meta binds a code to the client that
+    asked for it. Optional only because Meta's JS SDK opens the dialog without
+    one and its codes are then exchanged without one; we do not use the SDK
+    (it routes FB.login through FedCM and drops `config_id`), so in practice
+    the browser always sends its origin and omitting it fails the exchange.
 
     Returns the token and its `expires_in` (seconds) when Meta reports one.
     Whether it does is a property of the *Embedded Signup configuration*, not
@@ -82,15 +89,11 @@ async def exchange_code(
     way rather than assumed, because the failure mode of guessing wrong is
     every connected salon going silent on the same day with no signal.
     """
+    params = {"client_id": app_id, "client_secret": app_secret, "code": code}
+    if redirect_uri:
+        params["redirect_uri"] = redirect_uri
     async with AsyncClient(timeout=_TIMEOUT) as client:
-        response = await client.get(
-            f"{GRAPH}/oauth/access_token",
-            params={
-                "client_id": app_id,
-                "client_secret": app_secret,
-                "code": code,
-            },
-        )
+        response = await client.get(f"{GRAPH}/oauth/access_token", params=params)
         body = response.json() if response.content else {}
         if response.status_code >= 400 or not body.get("access_token"):
             err = (body.get("error") or {})

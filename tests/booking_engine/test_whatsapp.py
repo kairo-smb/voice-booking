@@ -2,7 +2,9 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
+import respx
 
 from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.db import sms_queries
@@ -1901,3 +1903,37 @@ async def test_complete_still_accepts_ids_supplied_by_the_caller(monkeypatch):
     written = [f for f in calls["fields"] if "waba_id" in f]
     assert written[0]["waba_id"] == "W-explicit"
     assert "waba_lookup" not in calls, "no lookup when the caller already knows"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_exchange_code_repeats_the_dialog_redirect_uri():
+    """Meta binds the code to the redirect_uri; omitting it fails the exchange.
+
+    This is not defensive: the hand-built OAuth dialog always opens with one,
+    so every real signup goes through this branch.
+    """
+    route = respx.get(f"{meta.GRAPH}/oauth/access_token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 100}),
+    )
+
+    token, expires_in = await meta.exchange_code(
+        code="c0de", app_id="A", app_secret="S",
+        redirect_uri="https://qa.example.test/",
+    )
+
+    assert (token, expires_in) == ("t", 100)
+    assert route.calls.last.request.url.params["redirect_uri"] == "https://qa.example.test/"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_exchange_code_omits_redirect_uri_when_there_is_none():
+    """Meta's own SDK flow has no redirect, and sending an empty one is refused."""
+    route = respx.get(f"{meta.GRAPH}/oauth/access_token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t"}),
+    )
+
+    await meta.exchange_code(code="c0de", app_id="A", app_secret="S")
+
+    assert "redirect_uri" not in route.calls.last.request.url.params

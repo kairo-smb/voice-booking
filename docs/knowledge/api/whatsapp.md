@@ -56,10 +56,12 @@ The webapp drives this from `token_expires_at`: a cockpit banner (`WhatsAppToken
 ### `POST /whatsapp/onboarding/complete`
 
 ```json
-{ "shop_id": "…", "code": "AQD…" }
+{ "shop_id": "…", "code": "AQD…", "redirect_uri": "https://app.kairo.…/" }
 ```
 
-**Only `code` is required (2026-09-19).** `waba_id` and `phone_number_id` are accepted and optional, and in practice never sent: Meta posts them to the browser on a `WA_EMBEDDED_SIGNUP` message that it emits **only through its JS SDK**, and this flow cannot use the SDK — it routes `FB.login` through FedCM, dropping `config_id`, so the popup that opens is a plain OIDC login Meta then refuses with *"this app needs at least one supported permission"*. The webapp builds the dialog URL by hand instead, which gets the real coexistence flow and the `code`, and nothing else.
+**`redirect_uri` is required in practice (2026-09-20).** Meta binds the code to the origin the OAuth dialog was opened with and refuses an exchange that does not repeat it byte for byte — the failure is a flat `code_exchange_failed`. It comes from the browser, not from config here: this service knows none of the webapp's origins, and the webapp's own proxy sees Amplify's internal `https://localhost:3000`. Optional in the schema only because Meta's JS SDK opens the dialog without one, and this flow does not use the SDK.
+
+**Only `code` is required otherwise (2026-09-19).** `waba_id` and `phone_number_id` are accepted and optional, and in practice never sent: Meta posts them to the browser on a `WA_EMBEDDED_SIGNUP` message that it emits **only through its JS SDK**, and this flow cannot use the SDK — it routes `FB.login` through FedCM, dropping `config_id`, so the popup that opens is a plain OIDC login Meta then refuses with *"this app needs at least one supported permission"*. The webapp builds the dialog URL by hand instead, which gets the real coexistence flow and the `code`, and nothing else.
 
 So both ids are read back from the exchanged token server-side, which is the better source regardless — Meta reporting what it granted, rather than the browser relaying what it was shown:
 

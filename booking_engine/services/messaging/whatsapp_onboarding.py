@@ -137,7 +137,7 @@ async def start(
 async def complete(
     *, shop_id: UUID, code: str, settings,
     waba_id: str | None = None, phone_number_id: str | None = None,
-    reconnect: bool = False,
+    redirect_uri: str | None = None, reconnect: bool = False,
 ) -> dict:
     """The salon finished Meta's popup. Turn its output into a live sender.
 
@@ -189,6 +189,7 @@ async def complete(
         token, expires_in = await meta.exchange_code(
             code=code, app_id=settings.meta_app_id,
             app_secret=settings.meta_app_secret,
+            redirect_uri=redirect_uri,
         )
     except meta.MetaError as exc:
         logger.warning("whatsapp.code_exchange_failed shop=%s err=%s", shop_id, exc)
