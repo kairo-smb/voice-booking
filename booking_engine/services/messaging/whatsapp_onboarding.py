@@ -471,6 +471,15 @@ async def ensure_templates(
         wanted = body_hash(tpl.body)
         if existing and existing.get("body_hash") == wanted:
             continue
+        # Never touch a template Meta is still ruling on. Meta refuses to edit
+        # one under review, so an hourly sweep would fail against it every hour
+        # until the verdict lands — and an edit that *did* land would restart
+        # the review, pushing approval further out exactly as often as we
+        # asked. The drift is not lost: this shop keeps matching
+        # `list_senders_needing_templates`, and the edit happens on the first
+        # sweep after Meta has ruled.
+        if existing and existing.get("status") in ("pending", "received"):
+            continue
         name = template_name(key, language)
 
         if (language, key) not in approved:

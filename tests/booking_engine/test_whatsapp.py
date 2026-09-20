@@ -621,7 +621,9 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
         calls.setdefault("fields", []).append(fields)
         sender.update(fields)
     async def _get_template(shop_id, key):
-        return None
+        # `calls["template"]` lets a test give every key the same existing row —
+        # enough to exercise the drift/edit and under-review paths.
+        return calls.get("template")
     async def _upsert_template(**kw):
         calls.setdefault("templates", []).append(kw)
         return kw
@@ -687,7 +689,11 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
     monkeypatch.setattr(meta, "exchange_code", _exchange)
     monkeypatch.setattr(meta, "subscribe_app", _subscribe)
     monkeypatch.setattr(meta, "get_phone_number", _number)
+    async def _edit_template(**kw):
+        calls.setdefault("edit_template", []).append(kw)
+        return "pending"
     monkeypatch.setattr(meta, "create_template", _create_template)
+    monkeypatch.setattr(meta, "edit_template", _edit_template)
     monkeypatch.setattr(meta, "fetch_template", _fetch_template)
     return calls
 
@@ -2216,3 +2222,49 @@ async def test_a_salon_with_no_mailbox_is_not_retried_every_hour(monkeypatch):
     await _run_sweep_stage(monkeypatch)
 
     assert marked == [SHOP]
+
+
+@pytest.mark.asyncio
+async def test_a_template_under_review_is_left_alone_however_drifted(monkeypatch):
+    """Editing one Meta is still reviewing either fails or restarts the review.
+
+    The sweep runs hourly. Without this, a row whose body no longer matches the
+    catalogue would be re-submitted every hour — failing every hour while Meta
+    holds it PENDING, and, on the reading where the edit lands, pushing the
+    approval further out exactly as often as we asked for it.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={"template": {"meta_template_id": "M1", "status": "pending",
+                            "body_hash": "una-copia-vecchia"}},
+    )
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(),
+        approved={("it", k) for k in wt.CATALOGUE},
+    )
+
+    assert not calls.get("edit_template"), "Meta refuses this, hourly"
+    assert not calls.get("create_template")
+    assert result["created"] == 0 and result["edited"] == 0
+
+
+@pytest.mark.asyncio
+async def test_drift_is_deferred_not_dropped_once_meta_has_ruled(monkeypatch):
+    """The same row, now approved, is edited on the next sweep."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={"template": {"meta_template_id": "M1", "status": "approved",
+                            "body_hash": "una-copia-vecchia"}},
+    )
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(),
+        approved={("it", k) for k in wt.CATALOGUE},
+    )
+
+    assert result["edited"] == len(wt.CATALOGUE)
