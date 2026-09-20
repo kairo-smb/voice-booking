@@ -869,6 +869,11 @@ async def test_complete_injects_the_catalogue_into_the_salons_waba(monkeypatch):
 
     await wo.complete(shop_id=SHOP, code="c0de", waba_id="WABA1",
                       phone_number_id="PN1", settings=FakeSettings())
+    # Pushed after the response, not inside it — one Graph round trip per
+    # entry is enough to blow the gateway timeout in front of the webapp.
+    assert "create_template" not in calls, \
+        "a template push inside complete() is what made onboarding 504"
+    await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
 
     created = calls["create_template"]
     assert {c["name"] for c in created} == {
@@ -1949,13 +1954,20 @@ async def test_ambiguous_waba_keeps_the_token_and_names_the_candidates(monkeypat
     )
     async def _name(*, waba_id, token):
         return {"W1": "Salone X", "W2": "Altra azienda"}[waba_id]
+    async def _numbers(*, waba_id, token):
+        return {"W1": ["+39 02 1234567"], "W2": []}[waba_id]
     monkeypatch.setattr(meta, "get_waba_name", _name)
+    monkeypatch.setattr(meta, "list_phone_numbers", _numbers)
 
     result = await wo.complete(shop_id=SHOP, code="c0de", settings=FakeSettings())
 
     assert result["error"] == "waba_ambiguous"
-    assert result["wabas"] == [{"id": "W1", "name": "Salone X"},
-                               {"id": "W2", "name": "Altra azienda"}]
+    # The number is what the owner recognises; the name is often a company
+    # registration they have never read.
+    assert result["wabas"] == [
+        {"id": "W1", "name": "Salone X", "phone_numbers": ["+39 02 1234567"]},
+        {"id": "W2", "name": "Altra azienda", "phone_numbers": []},
+    ]
     written = [f for f in calls["fields"] if "access_token" in f]
     assert written and written[0]["access_token"] == "customer-token", \
         "token persisted before the question, or the answer needs a second popup"

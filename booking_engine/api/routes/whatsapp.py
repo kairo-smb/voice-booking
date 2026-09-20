@@ -12,7 +12,9 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request,
+)
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
@@ -199,6 +201,7 @@ async def start(
 @router.post("/onboarding/complete")
 async def complete(
     payload: CompleteRequest,
+    background: BackgroundTasks,
     settings: Annotated[Settings, Depends(_get_settings)],
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict:
@@ -230,6 +233,13 @@ async def complete(
         if result.get("wabas"):
             raise HTTPException(status_code=409, detail=result)
         raise HTTPException(status_code=409, detail=result.get("error"))
+    # After the response, not inside it: one Graph round trip per catalogue
+    # entry is enough to blow the gateway timeout in front of the webapp, and
+    # the owner would see a 504 for a sender that is already online. A failure
+    # here is picked up by the hourly sweep, which revisits any sender missing
+    # templates — so this is a head start, not the only path.
+    background.add_task(onboarding.ensure_templates,
+                        shop_id=payload.shop_id, settings=settings)
     return {"data": result}
 
 

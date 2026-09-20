@@ -161,6 +161,21 @@ async def list_phone_number_ids(*, waba_id: str, token: str) -> list[str]:
     return [n["id"] for n in body.get("data") or [] if n.get("id")]
 
 
+async def list_phone_numbers(*, waba_id: str, token: str) -> list[str]:
+    """The numbers on this WABA, as an owner would recognise them.
+
+    Used to label a choice between several WABAs: a salon owner knows their
+    own phone number, where a name may be a company registration they have
+    never read.
+    """
+    body = await _request(
+        "GET", f"{waba_id}/phone_numbers", token=token,
+        params={"fields": "display_phone_number"},
+    )
+    return [n["display_phone_number"] for n in body.get("data") or []
+            if n.get("display_phone_number")]
+
+
 async def get_waba_name(*, waba_id: str, token: str) -> str:
     """This WABA's name, for an owner who has to choose between several.
 

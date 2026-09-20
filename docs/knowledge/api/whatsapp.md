@@ -70,20 +70,20 @@ So both ids are read back from the exchanged token server-side, which is the bet
 
 Neither zero nor several can be resolved by guessing — picking one would attach the salon's sender to someone else's WhatsApp account, unrecoverably and with nothing downstream disagreeing — so they return `waba_ambiguous` / `phone_ambiguous` and write no sender.
 
-**`waba_ambiguous` is a question, and it is answerable (2026-09-20).** An owner who administers several WABAs is the ordinary case, not an error: only they know which is the salon's. The refusal therefore carries `wabas: [{id, name}]` — names read from `GET /{waba_id}?fields=name`, because a 15-digit id is not something a hairdresser can pick from — and the route returns it as the whole `detail` object rather than the bare slug every other refusal flattens to.
+**`waba_ambiguous` is a question, and it is answerable (2026-09-20).** An owner who administers several WABAs is the ordinary case, not an error: only they know which is the salon's. The refusal therefore carries `wabas: [{id, name, phone_numbers}]` — a 15-digit id is not something a hairdresser can pick from, and the **name alone often isn't either**: a WABA is frequently named after a company registration the owner has never read, so two of them side by side say nothing about which is the salon's. The number is what they know by heart. Both are best effort (`GET /{waba_id}?fields=name`, `GET /{waba_id}/phone_numbers`) and degrade to the id rather than failing the onboarding. The route returns this as the whole `detail` object rather than the bare slug every other refusal flattens to.
 
 The answer is a **second `complete` with `waba_id` and no `code`**. The code is single-use and was spent asking, so the service resumes from the token, which is now persisted **before** the lookups rather than after them. That reordering is what makes this work at all, and it also closes a smaller hole: the lookups used the token before anything had written it down, so a crash between them lost a credential that cannot be minted again without another popup. The resume skips the Tech Provider onboarding cap too — the popup already happened and was already counted; re-checking would strand a salon holding a token it cannot name a WABA for. `token_expires_at` is left alone on a resume (there is no `expires_in` to report), so an expiring token cannot be silently promoted to a non-expiring one.
 
 Server-side, in this order — and the order is load-bearing:
 
-1. Exchange the one-time `code` for the salon's business token, and **persist it before using it**. A crash after this point leaves a resumable row; losing the token leaves a WABA we can neither reach nor unsubscribe from. The id lookups above happen between the exchange and the write, since both need that token.
+1. Exchange the one-time `code` for the salon's business token, and **persist it before using it** — including before the id lookups above, which need it. A crash past this point leaves a resumable row; losing the token leaves a WABA we can neither reach nor unsubscribe from, and Meta will not reissue it without another popup.
 2. `POST /{waba_id}/subscribed_apps`. Without it every send still succeeds while we receive no delivery status, no template verdicts and no opt-outs — broken in the one way nothing surfaces. No `/register` call follows it: a coexistence number is already registered, and Meta's own guidance is not to call it on one.
 3. Read the number back (`is_on_biz_app`, `platform_type`) rather than trusting what the popup told the browser.
-4. Inject the template catalogue.
+4. **Not** the template catalogue — it is pushed by a background task *after* this responds (2026-09-20). One Graph round trip per catalogue entry took the whole call past the gateway timeout in front of the webapp, so the owner got a 504 for a sender that was already online. Templates were always the last step precisely because they are the only safely re-runnable one, which is what lets them move off the request path: if the background push dies, the hourly sweep's `list_senders_needing_templates` picks the shop up, and `POST /whatsapp/templates/ensure` is the manual retry.
 
 ```json
 {"data": {"ok": true, "status": "online", "phone_number": "+39…",
-          "coexistence": true, "templates": 1}}
+          "coexistence": true}}
 ```
 
 Errors (409): `not_started`, `onboarding_limit_reached`, `code_exchange_failed`, `meta_error`.

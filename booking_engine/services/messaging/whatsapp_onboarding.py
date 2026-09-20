@@ -135,10 +135,15 @@ async def start(
 
 
 async def _named(waba_ids: list[str], token: str) -> list[dict]:
-    """Label the candidates so the owner picks a name, not a 15-digit id.
+    """Label the candidates so the owner picks something they recognise.
 
-    Best effort per WABA: a name that won't load is not a reason to refuse an
-    onboarding, so it falls back to the id.
+    Name *and* phone numbers, because the name alone often isn't enough: a
+    WABA is frequently named after a company registration the owner has never
+    read, and two of them side by side say nothing about which is the salon's.
+    The number is the thing they know by heart.
+
+    Best effort on both: a label that won't load is not a reason to refuse an
+    onboarding, so it degrades to the id rather than raising.
     """
     out = []
     for wid in waba_ids:
@@ -146,7 +151,11 @@ async def _named(waba_ids: list[str], token: str) -> list[dict]:
             name = await meta.get_waba_name(waba_id=wid, token=token)
         except meta.MetaError:
             name = wid
-        out.append({"id": wid, "name": name})
+        try:
+            numbers = await meta.list_phone_numbers(waba_id=wid, token=token)
+        except meta.MetaError:
+            numbers = []
+        out.append({"id": wid, "name": name, "phone_numbers": numbers})
     return out
 
 
@@ -169,8 +178,9 @@ async def complete(
        explicitly not to call `/register` on one.
     3. Read the number back rather than trusting the popup, which told the
        *browser* what happened.
-    4. Templates last: they are the only step that is safely re-runnable, and
-       `ensure_templates` is exposed separately for exactly that reason.
+    4. Templates are **not** pushed here — see the note where this returns.
+       They are the only safely re-runnable step, which is what lets them move
+       off the request path without a gap opening.
 
     **Called a second time without a `code` to resolve an ambiguity.** When the
     owner administers more than one WABA the first call cannot know which one
@@ -336,11 +346,16 @@ async def complete(
         offline_reason=None,
     )
 
-    templates = await ensure_templates(shop_id=shop_id, settings=settings)
+    # Templates are deliberately NOT pushed here. They are one Graph round trip
+    # per catalogue entry against a WABA that has just been created, which took
+    # the whole call past the gateway timeout in front of the webapp — the
+    # sender was online and the owner saw a 504. The caller schedules the push
+    # after responding, and the hourly sweep's `list_senders_needing_templates`
+    # is the reconciler if that push dies: this stage was always the
+    # re-runnable one, which is why it was last.
     return {"ok": True, "status": "online",
             "phone_number": number.display_phone_number,
-            "coexistence": number.is_on_biz_app,
-            "templates": templates.get("created", 0)}
+            "coexistence": number.is_on_biz_app}
 
 
 async def abort(*, shop_id: UUID) -> dict:
