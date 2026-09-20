@@ -6,6 +6,7 @@ import httpx
 import pytest
 import respx
 
+from booking_engine.api.routes import whatsapp as whatsapp_routes
 from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.db import sms_queries
 from booking_engine.db import whatsapp_queries as wq
@@ -2074,3 +2075,74 @@ async def test_a_template_meta_does_not_have_is_still_a_failure(monkeypatch):
 
     assert set(result["failed"]) == set(wt.CATALOGUE)
     assert not calls.get("templates")
+
+
+# ---------------------------------------------------------------- secret box
+
+def test_sealed_token_round_trips_and_is_not_readable_at_rest():
+    """The one credential with no parent behind it must not sit in plaintext."""
+    from cryptography.fernet import Fernet
+    from booking_engine.services import secret_box as sb
+
+    key = Fernet.generate_key().decode()
+    stored = sb.seal("EAAG-real-business-token", key)
+
+    assert "EAAG-real-business-token" not in stored, "a dump would read it"
+    assert stored.startswith("v1:"), "the prefix is what tells sealed from legacy"
+    assert sb.unseal(stored, key) == "EAAG-real-business-token"
+
+
+def test_legacy_plaintext_reads_without_a_migration():
+    """Rows written before the key existed still open — that is the rollout."""
+    from cryptography.fernet import Fernet
+    from booking_engine.services import secret_box as sb
+
+    assert sb.unseal("EAAG-legacy", Fernet.generate_key().decode()) == "EAAG-legacy"
+    assert sb.unseal("EAAG-legacy", "") == "EAAG-legacy"
+
+
+def test_unconfigured_stores_plaintext_rather_than_taking_whatsapp_offline():
+    from booking_engine.services import secret_box as sb
+    assert sb.seal("EAAG-x", "") == "EAAG-x"
+
+
+def test_a_sealed_token_never_silently_becomes_its_own_ciphertext():
+    """Returning ciphertext would reach Meta as a bearer token and come back as
+    a generic auth error — read as an expired token, sending the salon through
+    a reconnect that cannot fix it."""
+    from cryptography.fernet import Fernet
+    from booking_engine.services import secret_box as sb
+
+    stored = sb.seal("EAAG-x", Fernet.generate_key().decode())
+    with pytest.raises(sb.SecretBoxError):
+        sb.unseal(stored, "")
+    with pytest.raises(sb.SecretBoxError):
+        sb.unseal(stored, Fernet.generate_key().decode())
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_for_a_template_we_never_recorded_is_reported(monkeypatch):
+    """Silent until 2026-09-20, when six templates did exactly this.
+
+    Meta ruling on a name we hold no row for updates nothing. Reporting the
+    miss is what makes the gap audible while the sweep's adoption repairs it.
+    """
+    seen = {}
+    async def _set(**kw):
+        seen.update(kw)
+        return False  # no row matched
+    monkeypatch.setattr(wq, "set_template_status", _set)
+    warnings = []
+    monkeypatch.setattr(
+        whatsapp_routes.logger, "warning",
+        lambda msg, *a: warnings.append(msg % a if a else msg),
+    )
+
+    await whatsapp_routes._handle_change(
+        {"shop_id": SHOP},
+        {"field": "message_template_status_update",
+         "value": {"message_template_name": "it_promo_v1", "event": "APPROVED"}},
+    )
+
+    assert seen["name"] == "it_promo_v1"
+    assert any("template_verdict_unmatched" in w for w in warnings)

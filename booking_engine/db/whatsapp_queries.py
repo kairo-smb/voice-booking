@@ -9,15 +9,33 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+from booking_engine.config import get_settings
 from booking_engine.db.connection import execute, execute_one, execute_void
+from booking_engine.services.secret_box import seal, unseal
 
 
 # --------------------------------------------------------------------- senders
+#
+# `access_token` is encrypted at rest (services/secret_box.py) and sealed and
+# opened *here*, at the one boundary every caller already goes through — so no
+# service, route or test had to learn about it. Every read that can surface the
+# column passes through `_opened`; a new one that doesn't is a token leaked to
+# a log or a Graph call as ciphertext.
+
+def _opened(row: dict | None) -> dict | None:
+    if row and row.get("access_token"):
+        row["access_token"] = unseal(row["access_token"], get_settings().whatsapp_token_key)
+    return row
+
+
+def _opened_all(rows: list[dict]) -> list[dict]:
+    return [_opened(r) for r in rows]
+
 
 async def get_sender(shop_id: UUID) -> dict | None:
-    return await execute_one(
+    return _opened(await execute_one(
         "SELECT * FROM whatsapp.senders WHERE shop_id = $1", shop_id
-    )
+    ))
 
 
 async def get_shop_language(shop_id: UUID) -> str | None:
@@ -62,6 +80,10 @@ async def set_sender_fields(shop_id: UUID, **fields) -> None:
         "messaging_limit", "throughput_level", "offline_reason", "daily_cap",
     }
     fields = {k: v for k, v in fields.items() if k in allowed}
+    if "access_token" in fields:
+        fields["access_token"] = seal(
+            fields["access_token"], get_settings().whatsapp_token_key
+        )
     if not fields:
         return
     sets = ", ".join(f"{k} = ${i + 2}" for i, k in enumerate(fields))
@@ -94,16 +116,16 @@ async def list_verifying_senders() -> list[dict]:
     after persisting the token/waba/phone_number_id but before flipping status
     to `online` (or `failed`) — the row it left behind is exactly this shape.
     """
-    return await execute(
+    return _opened_all(await execute(
         "SELECT * FROM whatsapp.senders WHERE status IN ('verifying','pending_signup') "
         "AND phone_number_id IS NOT NULL AND access_token IS NOT NULL"
-    )
+    ))
 
 
 async def get_sender_by_phone(phone: str) -> dict | None:
-    return await execute_one(
+    return _opened(await execute_one(
         "SELECT * FROM whatsapp.senders WHERE phone_number = $1", phone
-    )
+    ))
 
 
 async def get_sender_by_waba(waba_id: str) -> dict | None:
@@ -113,9 +135,9 @@ async def get_sender_by_waba(waba_id: str) -> dict | None:
     the tenant only by `entry[].id`, the WABA id — so this is the sole route
     from an inbound webhook to a shop.
     """
-    return await execute_one(
+    return _opened(await execute_one(
         "SELECT * FROM whatsapp.senders WHERE waba_id = $1", waba_id
-    )
+    ))
 
 
 # ------------------------------------------------------------------- templates
@@ -164,21 +186,28 @@ async def upsert_template(
 
 async def set_template_status(
     *, shop_id: UUID, name: str, status: str, rejection_reason: str | None = None
-) -> None:
-    """Record Meta's verdict on one template.
+) -> bool:
+    """Record Meta's verdict on one template. False when we hold no such row.
 
     Keyed by (shop, name) and not by name alone: every salon's copy of the
     catalogue carries the *same* name (`kairo_promo_v1`), so a global update
     would rule on every shop at once from one shop's webhook.
+
+    Returning whether it matched is what lets the webhook say so. A verdict for
+    a template we have no row for used to update nothing and report success —
+    the exact shape of the 2026-09-20 failure, where Meta held six templates we
+    had never recorded and every signal about them went to ground.
     """
-    await execute_void(
+    row = await execute_one(
         """
         UPDATE whatsapp.templates
         SET status = $3, rejection_reason = $4, updated_at = now()
         WHERE shop_id = $1 AND name = $2
+        RETURNING template_key
         """,
         shop_id, name, status, rejection_reason,
     )
+    return row is not None
 
 
 async def list_senders_needing_templates(fingerprints: list[str]) -> list[dict]:
@@ -219,7 +248,7 @@ async def list_senders_needing_templates(fingerprints: list[str]) -> list[dict]:
 
 async def list_senders_with_template(template_key: str) -> list[dict]:
     """Every WABA carrying one catalogue entry — the retire fan-out's worklist."""
-    return await execute(
+    return _opened_all(await execute(
         """
         SELECT s.shop_id, s.waba_id, s.access_token, t.name
         FROM whatsapp.templates t
@@ -228,7 +257,7 @@ async def list_senders_with_template(template_key: str) -> list[dict]:
           AND s.waba_id IS NOT NULL AND s.access_token IS NOT NULL
         """,
         template_key,
-    )
+    ))
 
 
 async def delete_template_row(*, shop_id: UUID, template_key: str) -> None:
@@ -251,15 +280,25 @@ async def list_unresolved_templates() -> list[dict]:
     webhooks; this exists because a missed webhook would otherwise leave a
     template `pending` forever and block every send for that shop in silence.
     """
-    return await execute(
+    return _opened_all(await execute(
         """
         SELECT t.*, w.waba_id, w.access_token
         FROM whatsapp.templates t
         JOIN whatsapp.senders w ON w.shop_id = t.shop_id
-        WHERE t.status IN ('unsubmitted','received','pending')
+        WHERE (
+                t.status IN ('unsubmitted','received','pending')
+                -- An approved template can still be paused or disabled later,
+                -- on Meta's own quality signals, and that verdict arrives by
+                -- the same webhook that can be missed. Left out, a missed one
+                -- meant sending against a dead template forever with nothing
+                -- anywhere saying why. Re-checked daily rather than hourly:
+                -- it is one Graph call per template per shop, and a pause is
+                -- not an emergency the way a rejection is.
+                OR (t.status = 'approved' AND t.updated_at < now() - interval '1 day')
+              )
           AND w.waba_id IS NOT NULL AND w.access_token IS NOT NULL
         """
-    )
+    ))
 
 
 # ----------------------------------------------------------------- the queue

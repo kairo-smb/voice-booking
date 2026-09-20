@@ -584,14 +584,24 @@ async def _handle_change(sender: dict, change: dict) -> None:
     if field == "message_template_status_update":
         # Minutes instead of the next hourly tick. The tick's poll survives as
         # a reconciler for the webhook Meta doesn't deliver.
-        await wq.set_template_status(
+        name = value.get("message_template_name", "")
+        matched = await wq.set_template_status(
             shop_id=sender["shop_id"],
-            name=value.get("message_template_name", ""),
+            name=name,
             status=onboarding.TEMPLATE_STATUS.get(
                 (value.get("event") or "").lower(), "pending"
             ),
             rejection_reason=value.get("reason") or None,
         )
+        # Meta ruling on a template we hold no row for: it exists on that WABA
+        # and we don't know it. Silent until 2026-09-20, when six of them did
+        # exactly this. The sweep's adoption path is what repairs it — this
+        # only makes the gap audible in the meantime.
+        if not matched:
+            logger.warning(
+                "whatsapp.template_verdict_unmatched shop=%s name=%s event=%s",
+                sender["shop_id"], name, value.get("event"),
+            )
         return
 
     if field != "messages":

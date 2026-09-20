@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # the shared string Meta echoes back when it first registers the webhook.
     meta_app_secret: str = ""
     meta_verify_token: str = ""
+    # Fernet key encrypting `whatsapp.senders.access_token` at rest — a
+    # credential with full authority over one salon's WhatsApp and no shared
+    # parent behind it to revoke. Empty keeps the pre-2026-09-20 behaviour
+    # (plaintext, logged loudly at every write): refusing would take WhatsApp
+    # offline to fix a threat that is about a database dump. Generate with
+    # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+    whatsapp_token_key: str = ""
     # Kairo's own WABA (scripts/kairo_waba.py sets it up) — templates are
     # created here by hand and reviewed by Meta before ensure_templates will
     # push them into any customer's WABA. Empty means "not configured yet",
