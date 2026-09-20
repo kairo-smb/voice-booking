@@ -483,15 +483,43 @@ async def ensure_templates(
                     body_text=tpl.body, sample_variables=tpl.sample,
                 )
         except meta.MetaError as exc:
-            # One rejected template must not stop the rest of the catalogue.
-            logger.warning("whatsapp.template_push_failed shop=%s key=%s err=%s",
-                           shop_id, key, exc)
-            failed.append(key)
-            continue
+            # The name may already exist on that WABA with no row here: a
+            # create that reached Meta but whose row was lost, a re-onboarding
+            # of the same WABA, or — the one that actually bit (2026-09-20) —
+            # Meta having re-categorised the template on review, which makes
+            # every later create refuse the category we keep sending.
+            #
+            # Adopt it instead of failing. Refusing meant the sweep retried the
+            # identical create every hour forever while the panel showed the
+            # feature as waiting for Meta, which was true of nothing.
+            adopted = None
+            if not existing:
+                adopted = await meta.fetch_template(
+                    waba_id=row["waba_id"], name=name, token=row["access_token"],
+                )
+            if not adopted or not adopted.id:
+                # One rejected template must not stop the rest of the catalogue.
+                logger.warning("whatsapp.template_push_failed shop=%s key=%s err=%s",
+                               shop_id, key, exc)
+                failed.append(key)
+                continue
+            logger.warning("whatsapp.template_adopted shop=%s key=%s status=%s "
+                           "category=%s (create refused: %s)",
+                           shop_id, key, adopted.status, adopted.category, exc)
+            meta_id, status = adopted.id, adopted.status
+            # Meta's body, not the catalogue's, so a template we adopted with
+            # stale copy reads as drifted and the edit path fixes it next run
+            # rather than the row claiming an alignment nobody checked.
+            wanted = body_hash(adopted.body)
+            # Meta's category too: storing our guess is what makes the next
+            # create repeat the same refusal.
+            tpl_category = adopted.category or tpl.category
+        else:
+            tpl_category = tpl.category
         await wq.upsert_template(
             shop_id=shop_id, template_key=key, name=name,
             meta_template_id=meta_id, language=language,
-            category=tpl.category, status=TEMPLATE_STATUS.get(status, "pending"),
+            category=tpl_category, status=TEMPLATE_STATUS.get(status, "pending"),
             variable_count=tpl.variables, body_hash=wanted,
         )
         if existing:

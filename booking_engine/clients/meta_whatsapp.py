@@ -57,9 +57,13 @@ async def _request(
             response.raise_for_status()
         except HTTPStatusError as exc:
             err = body.get("error") or {}
+            # `message` is Graph's generic label — "Invalid parameter" for a
+            # whole family of unrelated refusals. `error_user_msg` is the one
+            # that names the actual cause, and dropping it cost an afternoon of
+            # blind template failures (2026-09-20), so it leads when present.
             raise MetaError(
                 code=err.get("code"),
-                message=err.get("message") or str(exc),
+                message=err.get("error_user_msg") or err.get("message") or str(exc),
                 subcode=err.get("error_subcode"),
             ) from exc
         return body
@@ -274,6 +278,13 @@ class TemplateStatus:
     # against the catalogue: "approved" alone answers a question about a *name*,
     # and a name says nothing about which version of the copy was approved.
     body: str = ""
+    # Meta's own id and category for this template. Both are needed to adopt a
+    # template that already exists on a WABA we have no row for — and the
+    # category has to be *Meta's*, not ours: Meta re-categorises on review
+    # (a UTILITY body it reads as promotional comes back MARKETING), and
+    # resubmitting our own guess is refused for as long as the name lives.
+    id: str = ""
+    category: str = ""
 
 
 async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStatus | None:
@@ -288,7 +299,8 @@ async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStat
     body = await _request(
         "GET", f"{waba_id}/message_templates", token=token,
         params={"name": name,
-                "fields": "name,status,rejected_reason,components", "limit": 5},
+                "fields": "id,name,status,category,rejected_reason,components",
+                "limit": 5},
     )
     for row in body.get("data", []):
         if row.get("name") == name:
@@ -301,6 +313,8 @@ async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStat
                 status=(row.get("status") or "pending").lower(),
                 rejection_reason=row.get("rejected_reason") or None,
                 body=text,
+                id=row.get("id") or "",
+                category=row.get("category") or "",
             )
     return None
 

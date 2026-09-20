@@ -2004,3 +2004,73 @@ async def test_resume_does_not_clear_the_recorded_expiry(monkeypatch):
 
     assert not any("token_expires_at" in f for f in calls["fields"]), \
         "resuming would silently make an expiring token look non-expiring"
+
+
+@pytest.mark.asyncio
+async def test_a_template_meta_already_holds_is_adopted_not_refused(monkeypatch):
+    """Meta re-categorises on review, which refuses every later create.
+
+    The first real onboarding (2026-09-20) created all six on the WABA, then
+    every re-push failed forever — Meta had moved a UTILITY body to MARKETING,
+    and we kept resubmitting our own category. Nothing was recorded, so the
+    sweep retried the identical create hourly while the panel said the feature
+    was waiting for Meta.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "customer-token"},
+        calls={},
+    )
+    async def _refuse(**kw):
+        raise meta.MetaError(100, "The category UTILITY doesn't match", 2388026)
+    async def _found(*, waba_id, name, token):
+        return meta.TemplateStatus(
+            status="pending", rejection_reason=None,
+            body="corpo che Meta tiene", id="META-1", category="MARKETING",
+        )
+    monkeypatch.setattr(meta, "create_template", _refuse)
+    monkeypatch.setattr(meta, "fetch_template", _found)
+
+    # The gate is answered here so the fake `fetch_template` above only ever
+    # serves adoption — `approved_on_kairo_waba` uses the same call.
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(),
+        approved={("it", k) for k in wt.CATALOGUE},
+    )
+
+    assert result["failed"] == [], "an existing template is not a failure"
+    written = calls["templates"]
+    assert written, "adopting must record the row, or the sweep retries forever"
+    row = written[0]
+    assert row["meta_template_id"] == "META-1"
+    # Meta's category, not ours: storing our guess is what makes the next
+    # create repeat the same refusal.
+    assert row["category"] == "MARKETING"
+    # Meta's body, so stale copy reads as drift and the edit path fixes it.
+    assert row["body_hash"] == wo.body_hash("corpo che Meta tiene")
+
+
+@pytest.mark.asyncio
+async def test_a_template_meta_does_not_have_is_still_a_failure(monkeypatch):
+    """Adoption must not turn a genuine rejection into a silent success."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "customer-token"},
+        calls={},
+    )
+    async def _refuse(**kw):
+        raise meta.MetaError(100, "Invalid parameter", None)
+    async def _absent(**kw):
+        return None
+    monkeypatch.setattr(meta, "create_template", _refuse)
+    monkeypatch.setattr(meta, "fetch_template", _absent)
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(),
+        approved={("it", k) for k in wt.CATALOGUE},
+    )
+
+    assert set(result["failed"]) == set(wt.CATALOGUE)
+    assert not calls.get("templates")
