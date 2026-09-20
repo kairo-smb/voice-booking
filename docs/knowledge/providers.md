@@ -131,7 +131,25 @@ exchange), `META_VERIFY_TOKEN` (webhook handshake),
 `META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN` (Kairo's own WABA — the template
 approval gate reads these; unset means `ensure_templates` propagates nothing),
 `WHATSAPP_SEND_START_HOUR`/`WHATSAPP_SEND_END_HOUR` (default 9/20,
-Europe/Rome), `WHATSAPP_SENDS_PER_MINUTE` (default 60).
+Europe/Rome), `WHATSAPP_SENDS_PER_MINUTE` (default 60),
+`WHATSAPP_TOKEN_KEY` (Fernet key encrypting `senders.access_token` at rest —
+see below), and `WEBAPP_BASE_URL`/`MARKET_INTEL_SECRET`, shared with the SMS
+charge path, which the tick also uses to ask the webapp to email a salon whose
+token is about to expire.
+
+**`access_token` is encrypted at rest (2026-09-20).** It is full authority over
+one salon's WhatsApp with no shared parent credential behind it to revoke —
+plaintext from 2026-08-24 until this. Sealed and opened in
+`db/whatsapp_queries.py`, at the one boundary every caller already crosses, so
+no service or route knows about it; the cipher is Fernet
+(`services/secret_box.py`) and the key lives in Fly secrets rather than in the
+database it protects. A sealed value carries a `v1:` prefix, which is what let
+this land with no migration and no backfill window: a row written before the
+key existed still reads, and is re-sealed the next time anything writes it.
+**Unset keeps the old behaviour** and logs loudly at every write — refusing
+would take WhatsApp offline to fix a threat that is about a database dump.
+Rotating the key requires re-sealing every row first; there is no dual-key
+read path.
 
 **The Graph calls, in the order onboarding makes them** (all `v26.0`, pinned —
 Graph changes shape across versions):

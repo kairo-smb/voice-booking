@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from booking_engine.clients import meta_whatsapp as meta
+from booking_engine.clients import webapp_notify
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging.whatsapp_templates import (
@@ -35,6 +36,15 @@ from booking_engine.services.messaging.whatsapp_templates import (
 )
 
 logger = logging.getLogger(__name__)
+
+# How early to start asking the owner to reconnect, and how rarely to repeat
+# it. Seven days matches the webapp banner's own window (`RENEW_WINDOW_DAYS`
+# in lib/whatsapp/client.ts) — two different answers to "is it urgent yet?"
+# would be the kind of drift nobody notices until a salon goes dark. Three
+# days between mails means at most three across the window: enough to catch a
+# salon closed for a long weekend, few enough not to become noise.
+RENEW_WINDOW_DAYS = 7
+REMINDER_COOLDOWN_HOURS = 72
 
 # Longer than any real popup interaction; a pending row this old was abandoned.
 ABANDONED_AFTER = timedelta(minutes=15)
@@ -619,6 +629,26 @@ async def sweep(*, settings) -> dict:
         except Exception:  # noqa: BLE001 — see above
             logger.exception("whatsapp.template_poll_failed shop=%s name=%s",
                              tpl["shop_id"], tpl["name"])
+            counts["errors"] += 1
+
+    # The renewal nudge, by email. Meta renews nothing, so a salon that does
+    # not reconnect simply stops sending on day 61 — and the banner that used
+    # to be the only warning is pull-only: the owner has to open the app inside
+    # the window, and never sees it while their session is in employee view.
+    # The attempt is recorded whether or not the mail went, so a salon with no
+    # owner mailbox is not retried every hour against a fact about the shop.
+    for row in await wq.list_senders_needing_token_reminder(
+        window_days=RENEW_WINDOW_DAYS, cooldown_hours=REMINDER_COOLDOWN_HOURS,
+    ):
+        try:
+            await webapp_notify.whatsapp_token_expiring(
+                shop_id=row["shop_id"], days_left=row["days_left"],
+                phone_number=row.get("phone_number"), settings=settings,
+            )
+            await wq.mark_token_reminder_sent(row["shop_id"])
+            counts["reminded"] = counts.get("reminded", 0) + 1
+        except Exception:  # noqa: BLE001 — see above
+            logger.exception("whatsapp.token_reminder_failed shop=%s", row["shop_id"])
             counts["errors"] += 1
 
     return counts

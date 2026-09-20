@@ -122,6 +122,47 @@ async def list_verifying_senders() -> list[dict]:
     ))
 
 
+async def list_senders_needing_token_reminder(
+    *, window_days: int, cooldown_hours: int
+) -> list[dict]:
+    """Online senders whose token dies soon and who haven't just been told.
+
+    The banner that used to be the only warning is pull-only: the owner has to
+    open the app inside the window, and never sees it at all while their
+    session is in employee view, since every WhatsApp route is owner-only.
+
+    `token_expires_at IS NOT NULL` matters — NULL means Meta reported no
+    expiry, and emailing about a deadline nobody read back from Meta is worse
+    than silence. Past the date is deliberately included: that salon is
+    already dead and the reconnect still fixes it.
+    """
+    return await execute(
+        """
+        SELECT shop_id, phone_number, token_expires_at,
+               EXTRACT(DAY FROM token_expires_at - now())::int AS days_left
+        FROM whatsapp.senders
+        WHERE status = 'online'
+          AND token_expires_at IS NOT NULL
+          AND token_expires_at < now() + ($1 || ' days')::interval
+          AND (token_reminder_sent_at IS NULL
+               OR token_reminder_sent_at < now() - ($2 || ' hours')::interval)
+        """,
+        str(window_days), str(cooldown_hours),
+    )
+
+
+async def mark_token_reminder_sent(shop_id: UUID) -> None:
+    """Record the attempt, not the delivery.
+
+    A shop with no owner mailbox would otherwise be retried every hour for the
+    whole window against a fact about the shop. The banner still covers it.
+    """
+    await execute_void(
+        "UPDATE whatsapp.senders SET token_reminder_sent_at = now() WHERE shop_id = $1",
+        shop_id,
+    )
+
+
 async def get_sender_by_phone(phone: str) -> dict | None:
     return _opened(await execute_one(
         "SELECT * FROM whatsapp.senders WHERE phone_number = $1", phone

@@ -51,7 +51,13 @@ Creates nothing provider-side; it records intent and returns the popup config:
 - `complete` skips the "already online, nothing to do" early return — the exit that makes an ordinary double-submit idempotent, and the one that would otherwise report success while leaving the expiring token in place.
 - `complete` skips Meta's **new-customer onboarding cap** (10 or 200 per rolling 7 days). That cap counts new customers; a salon renewing its own token is not one, and counting it would let a busy onboarding week block an existing salon from renewing — its sender then dies at day 60 over someone else's signup.
 
-The webapp drives this from `token_expires_at`: a cockpit banner (`WhatsAppTokenBanner`) and the WhatsApp panel both nudge inside the last 7 days, and the panel's button opens the same Embedded Signup popup with `reconnect: true`. It is **pull-only** — the owner has to open the app.
+The webapp drives this from `token_expires_at`: a cockpit banner (`WhatsAppTokenBanner`) and the WhatsApp panel both nudge inside the last 7 days, and the panel's button opens the same Embedded Signup popup with `reconnect: true`.
+
+**It is no longer pull-only (2026-09-20).** The banner required the owner to open the app inside the one week that matters — and never showed at all while their session was in employee view, since every WhatsApp route is owner-only. The hourly tick now also emails: `list_senders_needing_token_reminder` finds online senders inside `RENEW_WINDOW_DAYS` (7, the same constant the banner uses — two answers to "is it urgent yet?" would drift unnoticed until a salon went dark) and POSTs to the webapp's `/whatsapp/token-expiring`, which owns the mailbox, the owner's address, the shop's locale and the already-written `whatsappExpiringEmail` template. Same `MARKET_INTEL_SECRET` bearer as the credit charge; a second secret for the same hop would be a second thing to rotate.
+
+`token_reminder_sent_at` (migration 23) records the **attempt**, not the delivery, and `REMINDER_COOLDOWN_HOURS` (72) caps it at roughly three mails across the window. A salon with no owner mailbox, or a Resend refusal, is marked anyway: retrying hourly against a fact about the shop is noise, and the banner still covers that salon. Senders already past the date are included — that one is dead and the reconnect still fixes it.
+
+Built because the expiry stopped being an inference: the first real onboarding came back with `token_expires_at` exactly 60 days out, so Meta does return `expires_in` and the 60-day configuration is doing what its name says.
 
 ### `POST /whatsapp/onboarding/complete`
 

@@ -637,6 +637,15 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
     monkeypatch.setattr(wq, "get_template", _get_template)
     monkeypatch.setattr(wq, "upsert_template", _upsert_template)
     monkeypatch.setattr(wq, "onboarded_last_7_days", _onboarded)
+    # The sweep's last stage. Stubbed here rather than in each sweep test:
+    # left live it reaches for a real pool, which is a confusing way for an
+    # unrelated test to fail.
+    async def _due_for_reminder(**kw):
+        return calls.get("token_reminders", [])
+    async def _mark_reminded(shop_id):
+        calls.setdefault("reminded", []).append(shop_id)
+    monkeypatch.setattr(wq, "list_senders_needing_token_reminder", _due_for_reminder)
+    monkeypatch.setattr(wq, "mark_token_reminder_sent", _mark_reminded)
 
     async def _exchange(**kw):
         calls.setdefault("exchange", []).append(kw)
@@ -2146,3 +2155,64 @@ async def test_a_verdict_for_a_template_we_never_recorded_is_reported(monkeypatc
 
     assert seen["name"] == "it_promo_v1"
     assert any("template_verdict_unmatched" in w for w in warnings)
+
+
+async def _noop():
+    return None
+
+
+async def _run_sweep_stage(monkeypatch):
+    """Run sweep() with every stage but the reminder stubbed to nothing."""
+    async def _none(*a, **kw):
+        return []
+    async def _empty_set(*a, **kw):
+        return set()
+    for name in ("list_verifying_senders", "list_senders_needing_templates",
+                 "list_unresolved_templates"):
+        monkeypatch.setattr(wq, name, _none)
+    monkeypatch.setattr(wo, "approved_on_kairo_waba", _empty_set)
+    return await wo.sweep(settings=FakeSettings())
+
+
+@pytest.mark.asyncio
+async def test_the_tick_emails_once_per_window_not_once_per_hour(monkeypatch):
+    """The banner is pull-only; email is the only warning that reaches a salon
+    whose owner does not open the app in the week that matters."""
+    sent, marked = [], []
+    async def _due(*, window_days, cooldown_hours):
+        sent.append((window_days, cooldown_hours))
+        return [{"shop_id": SHOP, "phone_number": "+39 02 1", "days_left": 3}]
+    async def _notify(**kw):
+        sent.append(kw)
+        return True
+    async def _mark(shop_id):
+        marked.append(shop_id)
+    monkeypatch.setattr(wq, "list_senders_needing_token_reminder", _due)
+    monkeypatch.setattr(wq, "mark_token_reminder_sent", _mark)
+    monkeypatch.setattr(wo.webapp_notify, "whatsapp_token_expiring", _notify)
+
+    await _run_sweep_stage(monkeypatch)
+
+    assert sent[0] == (wo.RENEW_WINDOW_DAYS, wo.REMINDER_COOLDOWN_HOURS)
+    assert sent[1]["days_left"] == 3
+    assert marked == [SHOP], "unmarked means the next tick mails again in an hour"
+
+
+@pytest.mark.asyncio
+async def test_a_salon_with_no_mailbox_is_not_retried_every_hour(monkeypatch):
+    """The attempt is recorded, not the delivery — an hourly retry against a
+    shop that simply has no owner email is noise, and the banner still covers
+    that salon."""
+    marked = []
+    async def _due(**kw):
+        return [{"shop_id": SHOP, "phone_number": None, "days_left": 0}]
+    async def _notify(**kw):
+        return False  # no owner email, or Resend refused
+    monkeypatch.setattr(wq, "list_senders_needing_token_reminder", _due)
+    monkeypatch.setattr(wq, "mark_token_reminder_sent",
+                        lambda shop_id: marked.append(shop_id) or _noop())
+    monkeypatch.setattr(wo.webapp_notify, "whatsapp_token_expiring", _notify)
+
+    await _run_sweep_stage(monkeypatch)
+
+    assert marked == [SHOP]
