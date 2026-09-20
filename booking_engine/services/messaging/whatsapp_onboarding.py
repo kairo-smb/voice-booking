@@ -134,8 +134,24 @@ async def start(
     return {"ok": True, "status": "pending_signup", "signup": signup_config(settings)}
 
 
+async def _named(waba_ids: list[str], token: str) -> list[dict]:
+    """Label the candidates so the owner picks a name, not a 15-digit id.
+
+    Best effort per WABA: a name that won't load is not a reason to refuse an
+    onboarding, so it falls back to the id.
+    """
+    out = []
+    for wid in waba_ids:
+        try:
+            name = await meta.get_waba_name(waba_id=wid, token=token)
+        except meta.MetaError:
+            name = wid
+        out.append({"id": wid, "name": name})
+    return out
+
+
 async def complete(
-    *, shop_id: UUID, code: str, settings,
+    *, shop_id: UUID, code: str | None = None, settings,
     waba_id: str | None = None, phone_number_id: str | None = None,
     redirect_uri: str | None = None, reconnect: bool = False,
 ) -> dict:
@@ -155,6 +171,13 @@ async def complete(
        *browser* what happened.
     4. Templates last: they are the only step that is safely re-runnable, and
        `ensure_templates` is exposed separately for exactly that reason.
+
+    **Called a second time without a `code` to resolve an ambiguity.** When the
+    owner administers more than one WABA the first call cannot know which one
+    they meant, so it stops and asks. The `code` is single-use and by then
+    spent, which is why this resumes from the token persisted below rather than
+    re-exchanging it — redoing the popup to answer a question about the popup's
+    own result is the shape to avoid.
     """
     row = await wq.get_sender(shop_id)
     if not row:
@@ -174,7 +197,10 @@ async def complete(
     # would mean a busy onboarding week silently blocks an existing salon from
     # renewing — the sender then dies at day 60 because of someone else's
     # signup.
-    if not reconnect:
+    # Skipped on a resume too (no code): the popup already happened and was
+    # already counted. Re-checking would let a busy onboarding week strand a
+    # salon halfway through, holding a token and unable to name its WABA.
+    if code and not reconnect:
         limit = meta_limits.onboarding_limit(
             getattr(settings, "meta_access_verified", False)
         )
@@ -185,15 +211,23 @@ async def complete(
             return {"ok": False, "error": "onboarding_limit_reached",
                     "onboarded_last_7_days": recent, "limit": limit}
 
-    try:
-        token, expires_in = await meta.exchange_code(
-            code=code, app_id=settings.meta_app_id,
-            app_secret=settings.meta_app_secret,
-            redirect_uri=redirect_uri,
-        )
-    except meta.MetaError as exc:
-        logger.warning("whatsapp.code_exchange_failed shop=%s err=%s", shop_id, exc)
-        return {"ok": False, "error": "code_exchange_failed"}
+    if not code:
+        # Resuming to answer an ambiguity. The token below is the one this
+        # function persisted on the call that asked the question.
+        token = row.get("access_token")
+        if not token:
+            return {"ok": False, "error": "not_started"}
+        expires_in = None
+    else:
+        try:
+            token, expires_in = await meta.exchange_code(
+                code=code, app_id=settings.meta_app_id,
+                app_secret=settings.meta_app_secret,
+                redirect_uri=redirect_uri,
+            )
+        except meta.MetaError as exc:
+            logger.warning("whatsapp.code_exchange_failed shop=%s err=%s", shop_id, exc)
+            return {"ok": False, "error": "code_exchange_failed"}
 
     # NULL means Meta reported no expiry. Nothing renews an expiring token:
     # a business token is minted by the salon completing Embedded Signup, so
@@ -216,6 +250,16 @@ async def complete(
             "the salon reconnects", shop_id, expires_at,
         )
 
+    # Persisted here, before the first call that uses it. A crash past this
+    # point leaves a resumable row; losing the token would leave a WABA we can
+    # neither reach nor unsubscribe from — and the code that produced it is
+    # spent, so it cannot be minted again without another popup. This is also
+    # what makes the ambiguity answerable below without a second signup.
+    if code:
+        await wq.set_sender_fields(
+            shop_id, access_token=token, token_expires_at=expires_at,
+        )
+
     # The popup's ids are optional, and normally absent. Meta only posts
     # `WA_EMBEDDED_SIGNUP` — the message carrying waba_id and phone_number_id —
     # when the flow runs through its JS SDK, and ours cannot: the SDK routes
@@ -236,11 +280,14 @@ async def complete(
             logger.warning("whatsapp.waba_lookup_failed shop=%s err=%s", shop_id, exc)
             return {"ok": False, "error": "waba_lookup_failed"}
         # Neither zero nor several can be resolved by guessing: zero means the
-        # grant did not include a WABA, several means we cannot tell which one
-        # the salon meant. Both are named errors rather than a wrong sender.
+        # grant did not include a WABA, several means the owner administers
+        # more than one and only they know which is the salon's. Guessing
+        # attaches the sender to someone else's WhatsApp account.
         if len(granted) != 1:
             logger.warning("whatsapp.waba_ambiguous shop=%s ids=%s", shop_id, granted)
-            return {"ok": False, "error": "waba_ambiguous", "waba_ids": granted}
+            return {"ok": False, "error": "waba_ambiguous",
+                    "waba_ids": granted,
+                    "wabas": await _named(granted, token)}
         waba_id = granted[0]
 
     if not phone_number_id:
@@ -254,12 +301,8 @@ async def complete(
             return {"ok": False, "error": "phone_ambiguous", "phone_number_ids": numbers}
         phone_number_id = numbers[0]
 
-    # Written before the calls that use it: a crash after this point leaves a
-    # resumable row, where losing the token would leave a WABA we can neither
-    # reach nor unsubscribe from.
     await wq.set_sender_fields(
-        shop_id, access_token=token, waba_id=waba_id,
-        phone_number_id=phone_number_id, token_expires_at=expires_at,
+        shop_id, waba_id=waba_id, phone_number_id=phone_number_id,
     )
 
     try:

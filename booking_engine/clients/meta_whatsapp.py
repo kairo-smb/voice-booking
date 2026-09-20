@@ -161,6 +161,18 @@ async def list_phone_number_ids(*, waba_id: str, token: str) -> list[str]:
     return [n["id"] for n in body.get("data") or [] if n.get("id")]
 
 
+async def get_waba_name(*, waba_id: str, token: str) -> str:
+    """This WABA's name, for an owner who has to choose between several.
+
+    A bare id is not something a hairdresser can pick from, and picking wrong
+    attaches the salon's sender to the wrong WhatsApp account. Best effort: a
+    failure here must not block an onboarding, so the caller falls back to the
+    id rather than refusing.
+    """
+    body = await _request("GET", waba_id, token=token, params={"fields": "name"})
+    return body.get("name") or waba_id
+
+
 @dataclass(frozen=True)
 class PhoneNumber:
     id: str

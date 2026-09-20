@@ -70,6 +70,10 @@ So both ids are read back from the exchanged token server-side, which is the bet
 
 Neither zero nor several can be resolved by guessing — picking one would attach the salon's sender to someone else's WhatsApp account, unrecoverably and with nothing downstream disagreeing — so they return `waba_ambiguous` / `phone_ambiguous` and write no sender.
 
+**`waba_ambiguous` is a question, and it is answerable (2026-09-20).** An owner who administers several WABAs is the ordinary case, not an error: only they know which is the salon's. The refusal therefore carries `wabas: [{id, name}]` — names read from `GET /{waba_id}?fields=name`, because a 15-digit id is not something a hairdresser can pick from — and the route returns it as the whole `detail` object rather than the bare slug every other refusal flattens to.
+
+The answer is a **second `complete` with `waba_id` and no `code`**. The code is single-use and was spent asking, so the service resumes from the token, which is now persisted **before** the lookups rather than after them. That reordering is what makes this work at all, and it also closes a smaller hole: the lookups used the token before anything had written it down, so a crash between them lost a credential that cannot be minted again without another popup. The resume skips the Tech Provider onboarding cap too — the popup already happened and was already counted; re-checking would strand a salon holding a token it cannot name a WABA for. `token_expires_at` is left alone on a resume (there is no `expires_in` to report), so an expiring token cannot be silently promoted to a non-expiring one.
+
 Server-side, in this order — and the order is load-bearing:
 
 1. Exchange the one-time `code` for the salon's business token, and **persist it before using it**. A crash after this point leaves a resumable row; losing the token leaves a WABA we can neither reach nor unsubscribe from. The id lookups above happen between the exchange and the write, since both need that token.

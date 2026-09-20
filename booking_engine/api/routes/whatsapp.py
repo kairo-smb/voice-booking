@@ -108,7 +108,10 @@ class CompleteRequest(BaseModel):
 
     shop_id: UUID
     requested_by: UUID | None = None
-    code: str = Field(min_length=1, max_length=512)
+    # Absent on the second call, which answers a `waba_ambiguous` by naming the
+    # WABA. The code is single-use and already spent by then; the service
+    # resumes from the token it persisted rather than asking for another popup.
+    code: str | None = Field(default=None, max_length=512)
     waba_id: str | None = Field(default=None, max_length=64)
     phone_number_id: str | None = Field(default=None, max_length=64)
     # The origin the dialog was opened with. Meta binds the code to it and
@@ -221,6 +224,11 @@ async def complete(
         error_message=result.get("error") if not result.get("ok") else None,
     )
     if not result.get("ok"):
+        # An ambiguity is a question, not just a refusal: the caller needs the
+        # candidates in order to ask the owner, so this one carries the whole
+        # result instead of the bare slug every other refusal flattens to.
+        if result.get("wabas"):
+            raise HTTPException(status_code=409, detail=result)
         raise HTTPException(status_code=409, detail=result.get("error"))
     return {"data": result}
 

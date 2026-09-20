@@ -1937,3 +1937,58 @@ async def test_exchange_code_omits_redirect_uri_when_there_is_none():
     await meta.exchange_code(code="c0de", app_id="A", app_secret="S")
 
     assert "redirect_uri" not in route.calls.last.request.url.params
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_waba_keeps_the_token_and_names_the_candidates(monkeypatch):
+    """The question has to be answerable: the code is spent once it is asked."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={"waba_ids": ["W1", "W2"]},
+    )
+    async def _name(*, waba_id, token):
+        return {"W1": "Salone X", "W2": "Altra azienda"}[waba_id]
+    monkeypatch.setattr(meta, "get_waba_name", _name)
+
+    result = await wo.complete(shop_id=SHOP, code="c0de", settings=FakeSettings())
+
+    assert result["error"] == "waba_ambiguous"
+    assert result["wabas"] == [{"id": "W1", "name": "Salone X"},
+                               {"id": "W2", "name": "Altra azienda"}]
+    written = [f for f in calls["fields"] if "access_token" in f]
+    assert written and written[0]["access_token"] == "customer-token", \
+        "token persisted before the question, or the answer needs a second popup"
+
+
+@pytest.mark.asyncio
+async def test_naming_the_waba_resumes_without_re_exchanging_the_code(monkeypatch):
+    """Second call, no code: it reads the token back off the row."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X",
+                             "access_token": "customer-token"},
+        calls={},
+    )
+
+    result = await wo.complete(shop_id=SHOP, waba_id="W1", settings=FakeSettings())
+
+    assert result["ok"] is True and result["status"] == "online"
+    assert not calls.get("exchange"), "a spent code must not be exchanged again"
+    assert calls["subscribe"][0]["token"] == "customer-token"
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_clear_the_recorded_expiry(monkeypatch):
+    """The second call knows no expires_in; it must not overwrite the date."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X",
+                             "access_token": "customer-token"},
+        calls={},
+    )
+
+    await wo.complete(shop_id=SHOP, waba_id="W1", settings=FakeSettings())
+
+    assert not any("token_expires_at" in f for f in calls["fields"]), \
+        "resuming would silently make an expiring token look non-expiring"
