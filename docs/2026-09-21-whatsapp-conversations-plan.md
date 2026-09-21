@@ -1081,13 +1081,13 @@ across to be transcribed elsewhere would move a secret to move a payload.
 # Charged before the work, refused on 402: an empty basket means the raw
 # message stays in the owner's queue rather than a transcript nobody paid for.
 #
-# `charge` is a new generic helper on the EXISTING booking_engine/clients/
+# `charge_actual` ALREADY EXISTS on booking_engine/clients/
 # webapp_credits.py, beside record_voice_debit and try_debit_for_message. It
 # POSTs the same charge-actual contract those two already use — run_type,
 # run_ref, credits — and returns False on 402. Do not add a second HTTP client.
 async def transcribe(*, shop_id: UUID, audio: bytes, run_ref: str) -> str | None:
-    if not await webapp_credits.charge(shop_id=shop_id, run_type="whatsapp_transcribe",
-                                       run_ref=run_ref, credits=TRANSCRIBE_CREDITS):
+    if not await webapp_credits.charge_actual(shop_id=shop_id, run_type="whatsapp_transcribe",
+                                              run_ref=run_ref, credits=TRANSCRIBE_CREDITS):
         logger.info("whatsapp.transcribe_refused shop=%s", shop_id)
         return None
     try:
