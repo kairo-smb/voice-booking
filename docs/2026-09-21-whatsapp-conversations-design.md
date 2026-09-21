@@ -166,90 +166,97 @@ and loses nothing.
 
 ## 6. Intent
 
-### 6.1 A tap, not an inference
-
-Intent is read off a button wherever a button can be offered. Three mechanisms,
-each covering a different moment, all free and all deterministic:
-
-**1. Ice breakers — before the customer writes anything.**
-`POST /{phone_number_id}/conversational_automation` with `prompts`, read back
-with `GET /{phone_number_id}?fields=conversational_automation`. Up to **4
-prompts, 80 characters each, no emoji**, configured once per number, no
-per-message cost.
+Naming the request is a **phase of the conversation, not a property of each
+message**. It happens once, in the opening turns, and then it is over: the
+request is routed to a handler and the classifier is never invoked on that
+conversation again.
 
 ```
-Prenota un appuntamento · Sposta o disdici · Orari e indirizzo · Parla con noi
+  ┌─ unrouted ──────────────────────────┐
+  │  every inbound message is read by    │   ≤ 3 turns
+  │  a button map, then by the model     │
+  └──────┬────────────────────┬──────────┘
+         │ confident          │ 3 turns spent, or
+         │                    │ intent outside the whitelist
+         ▼                    ▼
+   routed:<intent>          human
+   handler owns it          "Da gestire"
+   classifier never runs again on this session
 ```
 
-> **The limitation that matters here.** Ice breakers show **only in an empty
-> thread** — a customer with existing chat history must delete the thread to see
-> them. Every sender is coexistence, so the salon's real customers *already have
-> a thread with that number*. Ice breakers will therefore reach genuinely new
-> contacts and almost nobody else. They are worth the one API call they cost,
-> but mechanism 2 is what actually carries the load.
+### 6.1 What a session is
 
-> Also: a `wa.me` link carrying pre-filled text **dismisses the ice breaker
-> interface**. Worth knowing before anyone builds a "scrivici su WhatsApp" link
-> with a prefilled body on the site or in a campaign — it would silently disable
-> our own menu.
+**A session is the run of messages since the last gap of more than 24 hours in
+customer inbound.** That boundary already exists — it is the service window of
+§2 — so it costs no column, no table and no new concept. It is also semantically
+right: a customer writing again three days later has a new request, and should
+be re-read rather than inherit last week's routing.
 
-**2. Interactive reply buttons — the answer to the first message.** Free-form,
-so window-only, which is always satisfied when replying to a message we just
-received. Up to 3 reply buttons, or a list message with up to 10 rows. Whatever
-the customer opened with, the first reply offers the menu. This is the mechanism
-that covers returning customers.
+`routed` is **derived, not stored**: the most recent non-NULL `intent` on an
+inbound message inside the current session. The `intent` / `confidence` columns
+of §4 are all the state this needs.
 
-**3. Template quick-reply buttons — business-initiated.** A campaign template
-carries its own buttons, so a promo reply arrives as a button id rather than as
-prose to be interpreted.
+> Upgrade path: increment B needs genuine per-thread state (agent mode,
+> suspension, who took over). That is when a `whatsapp.threads` table earns its
+> place. Building it now would be a table holding one derivable fact.
 
-A tapped button arrives on the webhook as `type: "interactive"` with
-`interactive.button_reply.id` (or `list_reply.id`), which maps straight to an
-intent. Neither the client nor the webhook handles interactive messages today;
-both need it. New client functions: `send_interactive()`,
-`set_conversational_automation()`.
+### 6.2 Buttons — the free path
 
-**Two things this buys beyond cost.** The intent cannot be hallucinated — it is
-an id we defined. And on the tapped path **no customer text is sent to any
-model at all**, which removes the §6.2 retention question from the majority of
-traffic rather than answering it.
+**No ice breakers.** Owner's decision, and the coexistence argument supports it:
+they only render in an empty thread, and the salon's customers already have one.
 
-**What it does not do:** people ignore buttons and type anyway. Buttons shrink
-free text; they do not eliminate it. Hence 6.2.
+Two mechanisms remain, both free and both deterministic:
 
-### 6.2 Classification — the free-text fallback
+**Interactive reply buttons** on our first reply — up to 3, or a list message
+with up to 10 rows. Whatever the customer opened with, the answer offers the
+menu. **Template quick-reply buttons** for business-initiated campaigns, so a
+promo reply arrives already named.
 
-Only for messages that are not a button tap. Volume is a fraction of total
-traffic, which is what makes the model choice affordable again.
+A tap arrives as `type: "interactive"` with `interactive.button_reply.id` (or
+`list_reply.id`) and maps straight to an intent — **the session is routed with
+no model call at all**. Neither the client nor the webhook handles interactive
+messages today; both need it. New client function: `send_interactive()`.
 
-Both stages go through the marketing-engine LLM gateway
-(`src/lib/llm/client.ts`), new route `src/routes/whatsapp-triage.ts`, metered
-there like every other route. voice-booking calls it directly and gains one env
-var, `MARKET_INTEL_API_URL`; the shared secret `MARKET_INTEL_SECRET` is already
-configured (CLAUDE.md 2026-09-03).
+Two things this buys beyond cost: the intent cannot be hallucinated, because it
+is an id we defined; and on the tapped path no customer text reaches a model, so
+§6.4's retention question never arises for it.
 
-**Stage 1 — classify, on every inbound message.**
+What it does not do: people ignore buttons and type anyway. Hence 6.3.
+
+### 6.3 The model, only until the request is named
+
+Through the marketing-engine LLM gateway (`src/lib/llm/client.ts`), new route
+`src/routes/whatsapp-triage.ts`, metered there like every other route.
+voice-booking calls it directly and gains one env var, `MARKET_INTEL_API_URL`;
+the shared secret `MARKET_INTEL_SECRET` is already configured (CLAUDE.md
+2026-09-03).
+
+Invoked **only when the session is unrouted and the message is not a button
+tap**. No catalogue in the prompt, no intake questions, no customer history —
+naming a request needs the words, not the file.
 
 ```json
 { "intent": "booking", "confidence": 0.86, "summary": "Chiede posto sabato per colore" }
 ```
 
-**Intent whitelist** — the set B is allowed to act on:
+**Whitelist** — the set a handler may act on: `booking · reschedule · cancel ·
+hours`. Everything else (`price`, `complaint`, `promo_reply`, `opt_out`,
+`other`) routes to a human, as does every result under
+`ROUTING_CONFIDENCE = 0.7`. Fails closed by construction: routing is an explicit
+allowlist, never the absence of a red flag.
 
-```
-booking · reschedule · cancel · hours
-```
+**`MAX_ROUTING_TURNS = 3`.** Unrouted after three inbound messages → the thread
+goes to "Da gestire" and the classifier is done with that session. Without this
+ceiling a rambling customer is an unbounded bill at $42/M; with it the worst
+case is three calls, and the common cases are one call or — after a tap — none.
 
-Everything else (`price`, `complaint`, `promo_reply`, `opt_out`, `other`) and
-**every low-confidence result** goes to a human. In A this only orders the
-queue; in B it is the safety router, so it fails closed by construction: the
-agent acts on an explicit allowlist, never on the absence of a red flag.
+**Once routed, the handler owns the conversation.** A customer who starts with
+"vorrei prenotare" and switches to "anzi, quanto costa?" is *not* re-classified.
+The handler is itself an LLM with tools (§9) and hands off through the
+escalation path that already exists. Re-invoking the classifier mid-conversation
+would pay a second time to learn something the running agent already knows.
 
-**Stage 2 — richer triage, only for what stage 1 admits.** A booking gets the
-catalogue, the intake questions (§7) and the thread history; a `hours` question
-does not. This is the stage the booking agent (§9) runs inside.
-
-### Model and cost
+### 6.4 Model and cost
 
 `typesafe/jev-1.13`, single provider, so the allowlist entry is trivial:
 
@@ -269,28 +276,20 @@ dashboard before either fact is load-bearing**:
 | Price | **$42 / M input** · $0 / M output |
 | Uptime 24h | 100% |
 
-Two consequences, both blocking:
+**Cost, with the structure above.** Per *session*, not per message, and bounded
+at three calls. A short routing prompt is a few hundred input tokens, so ~$0.01
+per call, ~$0.03 worst case per session, €0 whenever the customer taps. That is
+the change that makes an expensive model affordable here: it is asked one
+question, once, and then it leaves.
 
-1. **No ZDR marking means every request fails.** `client.ts` sets `zdr: true` on
-   every call and that is deliberate — a model with no ZDR endpoint must fail
-   loudly rather than run outside the retention guarantee, because the payload
-   is a real salon's customer list. Either TypeSafe has a ZDR endpoint that the
-   endpoints API did not surface, or this model cannot carry customer text under
-   the current guarantee. Resolve before building on it.
-2. **$42/M input is the expensive stage, not the cheap one.** At ~500 input
-   tokens that is ~$0.02 per classified message; a salon at 100 messages/day is
-   ~$60/month in classification alone, roughly 400× the flash models already in
-   `PROVIDERS_BY_MODEL`. **Recommended ordering: a flash model runs stage 1 on
-   every message, Jev runs stage 2 on the bookings.** That is the inverse of
-   "Jev classifies first" and is written this way pending confirmation.
+**ZDR is still blocking.** `client.ts` sets `zdr: true` on every call by design
+— a model with no ZDR endpoint must fail loudly rather than run outside the
+retention guarantee, because the payload is a real salon's customer text. Either
+TypeSafe has a ZDR endpoint the endpoints API did not surface, or this model
+cannot carry customer messages under the guarantee set on 2026-09-16. §6.2
+shrinks the exposure to free-text openings only; it does not remove it.
 
-No service catalogue in the stage-1 prompt: it would be injected on every
-inbound message for a result A does not use, and at Jev's input price that is
-the single most expensive thing in the stack. Service chips in A come from
-`service_catalog_match.py`, which costs nothing. LLM service matching lands in
-stage 2, where the catalogue is in the prompt anyway.
-
-### Agents vs tools
+### 6.5 Agents vs tools
 
 The booking flow **is** an agent: an LLM in a loop over `TOOL_DEFS`, which is
 what §9 builds and what the voice path already runs.
@@ -358,9 +357,10 @@ of the same list. The telephony surfaces are hidden for now — `InboxTabBar`
 already takes a `visible` prop, so this is a filter, not a deletion, and the
 voice components stay on disk for the next iteration.
 
-- Thread list in **two sections, "Da gestire" first**: threads stage 1 routed to
-  a human (intent outside the whitelist, or low confidence), threads the agent
-  escalated, and — once B ships — threads where the agent stood down. Everything
+- Thread list in **two sections, "Da gestire" first**: sessions routed to a
+  human (intent outside the whitelist, low confidence, or `MAX_ROUTING_TURNS`
+  spent), threads the agent escalated, and — once B ships — threads where the
+  agent stood down. Everything
   else sits below in plain recency order. The section is the product: the owner
   should open the Inbox and see only what actually needs them.
 - Row: window countdown, intent chip, `📱` badge on replies sent from the
@@ -462,17 +462,18 @@ voice components stay on disk for the next iteration.
    ZDR endpoint, this model cannot carry salon customer text without changing a
    retention guarantee that was set deliberately on 2026-09-16 — which is a
    separate decision, not a flag to flip in passing. **Blocking for §6.**
-   Note §6.1 shrinks this: on the tapped path no customer text reaches a model
-   at all, so the retention question applies only to the free-text fallback.
-2. **Stage ordering.** §6.2 recommends flash for stage 1 and Jev for stage 2, on
-   the $42/M input price. Confirm, or state that Jev classifies everything and
-   the cost is accepted.
-3. **Agent granularity.** §6 builds service retrieval as a tool and booking as
+   §6.2 and §6.3 shrink the exposure hard — no model call on a tapped button,
+   and at most three on a typed opening — but free-text customer messages still
+   reach it, so the question stands.
+2. **Thresholds.** `ROUTING_CONFIDENCE = 0.7` and `MAX_ROUTING_TURNS = 3` are
+   starting values, not measured ones. The first real traffic is what sets them;
+   both are single constants, deliberately.
+3. **Agent granularity.** §6.5 builds service retrieval as a tool and booking as
    an agent. Confirm, or say that retrieval should be its own agent from the
    start.
 4. **Coexistence and the Business App's own auto-replies.** The salon may
-   already have a *messaggio di benvenuto* and *messaggio di assenza* configured
-   in their WhatsApp Business App. If so, a customer could receive that greeting
-   *and* our button menu. Meta's conversational-components page says nothing
-   about coexistence either way — unverified, and it needs checking on the first
-   real onboarding rather than being discovered by a salon.
+   already have a *messaggio di benvenuto* and a *messaggio di assenza*
+   configured in their WhatsApp Business App. If so a customer gets that
+   greeting *and* our button menu, one after the other, and the owner will read
+   it as our bug. Unverified either way — check on the first real onboarding
+   rather than letting a salon discover it.
