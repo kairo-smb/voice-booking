@@ -24,6 +24,7 @@ from booking_engine.db import whatsapp_audit_queries as waq
 from booking_engine.db import whatsapp_automation_queries as aq
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.services.messaging import meta_limits
+from booking_engine.services.messaging import wa_inbound
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
 from booking_engine.services.messaging.whatsapp_pricing import price_list
 from booking_engine.services.messaging import whatsapp_receipt
@@ -602,6 +603,25 @@ def _interactive_or_text(message: dict) -> tuple[str | None, str]:
     return None, str(text or "")
 
 
+def _media_id(message: dict) -> str | None:
+    """The attachment id of a voice note, which exists only on this payload.
+
+    Meta nests it under a key named after the type (`audio.id`) and it is not
+    a column on `inbound_messages` — the download URL it resolves to expires
+    within minutes, so there would be nothing durable to store. It rides on
+    the dict handed to the worker instead.
+
+    Audio only: nothing else is transcribed, and fetching an image we cannot
+    read would spend the salon's token on bytes with nowhere to go.
+    """
+    if message.get("type") != "audio":
+        return None
+    audio = message.get("audio")
+    if not isinstance(audio, dict):
+        return None
+    return str(audio.get("id") or "") or None
+
+
 async def _handle_change(sender: dict, change: dict) -> None:
     field = change.get("field")
     value = change.get("value") or {}
@@ -710,3 +730,8 @@ async def _handle_change(sender: dict, change: dict) -> None:
             "whatsapp.inbound shop=%s from=%s type=%s intent=%s",
             sender["shop_id"], message.get("from"), message.get("type"), button_id,
         )
+        # Everything slow — media, transcription, the classifier — happens
+        # after this handler has returned and Meta has its 200. Only a fresh
+        # row gets one: scheduling on a replay would hand back the exact cost
+        # the dedup above exists to avoid.
+        wa_inbound.schedule(sender, {**row, "media_id": _media_id(message)})

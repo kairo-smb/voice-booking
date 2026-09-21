@@ -1792,7 +1792,13 @@ async def test_webhook_persists_inbound_replies(monkeypatch):
     captured = {}
     async def _fake_record_inbound(**kw):
         captured.update(kw)
+        # A row, not None: None means "Meta replayed this", and the route
+        # would then skip the worker the assertions below are meant to cover.
+        return {"id": uuid4(), **kw}
     monkeypatch.setattr(wa_routes.wq, "record_inbound", _fake_record_inbound)
+    scheduled = []
+    monkeypatch.setattr(wa_routes.wa_inbound, "schedule",
+                        lambda sender, row: scheduled.append(row))
 
     await wa_routes._handle_change(
         sender={"shop_id": SHOP},
@@ -1812,6 +1818,8 @@ async def test_webhook_persists_inbound_replies(monkeypatch):
     assert captured["from_phone"] == "+393331112222"
     assert captured["body"] == "Certo, prenoto per giovedì!"
     assert captured["message_type"] == "text"
+    # The reply is also handed to the inbound worker, which names it.
+    assert len(scheduled) == 1
 
 
 def test_template_descriptor_carries_what_the_generator_needs():

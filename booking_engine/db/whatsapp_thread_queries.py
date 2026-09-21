@@ -310,6 +310,21 @@ async def inbound_history(shop_id: UUID, phone: str) -> list[dict]:
     )
 
 
+async def set_transcript(message_id: UUID, transcript: str) -> None:
+    """A voice note's words, stored **beside** the raw message, never over it.
+
+    `body` is what Meta delivered — empty, for audio — and stays that way: it
+    is the record of what arrived, and the thread reads
+    `coalesce(nullif(transcript, ''), body)` to show the words instead. Called
+    only for a non-empty transcript: NULL means "we do not know", which is the
+    truth for a note we could not fetch or could not transcribe.
+    """
+    await execute_void(
+        "UPDATE whatsapp.inbound_messages SET transcript = $2 WHERE id = $1",
+        message_id, transcript,
+    )
+
+
 async def set_verdict(message_id: UUID, verdict: dict, decision) -> None:
     """The classifier's answer, stored on the message that triggered it.
 
