@@ -2188,6 +2188,145 @@ git commit -m "feat(agent): opt-in, takeover, and a reason for every silence"
 
 ---
 
+## Task 24b: Six months of interactions, and the free eval set
+
+Owner request, 2026-09-21: keep the last six months of interactions so we can do
+post-mortems and improve the routing engine from real experience.
+
+**No new table.** The material is already written: `inbound_messages` carries the
+verdict (`intent`, `confidence`, `summary`, `transcript`), `outbound_messages`
+carries every reply including the owner's from their phone, and `calls` carries
+the session outcome. A summary table would be a third copy of two truths and the
+first place they would silently disagree.
+
+Three pieces, and only the first writes anything.
+
+**Files:**
+- Create: `booking_engine/db/sql/25_whatsapp_retention.sql`
+- Create: `booking_engine/services/messaging/wa_retention.py`
+- Modify: `booking_engine/api/routes/messaging_tick.py`
+- Test: `tests/booking_engine/test_wa_retention.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_a_message_older_than_six_months_is_due_for_deletion():
+    assert ret.is_expired(received_at=NOW - timedelta(days=200), now=NOW)
+
+
+def test_a_message_inside_the_window_is_kept():
+    assert not ret.is_expired(received_at=NOW - timedelta(days=100), now=NOW)
+
+
+def test_the_boundary_is_inclusive_of_the_last_day():
+    assert not ret.is_expired(received_at=NOW - RETENTION, now=NOW)
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_deletes_both_directions(db):
+    # A conversation is not half deleted. Keeping our side of a thread whose
+    # customer side has expired is the worst of both: still personal data,
+    # no longer readable as a conversation.
+    await insert_inbound(received_at=days_ago(200))
+    await insert_outbound(sent_at=days_ago(200))
+    await ret.sweep()
+    assert await count_inbound() == 0 and await count_outbound() == 0
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_leaves_the_calls_row_alone(db):
+    # voice_agent.calls is the business record of an appointment being made.
+    # It outlives the chat that produced it and is not ours to expire here.
+    await insert_call(channel="whatsapp", started_at=days_ago(200))
+    await ret.sweep()
+    assert await count_calls() == 1
+```
+
+- [ ] **Step 2: Run them, confirm they fail**
+
+Run: `python -m pytest tests/booking_engine/test_wa_retention.py -v`
+
+- [ ] **Step 3: Implement**
+
+```python
+# Owner's number, 2026-09-21: six months of interactions, kept for post-mortems
+# and for improving the routing prompt. It is also the first retention policy
+# this feature has had — before it, message bodies accumulated forever, which
+# the design doc flagged as an open GDPR gap and this closes.
+RETENTION = timedelta(days=183)
+
+
+def is_expired(*, received_at: datetime, now: datetime) -> bool:
+    return now - received_at > RETENTION
+```
+
+The sweep is a third stage on the hourly tick, in its own try/except so a
+failure is counted under `errors` rather than 500-ing the tick — the same shape
+`number_release`'s sweep already uses.
+
+- [ ] **Step 4: The view — analysis, not an ETL**
+
+```sql
+-- Did the router get it right? The verdict and the outcome live in different
+-- tables; the question is a join, not a pipeline. A view cannot drift from the
+-- truth, which a summary table would do the first time a backfill was skipped.
+CREATE OR REPLACE VIEW whatsapp.interaction_history AS
+SELECT i.shop_id, i.from_phone, i.received_at,
+       coalesce(i.transcript, i.body) AS text,
+       i.intent AS routed_intent, i.confidence, i.summary,
+       c.outcome AS session_outcome, c.appointment_id
+  FROM whatsapp.inbound_messages i
+  LEFT JOIN voice_agent.calls c
+    ON c.shop_id = i.shop_id
+   AND c.channel = 'whatsapp'
+   AND c.caller_number = i.from_phone
+   AND i.received_at BETWEEN c.started_at AND coalesce(c.ended_at, now());
+```
+
+- [ ] **Step 5: The eval set, which we are already writing**
+
+```sql
+-- The disambiguation menu is a labelling machine, and nobody designed it as one.
+--
+-- When the model is not confident we send buttons; the customer's tap is stored
+-- as a verdict with confidence = 1.0. So every low-confidence message followed
+-- by a tap is a case the model got wrong PLUS the correct label, supplied by the
+-- person who wrote the message. That is a human-verified eval set for the
+-- routing prompt, accumulating for free from the day the menu shipped.
+CREATE OR REPLACE VIEW whatsapp.routing_corrections AS
+SELECT miss.shop_id,
+       coalesce(miss.transcript, miss.body) AS message,
+       miss.intent      AS model_guessed,
+       miss.confidence  AS model_confidence,
+       tap.intent       AS customer_meant,
+       miss.received_at
+  FROM whatsapp.inbound_messages miss
+  JOIN LATERAL (
+    SELECT t.intent, t.received_at FROM whatsapp.inbound_messages t
+     WHERE t.shop_id = miss.shop_id AND t.from_phone = miss.from_phone
+       AND t.received_at > miss.received_at
+       AND t.confidence = 1.0            -- a tap, not a model verdict
+     ORDER BY t.received_at ASC LIMIT 1
+  ) tap ON true
+ WHERE miss.confidence IS NOT NULL AND miss.confidence < 1.0;
+```
+
+Test it against a scratch Postgres with real rows: a low-confidence message
+followed by a tap appears; a confident message followed by a tap does not; a
+low-confidence message with no tap after it does not.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add booking_engine/db/sql/25_whatsapp_retention.sql \
+        booking_engine/services/messaging/wa_retention.py \
+        booking_engine/api/routes/messaging_tick.py \
+        tests/booking_engine/test_wa_retention.py docs/knowledge/database.md
+git commit -m "feat(whatsapp): six-month retention, and the corrections the menu already collects"
+```
+
+---
+
 ## Task 25: Final gate and the durable record
 
 - [ ] **Step 1: Full suite, all three repos**

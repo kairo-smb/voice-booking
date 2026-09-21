@@ -525,3 +525,38 @@ voice components stay on disk for the next iteration.
    greeting *and* whatever we send, one after the other, and the owner will read
    it as our bug. Unverified either way — check on the first real onboarding
    rather than letting a salon discover it.
+
+---
+
+## 12. Interaction history and the eval set (added 2026-09-21)
+
+Owner request: keep six months of interactions for post-mortems and to improve
+the routing engine from real experience.
+
+**No new table.** `inbound_messages` already holds the verdict, `outbound_messages`
+every reply including the owner's own from their phone, and `calls` the session
+outcome. A summary table would be a third copy of two truths, and the first
+place they would quietly disagree.
+
+- **`RETENTION = 183 days`**, swept on the hourly tick, deleting both directions
+  together — half a conversation is still personal data and no longer readable
+  as a conversation. `voice_agent.calls` is deliberately exempt: it is the
+  business record of an appointment, and it outlives the chat that produced it.
+  This is also the first retention policy this feature has had; §8 flagged its
+  absence as an open gap and this closes it.
+- **`whatsapp.interaction_history`** — a view. "Was the router right?" is a join
+  between a verdict and an outcome, not a pipeline. A view cannot drift.
+- **`whatsapp.routing_corrections`** — the one that matters.
+
+**The disambiguation menu is a labelling machine, and nobody designed it as
+one.** When the model is not confident we send buttons (§6.2); the tap is stored
+as a verdict with `confidence = 1.0`. So every low-confidence message followed by
+a tap is *a case the model got wrong, plus the correct label, supplied by the
+person who wrote the message*.
+
+That is a human-verified eval set for the routing prompt, accumulating for free
+since the menu shipped, with no annotation budget and no sampling bias toward
+the cases we happened to notice. The rarer, costlier second signal is a human
+taking over a thread the router had given to the agent.
+
+Both are derivable from rows we already write. Nothing new is stored to get them.
