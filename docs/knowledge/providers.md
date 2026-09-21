@@ -106,6 +106,12 @@ product limit, not cost recovery. **SMS is unchanged in amount and still
 charges 2×** — the deduction now happens via an HTTP charge to the webapp's
 basket (`webapp_credits.py`), not a local write.
 
+**The one thing Kairo *does* charge on the WhatsApp path is AI work on inbound
+messages**, which is our cost and not Meta's: triage
+(`clients/marketing_triage.py`, billed by the marketing-engine gateway) and
+voice-note transcription (see [OpenAI audio transcription](#openai-audio-transcription)).
+Both refuse on an empty basket rather than run unpaid.
+
 **The Login Configuration behind `META_CONFIG_ID` is where two facts live that
 no code in this repo can see.** Its permission list must be exactly
 `whatsapp_business_management` + `whatsapp_business_messaging` (asset: WhatsApp
@@ -247,6 +253,24 @@ and [Onboard WhatsApp Business app users](https://developers.facebook.com/docume
 **Hard-won gotcha #2 — `server_url` needs a trailing slash.** `app.mount("/mcp", ...)` makes Starlette 307-redirect bare `/mcp` → `/mcp/`, and OpenAI's Realtime MCP client does **not** follow that redirect for the tool-call POST body — it silently never calls the tool. Always point `server_url` at `/mcp/`. Root-caused via `fly logs`; full story in `CLAUDE.md` §2026-07-21 "MCP server_url must carry a trailing slash".
 
 **Gotcha #3 — webhook signature is opt-in.** `voice_openai.py`'s `realtime.call.incoming` handler only verifies a signature when `OPENAI_WEBHOOK_SECRET` is set (see the `ponytail:` comment at the top of that file) — currently unwired, so the endpoint accepts unsigned requests.
+
+## OpenAI audio transcription
+
+**Purpose:** transcribing inbound **WhatsApp voice notes**. On this vertical that is not an edge case — customers send "vorrei fare il colore come l'altra volta" as audio far more often than they type it, and an untranscribed note arrives with an empty `body` and `message_type = 'audio'`: unreadable in the Inbox, invisible to the router.
+
+**Key files:** `booking_engine/services/messaging/wa_transcribe.py`, `booking_engine/clients/meta_whatsapp.py::get_media` (the two-hop download), `booking_engine/clients/webapp_credits.py` (the charge).
+
+**Endpoint / model:** `POST https://api.openai.com/v1/audio/transcriptions`, model `gpt-4o-mini-transcribe`, `response_format=text`. Plain `httpx` with the same `OPENAI_API_KEY` the Realtime path uses — no `openai` SDK dependency, matching `clients/openai_realtime.py`. Meta delivers voice notes as `audio/ogg` (opus) and the upload's **filename extension** is how the endpoint decides how to decode it, so the multipart part is named `voice.ogg`. No `language` hint is sent — forcing `it` would mangle a non-Italian customer rather than merely detect them less reliably.
+
+**Env vars:** `OPENAI_API_KEY` (shared with Realtime) plus `WEBAPP_BASE_URL`/`MARKET_INTEL_SECRET` for the charge. No key → fails closed *without* charging.
+
+**Why here and not in the LLM gateway.** The audio bytes need the salon's business token to come off Meta, and this repo is where that token lives (encrypted at rest, `services/secret_box.py`). Transcribing in marketing-engine would mean moving a secret in order to move a payload.
+
+**AI spend: 15 credits per voice note, flat, run type `whatsapp_transcribe`.** Derived from real cost at the ceiling of a typical note rather than rounded: 30s = 0.5 min × $0.003/min = $0.0015 raw, × 10 (the house LLM margin — this is LLM spend, not the 2× carrier pass-through `send_credits` applies to Twilio) × 1000 credits/USD = 15. Flat rather than per-second because a duration meter would mean decoding the container to learn something worth a fraction of a credit; a note longer than 30s is therefore transcribed under cost, bounded only by Meta's 16MB media cap.
+
+**Charged *before* the work — the opposite of the SMS path, deliberately.** SMS debits only after Twilio accepts (`CLAUDE.md` §2026-08-12). Here the charge is the gate: a 402 means an empty basket, so nothing is sent to OpenAI at all and the raw message stays in the owner's queue as a vocale. The cost of that ordering is that a provider failure leaves the salon charged for nothing — accepted rather than refunded, because the only refund available would be a negative `charge-actual`, which is basket arithmetic this repo gave up in §2026-09-03 and a contract the webapp does not offer. It is logged at `whatsapp.transcribe_failed` with the credit amount so the exposure is countable.
+
+**Every failure returns `None`, never a partial transcript** — no credit, no key, media gone, provider error, empty result. `None` is stored as a NULL `transcript` ("we do not know"); `""` would claim we transcribed it and it said nothing. It never overwrites `body`. `transcribe()` cannot raise: it is awaited from a fire-and-forget background task where an exception is a silently lost customer message.
 
 ## Neon PostgreSQL
 
