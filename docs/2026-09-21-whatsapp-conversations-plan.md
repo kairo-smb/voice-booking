@@ -1531,11 +1531,15 @@ git commit -m "feat(inbox): WhatsApp threads, with what needs a human on top"
 
 ## Task 15: Phase A verification gate
 
-- [ ] **Step 1: Measure the baseline on this branch, do not quote it**
+- [ ] **Step 1: The baseline, measured**
 
-```bash
-git stash && python -m pytest tests/ --ignore=tests/live_db --ignore=tests/live_twilio -q | tail -1 && git stash pop
-```
+**554 passed, 24 skipped** — measured on this branch on 2026-09-21 by running
+the suite with the new test files excluded.
+
+Note it is *not* the 535 in CLAUDE.md's 2026-09-04 entry: nineteen tests landed
+in the five WhatsApp commits between that entry and this branch point. Quoting
+a baseline from a previous entry is how a regression gets absorbed into an
+arithmetic that "looks about right".
 
 - [ ] **Step 2: Run the suite**
 
