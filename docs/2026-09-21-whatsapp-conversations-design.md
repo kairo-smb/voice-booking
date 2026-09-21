@@ -172,16 +172,23 @@ request is routed to a handler and the classifier is never invoked on that
 conversation again.
 
 ```
-  ┌─ unrouted ──────────────────────────┐
-  │  every inbound message is read       │   ≤ 3 turns
-  │  by the model                        │
-  └──────┬────────────────────┬──────────┘
-         │ confident          │ 3 turns spent, or
-         │                    │ intent outside the whitelist
-         ▼                    ▼
-   routed:<intent>          human
-   handler owns it          "Da gestire"
-   classifier never runs again on this session
+  first inbound ──► model
+                      │
+        confident ────┤──── not confident
+              │       │
+              │       ▼
+              │   button menu          ← the disambiguation step
+              │    ├── tap ──────────────────┐   no model call
+              │    └── types again ──► model │
+              │              │               │
+              │    confident │   else        │
+              │              │     │         │
+              ▼              ▼     ▼         ▼
+        ┌────────────────────────┐ │  ┌──────────────┐
+        │    routed:<intent>     │◄─┘  │    human     │
+        │    handler owns it     │     │ "Da gestire" │
+        └────────────────────────┘     └──────────────┘
+   the classifier never runs again on this session
 ```
 
 ### 6.1 What a session is
@@ -200,21 +207,41 @@ of §4 are all the state this needs.
 > suspension, who took over). That is when a `whatsapp.threads` table earns its
 > place. Building it now would be a table holding one derivable fact.
 
-> **No buttons of any kind** — not ice breakers, not interactive reply buttons,
-> not quick-reply buttons on campaign templates. Owner's decision, 2026-09-21.
->
-> Recorded because it was argued the other way and the consequence is not
-> cosmetic. Ice breakers genuinely were near-useless under coexistence: they
-> render only in an empty thread and the salon's customers already have one.
-> **Interactive reply buttons carry no such restriction** — they render in any
-> conversation inside the 24h window — so they were dropped on a different
-> judgement, not on that one. What goes with them is the only routing path that
-> touched no model: every session is now named by the classifier, and §6.3's
-> retention question applies to every customer's opening message rather than to
-> a residue. Reinstating them later is additive: a `send_interactive()` on the
-> client and a branch for `type: "interactive"` on the webhook.
+### 6.2 Buttons, but only to disambiguate
 
-### 6.2 The model, only until the request is named
+**No ice breakers** — they render only in an empty thread and, under
+coexistence, the salon's customers already have one. Dropped outright.
+
+**No button menu as an opening move either.** A customer who writes clearly gets
+a plain answer, never a menu.
+
+**Buttons appear in exactly one place: when the model could not name the request
+from the first message.** Instead of asking a free-text clarifying question —
+which costs a second model call and may fail again — the reply carries the menu:
+
+```
+Non ho capito bene, cosa ti serve?
+[ Prenotare ]  [ Spostare o disdire ]  [ Altro ]
+```
+
+A tap arrives as `type: "interactive"` with `interactive.button_reply.id`, maps
+straight to an intent, and **routes the session with no model call at all**.
+"Altro" routes to a human, which is also where `hours` lands in increment A.
+
+Three reply buttons is Meta's ceiling; a list message would allow ten rows at
+the cost of one extra tap. Not needed at four intents — upgrade path if the
+whitelist grows.
+
+New client function `send_interactive()`, plus a branch for
+`type: "interactive"` on the webhook. Neither exists today.
+
+**Why this shape and not the other two.** As the default opening it makes every
+salon feel like a phone tree; absent entirely it costs a second blind model call
+on exactly the conversations the model already failed once on. Offering it at
+the moment of ambiguity is both the cheapest and the most natural: it is what a
+person would do.
+
+### 6.3 The model, only until the request is named
 
 Through the marketing-engine LLM gateway (`src/lib/llm/client.ts`), new route
 `src/routes/whatsapp-triage.ts`, metered there like every other route.
@@ -236,10 +263,14 @@ hours`. Everything else (`price`, `complaint`, `promo_reply`, `opt_out`,
 `ROUTING_CONFIDENCE = 0.7`. Fails closed by construction: routing is an explicit
 allowlist, never the absence of a red flag.
 
-**`MAX_ROUTING_TURNS = 3`.** Unrouted after three inbound messages → the thread
-goes to "Da gestire" and the classifier is done with that session. Without this
-ceiling a rambling customer is an unbounded bill at $42/M; with it the worst
-case is three calls and the common case is one.
+**`MAX_ROUTING_TURNS = 2`.** One call on the opening message; if that is not
+confident, the button menu goes out (§6.2) and the model gets **one** more try
+on whatever the customer types instead of tapping. Still unrouted after that →
+"Da gestire", and the classifier is done with that session.
+
+Two, not three, because the menu sits between the attempts: a second blind call
+on a conversation the model already failed once is the case the buttons exist to
+replace. Without a ceiling a rambling customer is an unbounded bill at $42/M.
 
 **Once routed, the handler owns the conversation.** A customer who starts with
 "vorrei prenotare" and switches to "anzi, quanto costa?" is *not* re-classified.
@@ -247,7 +278,7 @@ The handler is itself an LLM with tools (§9) and hands off through the
 escalation path that already exists. Re-invoking the classifier mid-conversation
 would pay a second time to learn something the running agent already knows.
 
-### 6.3 Model and cost
+### 6.4 Model, cost, and the ZDR exception
 
 `typesafe/jev-1.13`, single provider, so the allowlist entry is trivial:
 
@@ -267,22 +298,46 @@ dashboard before either fact is load-bearing**:
 | Price | **$42 / M input** · $0 / M output |
 | Uptime 24h | 100% |
 
-**Cost, with the structure above.** Per *session*, not per message, and bounded
-at three calls. A short routing prompt is a few hundred input tokens, so ~$0.01
-per call and ~$0.03 worst case per session. That is what makes an expensive
-model affordable here: it is asked one question, once, and then it leaves.
-Session-scoping is now the *only* thing holding this cost down — with buttons
-cut there is no longer a path that skips the model entirely.
+**Cost.** Per *session*, not per message, bounded at two calls. A short routing
+prompt is a few hundred input tokens: ~$0.01 per call, ~$0.02 worst case per
+session, and €0 for every customer who taps a button instead of typing again.
 
-**ZDR is blocking, and now fully exposed.** `client.ts` sets `zdr: true` on
-every call by design — a model with no ZDR endpoint must fail loudly rather than
-run outside the retention guarantee, because the payload is a real salon's
-customer text. Either TypeSafe has a ZDR endpoint the endpoints API did not
-surface, or this model cannot carry customer messages under the guarantee set on
-2026-09-16. With no button path, **every customer's opening message goes to the
-model**; there is no majority of traffic that avoids the question.
+### The ZDR exception
 
-### 6.4 Agents vs tools
+`client.ts` sets `zdr: true` on every request. That was decided on 2026-09-16
+and the reasoning is in the file: a model with no ZDR endpoint must fail loudly
+rather than run outside the retention guarantee, because the payload is a real
+salon's customer list.
+
+**Owner's decision, 2026-09-21: waive it for this classifier, and only for this
+classifier.** TypeSafe's single endpoint is not marked ZDR and the model is
+wanted for this job.
+
+Implemented as an **explicit per-call opt-out, not a global flag**:
+
+```ts
+// zdr is true unless a caller names itself as an exception.
+askLLM({ model, messages, allowNonZdr: true })   // whatsapp-triage only
+```
+
+Default `false` everywhere. The exception is visible at the one call site that
+takes it, greppable in one command, and adding a second one is a deliberate act
+rather than an inherited default. A test asserts every other route still sends
+`zdr: true`.
+
+**What is actually exposed, stated once so it is on the record.** The payload is
+the customer's own opening message — free text a person wrote to their
+hairdresser, which can carry a name, a phone number, or something
+health-adjacent ("sono incinta, posso fare la tinta?"). It goes to a provider
+with no zero-retention marking.
+
+The design already minimises it and should stay that way: **the routing prompt
+carries the message text and nothing else** — no customer record, no phone, no
+history, no catalogue (§6.3). That is not a coincidence to preserve by
+discipline; it is the same rule that keeps the prompt cheap, so the two
+constraints hold each other up.
+
+### 6.5 Agents vs tools
 
 The booking flow **is** an agent: an LLM in a loop over `TOOL_DEFS`, which is
 what §9 builds and what the voice path already runs.
@@ -436,7 +491,10 @@ voice components stay on disk for the next iteration.
 - Unit tests: window open/closed/reset-by-new-inbound; echo clears unread and
   does not extend the window; duplicate `wa_message_id` is a no-op; reply
   refused outside the window before any Graph call; classifier 402 leaves raw
-  text; a `service_id` outside the injected catalogue is rejected.
+  text; a `service_id` outside the injected catalogue is rejected; a low
+  confidence first message sends the button menu and a tap routes the session
+  with no model call; `MAX_ROUTING_TURNS` reached goes to "Da gestire"; **every
+  gateway route other than `whatsapp-triage` still sends `zdr: true`**.
 - `python -m pytest tests/ --ignore=tests/live_db --ignore=tests/live_twilio -q`
   against a baseline measured on this branch with `git stash`, not quoted from a
   previous entry.
@@ -449,19 +507,16 @@ voice components stay on disk for the next iteration.
 
 ## 11. Open items
 
-1. **`typesafe/jev-1.13` and ZDR.** The endpoints API does not mark the single
-   TypeSafe endpoint zero-data-retention, and `client.ts` sets `zdr: true` on
-   every request by design. Confirm in the OpenRouter dashboard. If there is no
-   ZDR endpoint, this model cannot carry salon customer text without changing a
-   retention guarantee that was set deliberately on 2026-09-16 — which is a
-   separate decision, not a flag to flip in passing. **Blocking for §6.**
-   Session-scoping caps it at three calls per conversation, but with buttons cut
-   (§6.1) there is no path that avoids the model: **every customer's opening
-   message reaches it**. This is the one item that can stop the increment.
-2. **Thresholds.** `ROUTING_CONFIDENCE = 0.7` and `MAX_ROUTING_TURNS = 3` are
+1. ~~**ZDR.**~~ **Decided 2026-09-21: waived for the routing classifier only**,
+   as a named per-call opt-out. See §6.4 for the implementation and for what is
+   exposed. Not an open question any more — kept here as the pointer, because a
+   waiver that is easy to find is a waiver someone can revisit.
+2. **Thresholds.** `ROUTING_CONFIDENCE = 0.7` and `MAX_ROUTING_TURNS = 2` are
    starting values, not measured ones. The first real traffic is what sets them;
-   both are single constants, deliberately.
-3. **Agent granularity.** §6.4 builds service retrieval as a tool and booking as
+   both are single constants, deliberately. The one to watch is how often the
+   button menu fires — high rates mean the routing prompt is weak, not that
+   customers are unclear.
+3. **Agent granularity.** §6.5 builds service retrieval as a tool and booking as
    an agent. Confirm, or say that retrieval should be its own agent from the
    start.
 4. **Coexistence and the Business App's own auto-replies.** The salon may
