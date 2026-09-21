@@ -847,7 +847,25 @@ def _interactive_or_text(message: dict) -> tuple[str | None, str]:
     return None, str(text.get("body") if isinstance(text, dict) else (text or ""))
 ```
 
-`record_inbound` gains `ON CONFLICT (wa_message_id) DO NOTHING RETURNING *`, so a replay returns no row and the caller skips the work — the dedup and the "did we already process this" question are the same question, answered once.
+`record_inbound` gains an `ON CONFLICT … DO NOTHING RETURNING *`, so a replay
+returns no row and the caller skips the work — the dedup and the "have we
+already processed this" question are the same question, answered once.
+
+**The predicate is not optional.** `inbound_messages_wa_id_uniq` is a *partial*
+index, so the `ON CONFLICT` clause must repeat its `WHERE` or Postgres cannot
+infer it and the statement fails outright with *"no unique or exclusion
+constraint matching the ON CONFLICT specification"*:
+
+```sql
+INSERT INTO whatsapp.inbound_messages (...) VALUES (...)
+ON CONFLICT (wa_message_id) WHERE wa_message_id IS NOT NULL DO NOTHING
+RETURNING *
+```
+
+Verified against a real Postgres while applying migration 24 (Task 1), not
+assumed. This repo has been bitten by exactly this before — see the CLAUDE.md
+entries for 2026-07-18 and 2026-07-21, both of which were the same inference
+failure against an index whose shape did not match the clause.
 
 - [ ] **Step 4: Run them and watch them pass**
 
