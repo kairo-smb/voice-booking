@@ -83,7 +83,7 @@ verified — strictly stronger evidence of identity than a voice call's caller I
 
 ---
 
-## 4. Schema — migration 23
+## 4. Schema — migration 24
 
 ```sql
 -- whatsapp.inbound_messages
@@ -484,7 +484,7 @@ voice components stay on disk for the next iteration.
 
 ## 10. Verification
 
-- Migration 23 applied **twice** against a scratch Postgres, exit 0 both times,
+- Migration 24 applied **twice** against a scratch Postgres, exit 0 both times,
   columns and comments confirmed by `\d`. Non-trivial statements (the thread
   list query, the window predicate, the echo write) executed against real rows
   rather than assumed — the standing bar on every migration in this repo.

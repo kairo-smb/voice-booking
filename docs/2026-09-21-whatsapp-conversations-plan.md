@@ -29,7 +29,7 @@
 
 | Path | Responsibility |
 |---|---|
-| `booking_engine/db/sql/23_whatsapp_conversations.sql` | migration: inbound columns, `origin`, `service_intake`, `calls.channel` |
+| `booking_engine/db/sql/24_whatsapp_conversations.sql` | migration: inbound columns, `origin`, `service_intake`, `calls.channel` |
 | `booking_engine/services/messaging/wa_routing.py` | **pure**: session boundary, routing decision, turn cap |
 | `booking_engine/services/messaging/wa_threads.py` | thread list/detail assembly, window computation |
 | `booking_engine/services/messaging/wa_inbound.py` | the background task: dedup, transcribe, classify, dispatch |
@@ -63,10 +63,10 @@
 
 # PHASE A — Conversations
 
-## Task 1: Migration 23
+## Task 1: Migration 24
 
 **Files:**
-- Create: `booking_engine/db/sql/23_whatsapp_conversations.sql`
+- Create: `booking_engine/db/sql/24_whatsapp_conversations.sql`
 - Test: `tests/booking_engine/test_migration_23.py`
 
 - [ ] **Step 1: Write the migration**
@@ -128,7 +128,7 @@ COMMENT ON COLUMN voice_agent.calls.duration_seconds IS
 
 ```bash
 createdb wa_scratch
-for i in 1 2; do psql wa_scratch -v ON_ERROR_STOP=1 -f booking_engine/db/sql/23_whatsapp_conversations.sql && echo "pass $i ok"; done
+for i in 1 2; do psql wa_scratch -v ON_ERROR_STOP=1 -f booking_engine/db/sql/24_whatsapp_conversations.sql && echo "pass $i ok"; done
 psql wa_scratch -c '\d whatsapp.inbound_messages' -c '\d voice_agent.service_intake'
 ```
 
@@ -146,7 +146,7 @@ Expected: `1`. Also insert two rows with `wa_message_id IS NULL` and confirm bot
 - [ ] **Step 4: Commit**
 
 ```bash
-git add booking_engine/db/sql/23_whatsapp_conversations.sql
+git add booking_engine/db/sql/24_whatsapp_conversations.sql
 git commit -m "feat(whatsapp): schema for two-way conversations"
 ```
 
@@ -2163,7 +2163,7 @@ cd ../../webapp && npx tsc --noEmit
 
 Expected: 0 failed everywhere, both `tsc` exit 0.
 
-- [ ] **Step 2: Migration 23 applied twice against a scratch Postgres**
+- [ ] **Step 2: Migration 24 applied twice against a scratch Postgres**
 
 Confirm every column and both `COMMENT`s with `\d`. Exit 0 both passes.
 
