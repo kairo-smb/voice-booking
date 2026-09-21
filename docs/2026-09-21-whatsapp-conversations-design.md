@@ -164,17 +164,15 @@ and loses nothing.
 
 ---
 
-## 6. Classification
+## 6. Classification — two stages
 
-One short call per inbound message, through the marketing-engine LLM gateway
-(`src/lib/llm/client.ts`), new route `src/routes/whatsapp-triage.ts`. Metered
-there like every other route.
+Both stages go through the marketing-engine LLM gateway
+(`src/lib/llm/client.ts`), new route `src/routes/whatsapp-triage.ts`, metered
+there like every other route. voice-booking calls it directly and gains one env
+var, `MARKET_INTEL_API_URL`; the shared secret `MARKET_INTEL_SECRET` is already
+configured (CLAUDE.md 2026-09-03).
 
-voice-booking calls it directly and gains one env var, `MARKET_INTEL_API_URL`;
-the shared secret `MARKET_INTEL_SECRET` is already configured (CLAUDE.md
-2026-09-03).
-
-**Output:**
+**Stage 1 — classify, on every inbound message.**
 
 ```json
 { "intent": "booking", "confidence": 0.86, "summary": "Chiede posto sabato per colore" }
@@ -191,16 +189,62 @@ Everything else (`price`, `complaint`, `promo_reply`, `opt_out`, `other`) and
 queue; in B it is the safety router, so it fails closed by construction: the
 agent acts on an explicit allowlist, never on the absence of a red flag.
 
-**Model:** `<OPENROUTER_SLUG>` — *open item, §11*. Adding it requires an entry in
-`PROVIDERS_BY_MODEL` in `src/lib/llm/client.ts`; a model with no entry falls
-back to open routing, which can reach jurisdictions deliberately excluded, and
-`zdr: true` will fail the request loudly if the model has no ZDR endpoint. Both
-are correct behaviours and both must be resolved before this ships.
+**Stage 2 — richer triage, only for what stage 1 admits.** A booking gets the
+catalogue, the intake questions (§7) and the thread history; a `hours` question
+does not. This is the stage the booking agent (§9) runs inside.
 
-No service catalogue in this prompt: it would be injected on every inbound
-message for a result A does not use. Service chips in A come from
-`service_catalog_match.py`, which costs nothing. LLM service matching lands in B,
-where the catalogue is in the prompt anyway.
+### Model and cost
+
+`typesafe/jev-1.13`, single provider, so the allowlist entry is trivial:
+
+```ts
+'typesafe/jev-1.13': ['typesafe'],
+```
+
+Read from OpenRouter's endpoints API on 2026-09-21 — **one read, confirm in the
+dashboard before either fact is load-bearing**:
+
+| | |
+|---|---|
+| Endpoint | `typesafe/jev-1.13-20260917`, TypeSafe only |
+| Context | 32,000 · max completion 28,800 |
+| Tool calling | yes (`none` \| `auto` \| `required` \| `function`) |
+| **ZDR** | **not indicated** |
+| Price | **$42 / M input** · $0 / M output |
+| Uptime 24h | 100% |
+
+Two consequences, both blocking:
+
+1. **No ZDR marking means every request fails.** `client.ts` sets `zdr: true` on
+   every call and that is deliberate — a model with no ZDR endpoint must fail
+   loudly rather than run outside the retention guarantee, because the payload
+   is a real salon's customer list. Either TypeSafe has a ZDR endpoint that the
+   endpoints API did not surface, or this model cannot carry customer text under
+   the current guarantee. Resolve before building on it.
+2. **$42/M input is the expensive stage, not the cheap one.** At ~500 input
+   tokens that is ~$0.02 per classified message; a salon at 100 messages/day is
+   ~$60/month in classification alone, roughly 400× the flash models already in
+   `PROVIDERS_BY_MODEL`. **Recommended ordering: a flash model runs stage 1 on
+   every message, Jev runs stage 2 on the bookings.** That is the inverse of
+   "Jev classifies first" and is written this way pending confirmation.
+
+No service catalogue in the stage-1 prompt: it would be injected on every
+inbound message for a result A does not use, and at Jev's input price that is
+the single most expensive thing in the stack. Service chips in A come from
+`service_catalog_match.py`, which costs nothing. LLM service matching lands in
+stage 2, where the catalogue is in the prompt anyway.
+
+### Agents vs tools
+
+The booking flow **is** an agent: an LLM in a loop over `TOOL_DEFS`, which is
+what §9 builds and what the voice path already runs.
+
+Service retrieval is **a tool, not an agent**. A salon catalogue is 20–50 rows;
+it fits whole in a prompt and `get_services` already exists. A dedicated
+retrieval agent adds a hop, latency and a second LLM bill for a `SELECT`.
+Upgrade path, if it is ever needed: catalogues large enough not to fit, or
+synonym-heavy matching that the token matcher misses — the same upgrade path
+`service_catalog_match.py` already names in its own `ponytail:` comment.
 
 ---
 
@@ -252,13 +296,19 @@ New Graph client functions: `send_text()`, `get_media()`.
 
 ### UI
 
-**Inbox → Conversazioni becomes the WhatsApp thread list.** The telephony
-surfaces are hidden for now — `InboxTabBar` already takes a `visible` prop, so
-this is a filter, not a deletion, and the voice components stay on disk for the
-next iteration.
+**Inbox → Conversazioni becomes the WhatsApp thread list, and that is the only
+place this lives.** No tile in Marketing → engage: one surface, not two copies
+of the same list. The telephony surfaces are hidden for now — `InboxTabBar`
+already takes a `visible` prop, so this is a filter, not a deletion, and the
+voice components stay on disk for the next iteration.
 
-- Thread list: window countdown, intent chip, `📱` badge on replies sent from
-  the owner's phone, filters for unread and campaign replies.
+- Thread list in **two sections, "Da gestire" first**: threads stage 1 routed to
+  a human (intent outside the whitelist, or low confidence), threads the agent
+  escalated, and — once B ships — threads where the agent stood down. Everything
+  else sits below in plain recency order. The section is the product: the owner
+  should open the Inbox and see only what actually needs them.
+- Row: window countdown, intent chip, `📱` badge on replies sent from the
+  owner's phone, filters for unread and campaign replies.
 - Thread: merged timeline, transcript shown inline for voice notes, reply box
   disabled with an explanation outside the window rather than an error after the
   click.
@@ -350,9 +400,15 @@ next iteration.
 
 ## 11. Open items
 
-1. **Classifier model slug.** "jev" via OpenRouter — the exact OpenRouter slug
-   is needed, plus its `PROVIDERS_BY_MODEL` entry (jurisdiction allowlist) and
-   confirmation it has a ZDR endpoint. Blocking for §6.
-2. **Engage tile.** §8 places the UI in Inbox → Conversazioni. The original ask
-   was a tile in Marketing → engage. Assumed: the engage tile becomes an entry
-   point with an unread count, not a second copy of the UI. Confirm.
+1. **`typesafe/jev-1.13` and ZDR.** The endpoints API does not mark the single
+   TypeSafe endpoint zero-data-retention, and `client.ts` sets `zdr: true` on
+   every request by design. Confirm in the OpenRouter dashboard. If there is no
+   ZDR endpoint, this model cannot carry salon customer text without changing a
+   retention guarantee that was set deliberately on 2026-09-16 — which is a
+   separate decision, not a flag to flip in passing. **Blocking for §6.**
+2. **Stage ordering.** §6 recommends flash for stage 1 and Jev for stage 2, on
+   the $42/M input price. Confirm, or state that Jev classifies everything and
+   the cost is accepted.
+3. **Agent granularity.** §6 builds service retrieval as a tool and booking as
+   an agent. Confirm, or say that retrieval should be its own agent from the
+   start.
