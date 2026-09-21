@@ -577,6 +577,31 @@ async def webhook(
     return Response(status_code=200)
 
 
+def _interactive_or_text(message: dict) -> tuple[str | None, str]:
+    """(button_id, display_text). `button_id` is None for anything typed.
+
+    A tap on a menu we sent comes back as `type: "interactive"` carrying the id
+    we defined. Storing the *title* as the body is what makes the thread view
+    show the customer what they saw themselves tap, rather than a slug.
+
+    Every read is a `.get()` chain that degrades to empty: a shape Meta changes
+    or a type we have never seen must record a blank message, not raise inside
+    the webhook. Same reason the text branch tolerates a bare string.
+    """
+    if message.get("type") == "interactive":
+        inter = message.get("interactive")
+        if not isinstance(inter, dict):
+            return None, ""
+        reply = inter.get("button_reply") or inter.get("list_reply")
+        if not isinstance(reply, dict):
+            return None, ""
+        return (str(reply.get("id") or "") or None, str(reply.get("title") or ""))
+    text = message.get("text")
+    if isinstance(text, dict):
+        return None, str(text.get("body") or "")
+    return None, str(text or "")
+
+
 async def _handle_change(sender: dict, change: dict) -> None:
     field = change.get("field")
     value = change.get("value") or {}
@@ -601,6 +626,34 @@ async def _handle_change(sender: dict, change: dict) -> None:
             logger.warning(
                 "whatsapp.template_verdict_unmatched shop=%s name=%s event=%s",
                 sender["shop_id"], name, value.get("event"),
+            )
+        return
+
+    # Meta named the coexistence field `smb_message_echoes`; the array inside
+    # it is `message_echoes`. Both names are accepted because the field name is
+    # the one thing here confirmed only from a BSP's mirror of Meta's docs, and
+    # accepting a name we never receive costs nothing.
+    if field in ("smb_message_echoes", "message_echoes"):
+        # The owner answers from the WhatsApp Business App and Meta reports it
+        # here. Recorded so the thread is not a half-conversation and the owner
+        # is not asked to answer something they already answered.
+        #
+        # Deliberately does NOT touch the 24h window: that is driven by
+        # customer inbound alone, and an echo that extended it would let us
+        # send into a conversation Meta considers closed.
+        for echo in value.get("message_echoes") or []:
+            await wq.record_echo(
+                shop_id=sender["shop_id"],
+                to_phone=str(echo.get("to") or ""),
+                # Meta reports the business number as the echo's sender; the
+                # row on file is the fallback for a payload that omits it.
+                from_number=str(echo.get("from") or sender.get("phone_number") or ""),
+                body=_interactive_or_text(echo)[1],
+                wa_message_id=str(echo.get("id") or "") or None,
+            )
+            logger.info(
+                "whatsapp.echo shop=%s to=%s type=%s",
+                sender["shop_id"], echo.get("to"), echo.get("type"),
             )
         return
 
@@ -633,13 +686,27 @@ async def _handle_change(sender: dict, change: dict) -> None:
         # because campaign measurement needs "did this recipient reply within
         # 72h" as a queryable signal; a reply is matched back to the message it
         # answers by phone number.
-        await wq.record_inbound(
+        button_id, text = _interactive_or_text(message)
+        row = await wq.record_inbound(
             shop_id=sender["shop_id"],
             from_phone=str(message.get("from") or ""),
-            body=str(message.get("text", {}).get("body") if isinstance(message.get("text"), dict) else (message.get("text") or "")),
+            body=text,
             message_type=str(message.get("type") or "text"),
+            wa_message_id=str(message.get("id") or "") or None,
+            # A tap is already named: the id is one we defined, so it *is* the
+            # intent and there is nothing for a model to rule on.
+            intent=button_id,
+            confidence=1.0 if button_id else None,
         )
+        if row is None:
+            # Meta replayed a webhook we have already recorded. Skipping here
+            # is what keeps a retry from costing a second AI classification.
+            logger.info(
+                "whatsapp.inbound_replay shop=%s wamid=%s",
+                sender["shop_id"], message.get("id"),
+            )
+            continue
         logger.info(
-            "whatsapp.inbound shop=%s from=%s type=%s",
-            sender["shop_id"], message.get("from"), message.get("type"),
+            "whatsapp.inbound shop=%s from=%s type=%s intent=%s",
+            sender["shop_id"], message.get("from"), message.get("type"), button_id,
         )

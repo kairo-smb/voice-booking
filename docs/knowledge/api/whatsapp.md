@@ -330,9 +330,37 @@ Always answers **200** on a genuine request. Meta retries on anything else and d
 |---|---|
 | `messages` → `statuses[]` | `sent`/`delivered`/`read`/`failed` written to `outbound_messages` by `wamid` |
 | `messages` → `messages[]` | Inbound reply persisted to `whatsapp.inbound_messages` (migration 17) — campaign measurement ("replied within 72h", design §9) reads it; a reply is matched back by phone (`from_phone` == the sent message's `to_phone`) |
+| `smb_message_echoes` → `message_echoes[]` | A message the **owner** sent from their own WhatsApp Business App, recorded as an `outbound_messages` row with `origin = 'phone'` (migration 24) |
 | `message_template_status_update` | Meta's verdict, applied to `(shop_id, name)` — **never by name alone**, since every salon's copy carries the same name |
 
+Any other field is ignored and still answers 200 — Meta adds fields (`history`, `smb_app_state_sync`) to a subscription without asking.
+
 Template verdicts arrive here within minutes instead of on the next hourly tick. The tick's poll survives as a **reconciler**: a missed webhook would otherwise leave a template `pending` forever, blocking every send for that shop and looking like nothing at all.
+
+### Deduplication: Meta replays webhooks
+
+`inbound_messages.wa_message_id` (Meta's `wamid`, migration 24) is the dedup key, and the insert is `ON CONFLICT (wa_message_id) WHERE wa_message_id IS NOT NULL DO NOTHING RETURNING *`. A replay therefore returns **no row**, which is also how the caller knows to skip everything downstream — the dedup and "have we already processed this?" are the same question, answered in one statement with no check-then-act race. Without it a retry is a second bubble in the thread and a second AI classification that costs real money.
+
+**The `WHERE` in that clause is not optional.** `inbound_messages_wa_id_uniq` is a *partial* index; Postgres cannot infer a partial index unless the `ON CONFLICT` clause repeats its predicate, and the statement fails outright with *"no unique or exclusion constraint matching the ON CONFLICT specification"* — the message is lost and the webhook 500s back to Meta. Verified against a real Postgres, both directions. See `CLAUDE.md` 2026-07-18 and 2026-07-21, which are the same inference failure twice.
+
+A message Meta sends without an `id` conflicts with nothing and always records, which is why the column is nullable and the index partial.
+
+### Echoes from the owner's phone
+
+Every sender is `coexistence`: the number is still live in the WhatsApp Business App on the owner's phone and they answer from there. Meta reports those under its own field, `smb_message_echoes`, whose `value.message_echoes[]` entries carry `from` (the business), `to` (the customer), `id`, `timestamp`, `type` and the type-specific body. Recorded so the thread is a whole conversation rather than Kairo's half of one.
+
+Two rules, both load-bearing:
+
+- **An echo does not extend the 24h service window.** That window is `max(received_at)` over *customer* inbound alone, and `record_echo` never touches `inbound_messages.received_at`. An echo that extended it would let us send into a conversation Meta considers closed — which comes back as an opaque provider error long after the cause.
+- **An echo clears the unread state** on that thread (`read_at`). The owner has already answered; the Inbox must not keep asking them to.
+
+Echo dedup is best-effort: the wamid goes into `provider_sid`, which has only a plain index behind it, so a genuinely concurrent retry could still double-write. A duplicate bubble is cosmetic; the inbound path, where a duplicate costs an AI call, is the one a unique index guards.
+
+> **Unverified against a live WABA.** The echo payload shape is confirmed from Meta's Coexistence documentation as mirrored by two BSPs (Gupshup, 360dialog), not from a real webhook — no connected WABA exists yet. The parser is `.get()` chains that degrade to empty throughout, and the handler accepts both `smb_message_echoes` and `message_echoes` as the field name, because accepting a name Meta never sends costs nothing and missing the one it does send costs every echo.
+
+### Interactive replies
+
+A tap on a button or list we sent arrives as `type: "interactive"` with `interactive.button_reply.id` (or `list_reply.id`). That id is one **we** defined, so it *is* the intent: it is stored straight into `inbound_messages.intent` with `confidence = 1.0`, and the reply's `title` is stored as `body` so the thread shows the customer what they saw themselves tap. No model call, no cost, no possibility of a hallucinated intent. Anything typed arrives with both columns NULL, for the classifier.
 
 ### Opt-out vs. frequency cap
 
