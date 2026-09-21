@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     # refused and logged loudly, never silently dropped.
     webapp_base_url: str = ""
     market_intel_secret: str = ""
+    # marketing-engine — the LLM gateway that classifies an inbound WhatsApp
+    # message (booking/cancel/complaint/...). Same shared secret as above.
+    # Empty means "not configured": classify() fails closed to None rather
+    # than guessing an intent.
+    market_intel_api_url: str = ""
     # Twilio
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
