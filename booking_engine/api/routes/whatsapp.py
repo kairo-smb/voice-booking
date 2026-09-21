@@ -9,6 +9,7 @@ why migration 15 dropped the per-subaccount token column.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
 
@@ -19,10 +20,12 @@ from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token, _get_settings
+from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.config import Settings
 from booking_engine.db import whatsapp_audit_queries as waq
 from booking_engine.db import whatsapp_automation_queries as aq
 from booking_engine.db import whatsapp_queries as wq
+from booking_engine.db import whatsapp_thread_queries as tq
 from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging import wa_inbound
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
@@ -167,6 +170,22 @@ class ReceiptRequest(BaseModel):
     pdf_base64: str = Field(min_length=1)
     requested_by: UUID | None = None
     source: str | None = None
+
+
+class ReplyRequest(BaseModel):
+    """A free-form answer typed by the owner in the Inbox.
+
+    `phone` is whatever spelling the caller holds — with or without the leading
+    '+'. Nothing here normalises it: the thread SQL matches on
+    `ltrim(phone,'+')` on both sides, and a second normalisation on this side
+    would be a second rule to keep in agreement with that one.
+    """
+
+    shop_id: UUID
+    phone: str = Field(min_length=1, max_length=32)
+    # Meta's own text ceiling is 4096 characters; a longer body is rejected by
+    # Graph, so it is refused here where the owner can see why.
+    body: str = Field(max_length=4096)
 
 
 # ------------------------------------------------------------------ onboarding
@@ -507,6 +526,103 @@ async def cancel_campaign(
         response={"cancelled": cancelled}, status="success",
     )
     return {"data": {"cancelled": cancelled}}
+
+
+# --------------------------------------------------------------------- threads
+
+@router.get("/threads/{shop_id}")
+async def threads(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """The Inbox's first screen: one row per phone, newest first.
+
+    One query, not one per thread — the session's routed intent is derived in
+    the list SQL precisely so this endpoint stays O(1) round trips. The two
+    derived fields are computed here rather than in SQL because they are pure
+    rules (`window_open`, `needs_attention`) with their own unit tests, and a
+    second copy of either in a query is a second place to get the 24h boundary
+    wrong.
+    """
+    rows = await tq.thread_list(shop_id)
+    now = datetime.now(timezone.utc)
+    return {"data": [
+        {**row,
+         "window_open": tq.window_open(last_inbound=row.get("last_inbound"), now=now),
+         "needs_attention": tq.needs_attention(row)}
+        for row in rows
+    ]}
+
+
+@router.get("/threads/{shop_id}/{phone}")
+async def thread(
+    shop_id: UUID,
+    phone: str,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """One conversation, both directions, oldest first — and it marks it read.
+
+    Reading the thread *is* what marks it read: the two are the same act, and a
+    separate endpoint would be one more call the webapp can forget to make,
+    after which the unread badge lies forever. `mark_read` is idempotent
+    (`read_at IS NULL`), so there is nothing to branch on for an empty thread —
+    an unknown phone returns an empty timeline rather than a 404, because "this
+    customer has never written" is an answer, not an error.
+    """
+    messages = await tq.thread_timeline(shop_id, phone)
+    await tq.mark_read(shop_id, phone)
+    return {"data": {"messages": messages}}
+
+
+@router.post("/reply")
+async def reply(
+    payload: ReplyRequest,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Free-form reply from the owner, inside Meta's 24h service window.
+
+    **No credit debit, deliberately.** Meta does not charge for a service
+    conversation (one the customer opened) and, as a Tech Provider, Kairo has
+    no credit line to share — the salon's own card is on the salon's own WABA.
+    A debit here would bill the salon for something nobody charges us for, so
+    this path matches every other WhatsApp send in this repo and takes none.
+    """
+    if not payload.body.strip():
+        # Graph rejects an empty text body. Refusing locally names the problem;
+        # relaying Meta's error would not.
+        return {"ok": False, "error": "empty_body"}
+
+    sender = await wq.get_sender(payload.shop_id)
+    if not sender or sender["status"] != "online":
+        return {"ok": False, "error": "sender_offline"}
+
+    # Before Graph, never after. Outside the window Meta answers 131047, which
+    # reaches the owner as an opaque provider error they cannot act on — and
+    # costs a Graph round trip to learn something we already knew.
+    last_inbound = await tq.last_inbound_at(payload.shop_id, payload.phone)
+    if not tq.window_open(last_inbound=last_inbound,
+                          now=datetime.now(timezone.utc)):
+        return {"ok": False, "error": "session_window_closed"}
+
+    sid = await meta.send_text(
+        phone_number_id=sender["phone_number_id"], to=payload.phone,
+        body=payload.body, token=sender["access_token"],
+    )
+    try:
+        await tq.record_reply(shop_id=payload.shop_id, to_phone=payload.phone,
+                              body=payload.body, provider_sid=sid)
+    except Exception:  # noqa: BLE001
+        # Meta has already delivered it; the customer's phone has the message.
+        # Reporting failure would have the owner send it a second time, which
+        # is the worse of the two wrongs, so the send is reported as what it
+        # is — sent, and missing from the thread. `recorded: False` is the
+        # webapp's cue to say so, and the log is how it gets repaired.
+        logger.exception(
+            "whatsapp.reply_not_recorded shop=%s to=%s sid=%s",
+            payload.shop_id, payload.phone, sid,
+        )
+        return {"data": {"sent": True, "provider_sid": sid, "recorded": False}}
+    return {"data": {"sent": True, "provider_sid": sid}}
 
 
 # --------------------------------------------------------------------- webhook

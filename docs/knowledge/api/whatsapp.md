@@ -1,6 +1,6 @@
 # WhatsApp API
 
-`booking_engine/api/routes/whatsapp.py`, mounted at `/api/v1`. Onboards a salon onto WhatsApp with its own WABA, injects Kairo's approved templates into it, and queues personalised marketing that drips out across the day — or across a week, for a bulk campaign.
+`booking_engine/api/routes/whatsapp.py`, mounted at `/api/v1`. Onboards a salon onto WhatsApp with its own WABA, injects Kairo's approved templates into it, and queues personalised marketing that drips out across the day — or across a week, for a bulk campaign. It also serves the two-way Inbox: reading a customer's thread and answering it free-form inside Meta's 24h window.
 
 **Read [Providers → WhatsApp](../providers.md#whatsapp-meta-cloud-api-tech-provider) first** if you're new to this: the constraints (approved templates only, per-recipient marketing caps, coexistence) explain why these endpoints exist in this shape.
 
@@ -10,7 +10,7 @@
 
 | Routes | Scheme |
 |---|---|
-| `/whatsapp/onboarding/*`, `/whatsapp/status/*`, `/whatsapp/templates/*`, `/whatsapp/campaigns*`, `/whatsapp/receipts`, `/whatsapp/messages/*` | Control-plane bearer (`CONTROL_PLANE_SECRET`) — the webapp is the only caller |
+| `/whatsapp/onboarding/*`, `/whatsapp/status/*`, `/whatsapp/templates/*`, `/whatsapp/campaigns*`, `/whatsapp/receipts`, `/whatsapp/messages/*`, `/whatsapp/threads/*`, `/whatsapp/reply` | Control-plane bearer (`CONTROL_PLANE_SECRET`) — the webapp is the only caller |
 | `GET /whatsapp/webhook` | Meta's handshake: `hub.verify_token` must equal `META_VERIFY_TOKEN` |
 | `POST /whatsapp/webhook` | `X-Hub-Signature-256`, HMAC-SHA256 of the **raw body** with `META_APP_SECRET` |
 
@@ -272,6 +272,96 @@ Each row: `message_id` (null for holdout), `campaign_key`, `goal`,
 
 ---
 
+## Threads (the two-way Inbox)
+
+A "thread" is not a table: it is every message to and from one phone number,
+collapsed per phone at read time out of `whatsapp.inbound_messages` and
+`whatsapp.outbound_messages` (`booking_engine/db/whatsapp_thread_queries.py`).
+
+**Phone numbers are matched with the leading `+` stripped on both sides**
+(`ltrim(phone,'+')`, in the SQL and nowhere else). Meta reports `from` as bare
+E.164 while the webapp holds whatever the customer record says, usually with
+the plus — either spelling addresses the same thread, and the routes forward
+the caller's spelling verbatim rather than normalising a second time.
+
+### The 24h service window
+
+Meta permits **free-form** (non-template) messages only within 24 hours of the
+customer's *last inbound message*. The window resets on every customer message;
+our own sends do not extend it, and neither does an echo from the owner's own
+WhatsApp Business App (`outbound_messages.origin = 'phone'`) — that is not a
+customer message, which is why the window is computed from `inbound_messages`
+alone. At exactly 24h it is **closed** (`now < expires`, strictly).
+
+Outside it, a send fails at Meta with **`131047`**, which reaches the owner as
+an opaque provider error they cannot act on. So `POST /whatsapp/reply` checks
+the window **before** the Graph call, never after: a closed window returns a
+named refusal and makes no Graph request at all. Reaching a customer after the
+window means a template (a campaign), not a reply.
+
+### `GET /whatsapp/threads/{shop_id}`
+
+One row per phone the shop has heard from, newest first. Keyed on **inbound**,
+so a customer who was only ever messaged by a campaign and never replied does
+not appear — there is no window on that phone and nothing there to answer.
+
+One query, not one per thread: the session's routed intent is derived inside
+the list SQL, because this is the Inbox's first screen.
+
+Each row: `phone`, `customer_id`, `last_inbound`, `last_message` (a voice note
+reads as its transcript), `message_type`, `unread`, `last_outbound`,
+`window_expires_at`, `intent` (the **session's** verdict, not the last
+message's), plus two fields computed per row from the pure helpers:
+
+| field | meaning |
+|---|---|
+| `window_open` | is a free-form reply legal right now |
+| `needs_attention` | belongs in "Da gestire": the session was escalated, or its intent is unrouted / outside `wa_routing.WHITELIST` — fails toward the human |
+
+### `GET /whatsapp/threads/{shop_id}/{phone}`
+
+The timeline: inbound and outbound merged, oldest first. Each message carries
+`direction` (`in`/`out`), `at`, `text`, `message_type`, `origin` on outbound
+(`kairo` = we sent it, `phone` = the owner answered from the Business App),
+`status`, `intent`, `read_at`.
+
+**Reading the thread is what marks it read** — the two are the same act, so
+there is no separate mark-read endpoint for the webapp to forget to call. The
+update is idempotent (`read_at IS NULL`), and an unknown phone returns an empty
+`messages` list rather than a 404: "this customer has never written" is an
+answer, not an error.
+
+### `POST /whatsapp/reply`
+
+```json
+{ "shop_id": "…", "phone": "+393331112222", "body": "Ciao, a domani!" }
+```
+
+Sends one free-form text now (synchronous, like receipts — not the campaign
+queue) and records it in `outbound_messages` with `origin = 'kairo'`,
+`template_name` and `campaign_key` NULL. The campaign idempotency index is
+partial on both of those, so it does not apply here and the owner may
+legitimately send the same words twice.
+
+Returns `{"data": {"sent": true, "provider_sid": "wamid…"}}`. Refusals come
+back 200 with `{"ok": false, "error": …}`:
+
+| error | when |
+|---|---|
+| `empty_body` | blank or whitespace-only — Graph rejects it, and refusing locally names the problem |
+| `sender_offline` | no sender row, or its status isn't `online` |
+| `session_window_closed` | the 24h window has passed (or the customer never wrote) — **no Graph call is made** |
+
+If Meta accepts the send but recording it fails, the response is
+`{"sent": true, "provider_sid": …, "recorded": false}` and the loss is logged
+(`whatsapp.reply_not_recorded`). The customer's phone already has the message;
+reporting failure would have the owner send it a second time.
+
+**No credit debit**, like every other send on this channel — see
+[Billing](#billing).
+
+---
+
 ## Receipts (Smart Receipt)
 
 ### `POST /whatsapp/receipts`
@@ -464,6 +554,6 @@ New `suppressed_reason` values: `recently_contacted`,
 
 ## Out of scope
 
-- Inbound replies are **persisted** (migration 17) and read by campaign measurement, but nothing answers them. A reply opens Meta's 24h session window, inside which free-form messages *are* allowed — the obvious next phase, and the only path to genuinely free-form personalised copy.
+- Inbound replies are **persisted** (migration 17), read by campaign measurement, and now readable and answerable by the owner through [Threads](#threads-the-two-way-inbox) — but nothing answers them *automatically*. An agent that replies on the salon's behalf is the next phase; `POST /whatsapp/reply` is the same send path it will use.
 - Contact / chat-history sync (`POST /{phone_number_id}/smb_app_data`). One-shot and irreversible per onboarding, and there is nowhere to put the data yet.
 - The LLM template-picker that would *choose* among the marketing templates (`promo_v1`/`winback_v1`/`rebook_v1`/`promo_manual_v1`) per customer isn't built — the webapp names the `template_key` explicitly today.
