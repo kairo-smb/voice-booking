@@ -477,7 +477,15 @@ git commit -m "feat(whatsapp): session-scoped routing, as a pure decision"
 
 **Files:**
 - Modify: `src/lib/llm/client.ts`
-- Test: `src/lib/llm/client.zdr.test.ts`
+- Test: `tests/lib/llm-client-zdr.test.ts`
+
+> Tests live in `tests/`, not beside the source. Jest's `testMatch` is
+> `**/tests/**/*.test.ts`, so a test under `src/` never runs — and `tsconfig`'s
+> `include: ["src"]` would compile it into `dist/`. Applies to every
+> marketing-engine task in this plan.
+>
+> The public entry point is **`llm(): Anthropic`**, a memoised SDK client with
+> `provider` injected by a custom transport `fetch`. There is no `askLLM`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -617,12 +625,19 @@ router.post('/whatsapp/triage', requireSecret, async (req, res) => {
   const text = String(req.body?.text ?? '').slice(0, 2000)
   if (!text) return res.json({ data: { intent: 'other', confidence: 0, summary: '' } })
 
-  const out = await askLLM({
+  // INLINE, never stashed in a module-level const and never exported.
+  //
+  // llm() returns a MEMOISED Anthropic client and the waiver rides on the
+  // client, not on the call — so a stashed `const c = llm({ allowNonZdr: true })`
+  // would widen the exemption to every later call through `c` without
+  // `allowNonZdr` appearing a second time anywhere, which is precisely what the
+  // grep guard cannot see. Calling inline is what keeps the waiver the size it
+  // was granted at.
+  const out = await llm({ allowNonZdr: true }).messages.create({
     model: MODEL,
     system: SYSTEM,
     messages: [{ role: 'user', content: text }],
     max_tokens: 200,
-    allowNonZdr: true,          // §6.4 — the one waiver, owner's decision
   })
 
   // A classifier that throws takes the whole inbound task with it. Junk in
