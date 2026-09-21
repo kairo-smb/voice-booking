@@ -164,7 +164,63 @@ and loses nothing.
 
 ---
 
-## 6. Classification — two stages
+## 6. Intent
+
+### 6.1 A tap, not an inference
+
+Intent is read off a button wherever a button can be offered. Three mechanisms,
+each covering a different moment, all free and all deterministic:
+
+**1. Ice breakers — before the customer writes anything.**
+`POST /{phone_number_id}/conversational_automation` with `prompts`, read back
+with `GET /{phone_number_id}?fields=conversational_automation`. Up to **4
+prompts, 80 characters each, no emoji**, configured once per number, no
+per-message cost.
+
+```
+Prenota un appuntamento · Sposta o disdici · Orari e indirizzo · Parla con noi
+```
+
+> **The limitation that matters here.** Ice breakers show **only in an empty
+> thread** — a customer with existing chat history must delete the thread to see
+> them. Every sender is coexistence, so the salon's real customers *already have
+> a thread with that number*. Ice breakers will therefore reach genuinely new
+> contacts and almost nobody else. They are worth the one API call they cost,
+> but mechanism 2 is what actually carries the load.
+
+> Also: a `wa.me` link carrying pre-filled text **dismisses the ice breaker
+> interface**. Worth knowing before anyone builds a "scrivici su WhatsApp" link
+> with a prefilled body on the site or in a campaign — it would silently disable
+> our own menu.
+
+**2. Interactive reply buttons — the answer to the first message.** Free-form,
+so window-only, which is always satisfied when replying to a message we just
+received. Up to 3 reply buttons, or a list message with up to 10 rows. Whatever
+the customer opened with, the first reply offers the menu. This is the mechanism
+that covers returning customers.
+
+**3. Template quick-reply buttons — business-initiated.** A campaign template
+carries its own buttons, so a promo reply arrives as a button id rather than as
+prose to be interpreted.
+
+A tapped button arrives on the webhook as `type: "interactive"` with
+`interactive.button_reply.id` (or `list_reply.id`), which maps straight to an
+intent. Neither the client nor the webhook handles interactive messages today;
+both need it. New client functions: `send_interactive()`,
+`set_conversational_automation()`.
+
+**Two things this buys beyond cost.** The intent cannot be hallucinated — it is
+an id we defined. And on the tapped path **no customer text is sent to any
+model at all**, which removes the §6.2 retention question from the majority of
+traffic rather than answering it.
+
+**What it does not do:** people ignore buttons and type anyway. Buttons shrink
+free text; they do not eliminate it. Hence 6.2.
+
+### 6.2 Classification — the free-text fallback
+
+Only for messages that are not a button tap. Volume is a fraction of total
+traffic, which is what makes the model choice affordable again.
 
 Both stages go through the marketing-engine LLM gateway
 (`src/lib/llm/client.ts`), new route `src/routes/whatsapp-triage.ts`, metered
@@ -406,9 +462,17 @@ voice components stay on disk for the next iteration.
    ZDR endpoint, this model cannot carry salon customer text without changing a
    retention guarantee that was set deliberately on 2026-09-16 — which is a
    separate decision, not a flag to flip in passing. **Blocking for §6.**
-2. **Stage ordering.** §6 recommends flash for stage 1 and Jev for stage 2, on
+   Note §6.1 shrinks this: on the tapped path no customer text reaches a model
+   at all, so the retention question applies only to the free-text fallback.
+2. **Stage ordering.** §6.2 recommends flash for stage 1 and Jev for stage 2, on
    the $42/M input price. Confirm, or state that Jev classifies everything and
    the cost is accepted.
 3. **Agent granularity.** §6 builds service retrieval as a tool and booking as
    an agent. Confirm, or say that retrieval should be its own agent from the
    start.
+4. **Coexistence and the Business App's own auto-replies.** The salon may
+   already have a *messaggio di benvenuto* and *messaggio di assenza* configured
+   in their WhatsApp Business App. If so, a customer could receive that greeting
+   *and* our button menu. Meta's conversational-components page says nothing
+   about coexistence either way — unverified, and it needs checking on the first
+   real onboarding rather than being discovered by a salon.
