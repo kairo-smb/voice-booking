@@ -158,9 +158,11 @@ def test_every_refusal_reason_is_a_distinct_string():
                             "escalated": True})[1],
         wa_agent.may_speak({"agent_enabled": True, "intent": "booking",
                             "human_replied_at": NOW})[1],
+        wa_agent.may_speak({"agent_enabled": True, "intent": "booking",
+                            "agent_turns": wa_agent.MAX_SESSION_TURNS})[1],
     ]
     assert reasons == ["not_opted_in", "intent_not_whitelisted", "escalated",
-                       "human_took_over"]
+                       "human_took_over", "turn_limit"]
     assert len(set(reasons)) == len(reasons)
 
 
@@ -382,7 +384,86 @@ async def test_an_empty_text_sends_nothing_even_when_not_escalating(wired):
     assert wired.record_reply.count == 0
 
 
-# --- the empty basket --------------------------------------------------------
+# --- the cost ceiling --------------------------------------------------------
+
+
+async def test_each_turn_is_charged_against_the_basket(wired, monkeypatch):
+    """**The engine charges it, not this repo.** `/whatsapp/agent` gates on the
+    shop's basket before it calls a provider (402 when empty) and settles the
+    *actual* LLM cost against that same basket after a turn that ran.
+
+    So a turn is paid for exactly once, and what this pins is both halves: the
+    engine is asked — which is what triggers its gate-and-charge — and nothing
+    on this side bills a second time. A `charge_actual` here would stack an
+    invented flat charge on top of a real one, the double-debit CLAUDE.md's
+    2026-08-12 entry forbids and the 2026-09-03 entry deleted this repo's own
+    basket arithmetic to prevent.
+    """
+    from booking_engine.clients import webapp_credits
+
+    charged = Spy(True)
+    monkeypatch.setattr(webapp_credits, "charge_actual", charged)
+
+    await run(wired)
+
+    # The turn ran, so the engine's own gate ran and its own charge settled.
+    assert wired.turn.count == 1
+    # `run_ref` on the engine's ledger row is the session, so the spend traces
+    # back to the conversation that caused it.
+    assert wired.turn.last["call_id"] == CALL
+    # And this repo opened no second debit path.
+    assert charged.count == 0
+
+
+async def test_a_refused_charge_stands_the_agent_down_for_that_thread(wired):
+    """402 from the engine, and it stays down: the next message reads the
+    escalated session rather than running a turn unpaid."""
+    wired.turn.result = a_turn(text="", escalate=True, reason="no_credit")
+    await run(wired)
+
+    wired.state.result = {**wired.state.result, "escalated": True}
+    await run(wired, r=row())
+
+    assert wired.turn.count == 1      # the second message never ran a turn
+    assert wired.send_text.count == 0
+
+
+async def test_the_agent_hands_over_after_MAX_TURNS_rather_than_chatting_forever(wired):
+    """A booking is four or five exchanges. Twelve means the conversation is
+    not going where the agent thinks it is."""
+    wired.state.result = {**wired.state.result,
+                          "agent_turns": wa_agent.MAX_SESSION_TURNS}
+
+    await run(wired)
+
+    assert wired.turn.count == 0
+    assert wired.send_text.count == 0
+    assert wired.mark_escalated.last["reason"] == "turn_limit"
+
+
+async def test_one_turn_below_the_ceiling_still_speaks(wired):
+    wired.state.result = {**wired.state.result,
+                          "agent_turns": wa_agent.MAX_SESSION_TURNS - 1}
+
+    await run(wired)
+
+    assert wired.turn.count == 1
+    assert wired.send_text.count == 1
+
+
+async def test_the_ceiling_counts_turns_in_the_current_session_only(wired):
+    """Not for all time. The count is derived from agent-origin rows since the
+    session's own `started_at`, so yesterday's conversation cannot exhaust
+    today's."""
+    import inspect
+
+    src = inspect.getsource(wa_agent.wsq)
+    assert "coalesce(o.sent_at, o.created_at) >= c.started_at" in src
+    # And the state the ceiling reads is keyed on the session row, not the phone.
+    await run(wired)
+    assert wired.state.last["call_id"] == CALL
+
+
 
 async def test_the_agent_stands_down_silently_on_an_empty_basket(wired):
     """402 from the engine. No message at all, and the thread needs attention."""
@@ -428,6 +509,15 @@ async def test_prices_reach_the_agent_as_cents(wired):
     await run(wired)
     assert wired.turn.last["services"][0]["price_cents"] == 2500
     assert wired.turn.last["services"][0]["name"] == "Taglio"
+
+
+async def test_the_catalogue_is_read_once_per_turn(wired):
+    """The services and the owner's intake questions are keyed off the same
+    rows. Fetching them separately bought a second round trip and nothing."""
+    await run(wired)
+
+    assert wired.services.count == 1
+    assert wired.intake.count == 1
 
 
 async def test_a_known_customer_is_named_and_an_unknown_one_is_not(wired):

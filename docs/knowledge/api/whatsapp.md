@@ -348,6 +348,7 @@ switch it off:
 | `intent_not_whitelisted` | the session's intent is outside `wa_routing.WHITELIST`. Opted in is not enough; a complaint is a person's |
 | `escalated` | the session was handed to a human and stays handed over — the *next* message does not run a turn either |
 | `human_took_over` | the owner replied, from the webapp (`kairo`) or their phone (`phone`). Not marked escalated: they are already handling it |
+| `turn_limit` | `MAX_SESSION_TURNS` (12) reached **in this session**. A booking is four or five exchanges; twelve means the conversation is not going where the agent thinks it is, and the honest move is a person. The one refusal here that is escalated, because it is something happening rather than a thread that was never the agent's |
 
 **The debounce is a sleep plus a re-read, not a per-thread timer.**
 `DEBOUNCE_SECONDS = 2.0`: people send "ciao" / "volevo prenotare" / "per

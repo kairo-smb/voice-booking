@@ -127,7 +127,8 @@ first_turn, customer_name, customer_phone, now}`; a 200 answers
   A `webapp_credits.charge_actual` call on this side would stack an invented
   flat charge on top of a real one — the double-debit the 2026-08-12 decision
   forbids and the 2026-09-03 one deleted this repo's basket arithmetic to
-  prevent.
+  prevent. What this repo owns instead is the ceiling the gateway cannot see:
+  `wa_agent.MAX_SESSION_TURNS` (12), counted per session.
 - **`call_id` is not bookkeeping.** The gateway passes it back to *this* repo's
   voice tools, which read the shop off the session row and never off a header —
   it is the authorization basis for every booking the turn touches.

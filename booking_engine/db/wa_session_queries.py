@@ -206,9 +206,9 @@ async def session_transcript(
     Templates and campaign sends are excluded — a promo that landed mid-thread
     is not part of this request and would only mislead the turn.
 
-    `limit` is a guard on the prompt, not on the conversation: a session is
-    over long before 40 messages, so this only ever bites on a thread that
-    somehow ran away.
+    `limit` is a guard on the prompt, not on the conversation: MAX_SESSION_TURNS
+    caps a session long before 40 messages, so this only ever bites on a thread
+    that somehow escaped it.
     """
     return await execute(
         """

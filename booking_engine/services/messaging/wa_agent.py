@@ -45,6 +45,15 @@ logger = logging.getLogger(__name__)
 # Answering each is three replies to one thought, and three billed turns.
 DEBOUNCE_SECONDS = 2.0
 
+# A booking is four or five exchanges. Twelve means the conversation is not
+# going where the agent thinks it is, and the honest move is a human — not
+# another turn on the salon's basket.
+#
+# Counted **per session**, off `origin='agent'` rows since the session's own
+# `started_at`, so yesterday's conversation cannot exhaust today's and no
+# counter column has to be kept true.
+MAX_SESSION_TURNS = 12
+
 
 def may_speak(thread: dict) -> tuple[bool, str]:
     """Every reason the agent stays quiet. An allowlist of conditions, so a new
@@ -73,6 +82,8 @@ def may_speak(thread: dict) -> tuple[bool, str]:
         return False, "escalated"
     if thread.get("human_replied_at") is not None:
         return False, "human_took_over"     # echo or webapp, same rule
+    if int(thread.get("agent_turns") or 0) >= MAX_SESSION_TURNS:
+        return False, "turn_limit"
     return True, "ok"
 
 
@@ -127,16 +138,24 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
     }
     ok, reason = may_speak(thread)
     if not ok:
-        await _stand_down(call_id, shop_id, phone, reason)
+        # `turn_limit` is the one refusal here that is something *happening*
+        # rather than a thread that was never the agent's: the conversation ran
+        # long and a person now has to finish it, so it goes in the owner's
+        # queue. The others are already where they belong.
+        await _stand_down(call_id, shop_id, phone, reason,
+                          escalate=reason in _ESCALATING_REASONS)
         return
 
-    # 5. One turn.
+    # 5. One turn. The catalogue is read once and used twice — the services
+    #    themselves and the owner's per-service intake questions are keyed off
+    #    the same rows, and fetching them separately bought nothing.
+    catalogue = await queries.list_services(shop_id)
     turn = await marketing_agent.turn(
         shop_id=shop_id,
         call_id=call_id,
         shop_name=await _shop_name(shop_id),
-        services=await _services(shop_id),
-        intake=await _intake(shop_id),
+        services=_services(catalogue),
+        intake=await intake_q.for_services(shop_id, [r["id"] for r in catalogue]),
         messages=await _messages(shop_id, phone, state.get("started_at")),
         first_turn=int(state.get("agent_turns") or 0) == 0,
         customer_name=await _customer_name(shop_id, phone),
@@ -170,6 +189,13 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
         return
 
     await _say(sender, phone, text)
+
+
+# Refusals that mean "a person is needed on this thread", as opposed to "this
+# was never the agent's to answer". Only these are written to the session row:
+# marking a not-opted-in shop's every thread escalated would fill the owner's
+# queue with threads nothing went wrong on.
+_ESCALATING_REASONS = ("turn_limit",)
 
 
 async def _stand_down(
@@ -228,7 +254,7 @@ async def _messages(shop_id, phone: str, since) -> list[dict[str, str]]:
     return [{"role": r["role"], "content": r["content"]} for r in rows]
 
 
-async def _services(shop_id) -> list[dict]:
+def _services(rows: list[dict]) -> list[dict]:
     """The catalogue, in the engine's shape. `price_cents` from `price_eur`.
 
     The agent needs prices to answer "quanto costa", which is an ordinary part
@@ -236,7 +262,6 @@ async def _services(shop_id) -> list[dict]:
     behind an explicit ask (CLAUDE.md 2026-07-21) because a phone agent reciting
     a price list is a worse experience than a written one.
     """
-    rows = await queries.list_services(shop_id)
     return [
         {
             "id": str(r["id"]),
@@ -256,16 +281,6 @@ def _cents(price_eur) -> int | None:
         return int(round(float(price_eur) * 100))
     except (TypeError, ValueError):
         return None
-
-
-async def _intake(shop_id) -> dict[str, str]:
-    """The owner's per-service questions, for every service in the catalogue.
-
-    Keyed by service id as text. `for_services` returns only the non-empty ones
-    — a missing key means "nothing to ask", not an error.
-    """
-    rows = await queries.list_services(shop_id)
-    return await intake_q.for_services(shop_id, [r["id"] for r in rows])
 
 
 async def _shop_name(shop_id) -> str:
