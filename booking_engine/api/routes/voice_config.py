@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token
+from booking_engine.db import service_intake_queries as intake
 from booking_engine.db.voice_config_queries import get_config, upsert_config
 from booking_engine.db.voice_telephony_queries import get_telephony
 from booking_engine.db.voice_tone_queries import get_tone_by_id, list_preset_tones
@@ -45,11 +46,58 @@ class ConfigPatch(BaseModel):
     auto_topup_package_id: UUID | None = None
 
 
+class IntakePut(BaseModel):
+    """Deliberately without `max_length`: over the cap is truncated, not refused.
+
+    The webapp counts the characters down in front of the owner, so 501 is a
+    UI state, not a request anyone should ever be able to send. If one arrives
+    anyway — a second client, a retry of an older draft — storing the first 500
+    characters is a better answer than a 422 the owner cannot interpret.
+    """
+    questions: str = ""
+
+
 @router.get("/tones")
 async def list_tones(
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict[str, Any]:
     return {"data": await list_preset_tones()}
+
+
+# Intake questions live here, under /voice/config, and not under /whatsapp:
+# what to ask before booking a colour is the same knowledge whichever channel
+# is asking, and the phone agent is the next thing to read it.
+
+@router.get("/{shop_id}/intake")
+async def get_intake(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict[str, Any]:
+    """Rows only — service names come from `business_app_core`, which the
+    caller already has and this repo does not own."""
+    return {"data": await intake.for_shop(shop_id)}
+
+
+@router.put("/{shop_id}/intake/{service_id}", response_model=None)
+async def put_intake(
+    shop_id: UUID,
+    service_id: UUID,
+    body: IntakePut,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+):
+    """PUT, not PATCH: the whole value is what was typed, and clearing the
+    field is a real edit rather than an omission."""
+    row = await intake.set_questions(
+        shop_id=shop_id, service_id=service_id, questions=body.questions,
+    )
+    if row is None:
+        # Not owned by this shop, or not a service at all. One answer for both:
+        # a caller for another shop learns nothing either way.
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Unknown service for this shop."},
+        )
+    return {"data": row}
 
 
 @router.get("/{shop_id}")
