@@ -98,7 +98,13 @@ def wired(monkeypatch):
         transcribe=Spy("vorrei prenotare per sabato"),
         classify=Spy({"intent": "booking", "confidence": 0.9, "summary": "s"}),
         send_interactive=Spy("wamid.out"),
+        # The booking agent is stubbed here on purpose: this file is about what
+        # the worker *dispatches*, and the agent's own rules about whether it
+        # may then speak have their own file (test_wa_agent.py). Letting the
+        # real one run would also drag a database into every test below.
+        agent=Spy(None),
     )
+    monkeypatch.setattr(wa_inbound.wa_agent, "handle", fakes.agent)
     monkeypatch.setattr(wa_inbound.tq, "inbound_history", fakes.history)
     monkeypatch.setattr(wa_inbound.tq, "set_transcript", fakes.set_transcript)
     monkeypatch.setattr(wa_inbound.tq, "set_verdict", fakes.set_verdict)
@@ -190,12 +196,17 @@ async def test_an_empty_basket_leaves_raw_text_and_no_verdict(wired):
 
 
 async def test_a_routed_session_never_calls_the_classifier_again(wired):
+    """The classifier must not run again — but the *handler* must. A routed
+    session used to return outright here, which meant the agent only ever saw
+    the first message of a conversation and every follow-up met silence."""
     wired.history.result = [hist(5, intent="booking"), hist(1)]
 
     await wa_inbound.process(SENDER, text_row(body="e per il colore?"))
 
     assert wired.classify.count == 0
     assert wired.send_interactive.count == 0
+    assert wired.agent.count == 1
+    assert wired.agent.last["intent"] == "booking"
 
 
 async def test_a_button_tap_does_not_call_the_classifier(wired):
@@ -271,15 +282,35 @@ async def test_tapping_altro_lands_on_a_human(wired):
     assert wa_routing.decide(history=[], button_id="other") == ("human", None)
 
 
-async def test_a_confident_route_sends_nothing_and_stores_the_intent(wired):
-    """Increment B owns the handler. Until then a routed thread simply stops
-    needing the owner's attention."""
+async def test_a_confident_route_hands_the_thread_to_the_agent(wired):
+    """The verdict is stored, no menu goes out, and the booking agent is asked
+    to answer. Whether it then *may* speak is its own decision — opt-in,
+    handover and the turn ceiling all live in `wa_agent.may_speak`."""
     wired.classify.result = {"intent": "booking", "confidence": 0.9}
 
     await wa_inbound.process(SENDER, text_row(body="vorrei un taglio"))
 
     assert wired.send_interactive.count == 0
     assert wired.set_verdict.args[-1][2] == ("route", "booking")
+    assert wired.agent.count == 1
+    assert wired.agent.last["intent"] == "booking"
+
+
+async def test_a_human_decision_never_reaches_the_agent(wired):
+    wired.classify.result = {"intent": "complaint", "confidence": 0.95}
+
+    await wa_inbound.process(SENDER, text_row(body="pessimo servizio"))
+
+    assert wired.agent.count == 0
+
+
+async def test_a_menu_decision_never_reaches_the_agent(wired):
+    """The session is still unrouted — there is no named request to answer."""
+    wired.classify.result = {"intent": "booking", "confidence": 0.3}
+
+    await wa_inbound.process(SENDER, text_row(body="boh"))
+
+    assert wired.agent.count == 0
 
 
 async def test_the_menu_is_not_sent_when_the_sender_has_no_credentials(wired):

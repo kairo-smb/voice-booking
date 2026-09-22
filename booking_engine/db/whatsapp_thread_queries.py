@@ -154,6 +154,19 @@ async def thread_list(shop_id: UUID) -> list[dict]:
             FROM whatsapp.outbound_messages
            WHERE shop_id = $1 AND sent_at IS NOT NULL
            GROUP BY 1
+        ), escalations AS (
+          -- The newest WhatsApp session per phone, and whether the agent gave
+          -- it back. `needs_attention` has always read `escalated`; until the
+          -- agent existed nothing wrote it, so nothing supplied it here either.
+          -- Without this an escalated thread whose intent is still 'booking'
+          -- would read as handled — in the allowlist, therefore not the
+          -- owner's problem — which is the exact thread most needing them.
+          SELECT DISTINCT ON (ltrim(caller_number, '+'))
+                 ltrim(caller_number, '+') AS key,
+                 (outcome = 'escalated')   AS escalated
+            FROM voice_agent.calls
+           WHERE shop_id = $1 AND channel = 'whatsapp'
+           ORDER BY ltrim(caller_number, '+'), started_at DESC
         )
         SELECT li.phone,
                li.customer_id,
@@ -163,11 +176,13 @@ async def thread_list(shop_id: UUID) -> list[dict]:
                u.unread,
                lo.last_outbound,
                li.last_inbound + $3::interval AS window_expires_at,
-               r.intent
+               r.intent,
+               coalesce(e.escalated, false) AS escalated
           FROM last_in li
           JOIN unread u USING (key)
           LEFT JOIN last_out lo USING (key)
           LEFT JOIN routed r ON ltrim(r.from_phone, '+') = li.key
+          LEFT JOIN escalations e USING (key)
          ORDER BY li.last_inbound DESC
         """,
         # Both boundaries are bound as parameters, not written as literal
@@ -255,15 +270,23 @@ async def last_inbound_at(shop_id: UUID, phone: str) -> datetime | None:
 
 
 async def record_reply(
-    *, shop_id: UUID, to_phone: str, body: str, provider_sid: str | None
+    *, shop_id: UUID, to_phone: str, body: str, provider_sid: str | None,
+    origin: str = "kairo",
 ) -> dict | None:
     """A free-form reply we sent, on the same trail as every other outbound.
 
     `template_name` and `campaign_key` are NULL, deliberately: this is neither
     a template nor part of a campaign, so the campaign idempotency index (which
     is partial on both being present) does not apply and the same text may be
-    sent twice if the owner means to. `origin` is 'kairo' — what we sent, as
-    opposed to the 'phone' echoes the owner sends from the Business App.
+    sent twice if the owner means to.
+
+    `origin` defaults to 'kairo' — the owner typing in the webapp, as opposed to
+    the 'phone' echoes they send from the Business App. The booking agent passes
+    **'agent'** (migration 25), and that distinction is load-bearing rather than
+    decorative: `wa_session_queries.session_state` reads 'kairo'/'phone' as "a
+    human took this thread over, stand down". An agent recording its own replies
+    as 'kairo' would read its own last message as the owner arriving and go
+    silent after one turn.
 
     Lands as `sent` with `sent_at = now()`: Meta has already accepted it by the
     time this is called, and the delivery webhook will move it on from there.
@@ -278,10 +301,10 @@ async def record_reply(
         VALUES ($1, $2,
                 coalesce((SELECT phone_number FROM whatsapp.senders
                            WHERE shop_id = $1), ''),
-                $3, $4, 'kairo', 'sent', now())
+                $3, $4, $5, 'sent', now())
         RETURNING *
         """,
-        shop_id, to_phone, body, provider_sid,
+        shop_id, to_phone, body, provider_sid, origin,
     )
 
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from booking_engine.db.connection import execute_one
+from booking_engine.db.connection import execute, execute_one, execute_void
 from booking_engine.services.messaging import wa_routing
 
 # The open session for one number at one shop, if there is one.
@@ -84,3 +84,157 @@ async def open_session(
     match = "existing" if customer_id else "unmatched"
     row = await execute_one(_OPEN, shop_id, phone, customer_id, match)
     return row["id"]
+
+
+# ------------------------------------------------- what may_speak needs to know
+
+# Everything the handover rules read, as one query keyed on the session row.
+#
+# All three facts are DERIVED from rows that already exist — no per-thread state
+# table, no `suspended` flag to keep true. The session row says when it started;
+# `outbound_messages.origin` says who wrote each reply since.
+#
+# **`human_replied_at` is the whole point of migration 25's 'agent' origin.**
+# The owner writes from the webapp ('kairo') and from the WhatsApp Business App
+# on their own phone ('phone'); the agent writes 'agent'. Reading 'kairo' alone
+# as "a human took over" was impossible before, because the agent's own replies
+# landed there too — it would have read its own last message as the owner
+# arriving and gone quiet after a single turn.
+#
+# `template_name IS NULL AND campaign_key IS NULL` excludes a marketing template
+# that happens to land mid-session: a drip campaign firing at a thread is not a
+# person choosing to answer it, and treating it as one would silence the agent
+# for a reason the owner never chose. Same predicate `record_reply` writes by.
+#
+# Suppressed and cancelled rows are excluded throughout: a message that never
+# left is not a reply and is not a turn, and counting one would silence the
+# agent over something the customer never saw.
+_SESSION_STATE = """
+SELECT c.started_at,
+       (c.outcome = 'escalated')                            AS escalated,
+       (SELECT count(*)
+          FROM whatsapp.outbound_messages o
+         WHERE o.shop_id = c.shop_id
+           AND ltrim(o.to_phone, '+') = ltrim($2, '+')
+           AND o.origin = 'agent'
+           AND o.status NOT IN ('suppressed', 'cancelled')
+           AND coalesce(o.sent_at, o.created_at) >= c.started_at) AS agent_turns,
+       (SELECT max(coalesce(o.sent_at, o.created_at))
+          FROM whatsapp.outbound_messages o
+         WHERE o.shop_id = c.shop_id
+           AND ltrim(o.to_phone, '+') = ltrim($2, '+')
+           AND o.origin IN ('kairo', 'phone')
+           AND o.template_name IS NULL
+           AND o.campaign_key IS NULL
+           AND o.status NOT IN ('suppressed', 'cancelled')
+           AND coalesce(o.sent_at, o.created_at) >= c.started_at
+           -- An echo of a message WE sent is not the owner answering.
+           --
+           -- Meta's `smb_message_echoes` is documented as mirroring what the
+           -- owner sent from the WhatsApp Business App, and Cloud API sends
+           -- are understood not to come back on it. That understanding is
+           -- **unverified against a real WABA** — no live Meta call has ever
+           -- been made from this repo — and if it is wrong the consequence is
+           -- silent and total: `record_echo` writes origin='phone', this
+           -- column reads the agent's own reply as a human arriving, and the
+           -- agent goes quiet after exactly one turn on every thread forever.
+           --
+           -- Both paths put the wamid in provider_sid (`record_reply` from
+           -- `send_text`'s return, `record_echo` from the echo payload), so
+           -- the two can be matched. Cheap insurance against a contract we
+           -- cannot check until the first real onboarding.
+           AND NOT EXISTS (
+             SELECT 1 FROM whatsapp.outbound_messages mine
+              WHERE mine.origin = 'agent'
+                AND mine.provider_sid IS NOT NULL
+                AND mine.provider_sid = o.provider_sid
+           )) AS human_replied_at
+  FROM voice_agent.calls c
+ WHERE c.id = $1
+"""
+
+
+async def session_state(*, call_id: UUID, phone: str) -> dict:
+    """`started_at`, `escalated`, `agent_turns`, `human_replied_at` for one session.
+
+    Returned as a plain dict so the caller can hand it straight to
+    `wa_agent.may_speak`, which is pure and must stay that way. A missing
+    session row yields the *most restrictive* reading — escalated, turns
+    exhausted — because a turn we cannot establish the state of is not one to
+    run on the salon's basket.
+    """
+    row = await execute_one(_SESSION_STATE, call_id, phone)
+    if row is None:
+        return {"started_at": None, "escalated": True,
+                "agent_turns": 0, "human_replied_at": None}
+    return dict(row)
+
+
+async def mark_escalated(*, call_id: UUID, reason: str) -> None:
+    """Hand the session to a person, durably.
+
+    Written on `voice_agent.calls` rather than a WhatsApp-only flag: 'escalated'
+    is already in that column's CHECK and already what the voice agent writes
+    when it gives up (`voice_tools_lifecycle`), so the Inbox has one vocabulary
+    for "a human is needed" across both channels.
+
+    `summary` is left alone — the agent may have written one — and the reason
+    lands in `outcome_reason`, which is what Task 24 renders to the owner.
+    """
+    await execute_void(
+        """
+        UPDATE voice_agent.calls
+           SET outcome = 'escalated', outcome_reason = $2
+         WHERE id = $1
+        """,
+        call_id, reason,
+    )
+
+
+async def session_transcript(
+    *, shop_id: UUID, phone: str, since, limit: int = 40,
+) -> list[dict]:
+    """The conversation so far, as `{role, content}`, oldest first.
+
+    Both halves of the thread since the session opened. Inbound is the customer
+    ('user'); everything we sent is 'assistant' — the agent's own replies and,
+    when a human wrote before standing the agent down, theirs too. That is the
+    truthful framing for a model reading the thread: from the customer's side
+    the salon speaks with one voice, whoever was holding the keyboard.
+
+    A voice note reads as its words (`transcript`), never as an empty bubble.
+    Templates and campaign sends are excluded — a promo that landed mid-thread
+    is not part of this request and would only mislead the turn.
+
+    `limit` is a guard on the prompt, not on the conversation: a session is
+    over long before 40 messages, so this only ever bites on a thread that
+    somehow ran away.
+    """
+    return await execute(
+        """
+        SELECT * FROM (
+            SELECT 'user' AS role,
+                   coalesce(nullif(i.transcript, ''), i.body) AS content,
+                   i.received_at AS at
+              FROM whatsapp.inbound_messages i
+             WHERE i.shop_id = $1
+               AND ltrim(i.from_phone, '+') = ltrim($2, '+')
+               AND i.received_at >= $3
+            UNION ALL
+            SELECT 'assistant' AS role,
+                   o.preview AS content,
+                   coalesce(o.sent_at, o.created_at) AS at
+              FROM whatsapp.outbound_messages o
+             WHERE o.shop_id = $1
+               AND ltrim(o.to_phone, '+') = ltrim($2, '+')
+               AND o.template_name IS NULL
+               AND o.campaign_key IS NULL
+               AND o.status NOT IN ('suppressed', 'cancelled')
+               AND coalesce(o.sent_at, o.created_at) >= $3
+        ) t
+         WHERE coalesce(t.content, '') <> ''
+         ORDER BY t.at ASC
+         LIMIT $4
+        """,
+        shop_id, phone, since, limit,
+    )

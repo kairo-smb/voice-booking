@@ -311,12 +311,60 @@ the list SQL, because this is the Inbox's first screen.
 Each row: `phone`, `customer_id`, `last_inbound`, `last_message` (a voice note
 reads as its transcript), `message_type`, `unread`, `last_outbound`,
 `window_expires_at`, `intent` (the **session's** verdict, not the last
-message's), plus two fields computed per row from the pure helpers:
+message's), `escalated` (the newest WhatsApp session's `outcome = 'escalated'`
+— see below), plus two fields computed per row from the pure helpers:
 
 | field | meaning |
 |---|---|
 | `window_open` | is a free-form reply legal right now |
 | `needs_attention` | belongs in "Da gestire": the session was escalated, or its intent is unrouted / outside `wa_routing.WHITELIST` — fails toward the human |
+
+`escalated` is joined from the newest `voice_agent.calls` row for that phone
+with `channel = 'whatsapp'`. `needs_attention` has always read the field;
+nothing wrote it until the booking agent existed. Without it an escalated
+thread whose intent is still `booking` reads as handled — inside the allowlist,
+therefore not the owner's problem — which is precisely the thread that most
+needs them.
+
+### The booking agent, and every reason it stays quiet
+
+On a `'route'` decision the inbound worker hands the thread to
+`services/messaging/wa_agent.py`. **Three writers share one thread and only one
+is ours** — the customer, the owner (webapp *and* the WhatsApp Business App on
+their own phone, since every sender is coexistence), and the agent. So every
+rule in that module is about the agent standing down.
+
+`may_speak(thread) -> (bool, reason)` is pure — a dict in, a verdict out, no
+clock and no database, the same shape as `wa_routing.decide` and
+`number_health.decide_health`. It is an **allowlist of conditions**, so an
+unknown thread state defaults to silence rather than to speech; a blank dict
+falls out at the first rule. Every refusal carries a distinct reason, because
+"the agent is quiet and nobody can say why" is the state that makes an owner
+switch it off:
+
+| reason | meaning |
+|---|---|
+| `not_opted_in` | `voice_agent.shop_config.whatsapp_agent_enabled` is false. **The default** — a salon that has not asked for a robot must never get one |
+| `intent_not_whitelisted` | the session's intent is outside `wa_routing.WHITELIST`. Opted in is not enough; a complaint is a person's |
+| `escalated` | the session was handed to a human and stays handed over — the *next* message does not run a turn either |
+| `human_took_over` | the owner replied, from the webapp (`kairo`) or their phone (`phone`). Not marked escalated: they are already handling it |
+
+**The debounce is a sleep plus a re-read, not a per-thread timer.**
+`DEBOUNCE_SECONDS = 2.0`: people send "ciao" / "volevo prenotare" / "per
+sabato" as three messages, and answering each is three replies to one thought
+and three billed turns. Every task sleeps, then asks the database one question —
+"is my message still the newest on this thread?" — whose answer is the same for
+whoever asks it. The last message wins because it is last, not because anyone
+coordinated. A timer would need a mutable per-thread registry plus cancellation,
+and two Fly machines would each keep their own copy, so it would not actually
+debounce across them. It **batches rather than drops**: the surviving task reads
+the whole session back out of the database, so all three messages reach the
+agent — only the two earlier *turns* are dropped.
+
+**An escalation sends nothing.** `text` is empty whenever `escalate` is true,
+and the empty basket (402 from the gateway) arrives as `reason='no_credit'` and
+takes the same path: silence, and the thread lands in the owner's queue via
+`outcome = 'escalated'`.
 
 ### `GET /whatsapp/threads/{shop_id}/{phone}`
 

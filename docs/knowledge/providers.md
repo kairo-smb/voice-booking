@@ -108,9 +108,37 @@ basket (`webapp_credits.py`), not a local write.
 
 **The one thing Kairo *does* charge on the WhatsApp path is AI work on inbound
 messages**, which is our cost and not Meta's: triage
-(`clients/marketing_triage.py`, billed by the marketing-engine gateway) and
-voice-note transcription (see [OpenAI audio transcription](#openai-audio-transcription)).
-Both refuse on an empty basket rather than run unpaid.
+(`clients/marketing_triage.py`, billed by the marketing-engine gateway),
+voice-note transcription (see [OpenAI audio transcription](#openai-audio-transcription)),
+and each booking-agent turn (`clients/marketing_agent.py`). All three refuse on
+an empty basket rather than run unpaid.
+
+**The booking agent turn — `POST {MARKET_INTEL_API_URL}/whatsapp/agent`, bearer
+`MARKET_INTEL_SECRET`.** The turn itself (prompt, model, tool-calling loop)
+lives in marketing-engine; `clients/marketing_agent.py` is the thin client.
+Request carries `{shop_id, call_id, shop_name, services[], intake{}, messages[],
+first_turn, customer_name, customer_phone, now}`; a 200 answers
+`{data: {text, escalate, reason, tool_calls}, llm_cost_usd}`.
+
+- **The gateway gates and charges this turn, not this repo.** It reads the
+  shop's basket before calling a provider (**402** when empty, with
+  `reason: 'no_credit'`) and settles the *actual* LLM cost against that same
+  basket after a turn that ran. So there is exactly one debit path for a turn.
+  A `webapp_credits.charge_actual` call on this side would stack an invented
+  flat charge on top of a real one — the double-debit the 2026-08-12 decision
+  forbids and the 2026-09-03 one deleted this repo's basket arithmetic to
+  prevent.
+- **`call_id` is not bookkeeping.** The gateway passes it back to *this* repo's
+  voice tools, which read the shop off the session row and never off a header —
+  it is the authorization basis for every booking the turn touches.
+- **`text` is empty whenever `escalate` is true**, by contract. An agent that
+  apologises in a way that still reads like an answer leaves the customer
+  waiting for a reply that is not coming. `marketing_agent` re-blanks it anyway,
+  so a future change on the far side cannot answer the customer *and* hand the
+  thread to the owner.
+- **Every failure is an escalation with a reason** — unconfigured, 402, engine
+  down, timeout, malformed JSON — never a guess at what the agent would have
+  said. 45s timeout (longer than triage's 15s: a turn may run a tool loop).
 
 **The Login Configuration behind `META_CONFIG_ID` is where two facts live that
 no code in this repo can see.** Its permission list must be exactly

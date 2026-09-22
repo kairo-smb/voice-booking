@@ -27,7 +27,7 @@ from booking_engine.clients import marketing_triage as triage
 from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.config import get_settings
 from booking_engine.db import whatsapp_thread_queries as tq
-from booking_engine.services.messaging import wa_routing, wa_transcribe
+from booking_engine.services.messaging import wa_agent, wa_routing, wa_transcribe
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,14 @@ async def _process(sender: dict, row: dict) -> None:
     #    each message. Once this session has a verdict the handler owns it and
     #    the classifier must never run on it again — that is the rule the
     #    per-message cost lives or dies by.
-    if wa_routing.routed_intent(history):
+    #
+    #    The classifier is what must not run again; **the handler is what must**.
+    #    This used to return outright, which meant the agent could only ever see
+    #    the first message of a conversation and every follow-up died here — a
+    #    customer answering "sabato alle 10" would have been met with silence.
+    routed = wa_routing.routed_intent(history)
+    if routed:
+        await wa_agent.handle(sender, row, intent=routed)
         return
 
     # 3. A tap on a menu we sent is already named: the webhook stored the id we
@@ -103,6 +110,7 @@ async def _process(sender: dict, row: dict) -> None:
     #    `routed_intent` cannot silently start paying a model for an answer we
     #    wrote ourselves.
     if row.get("intent"):
+        await wa_agent.handle(sender, row, intent=str(row["intent"]))
         return
 
     # Nothing to classify: an unsupported type (sticker, location) or a voice
@@ -131,9 +139,11 @@ async def _process(sender: dict, row: dict) -> None:
     # 5. Act.
     if decision.action == "menu":
         await _send_menu(sender, phone)
-    # 'route' → the booking agent lands here in increment B. Until then a
-    # routed thread simply stops needing the owner's attention, which is what
-    # `whatsapp_thread_queries.needs_attention` already reads off the intent.
+    elif decision.action == "route":
+        # The booking agent. It decides for itself whether it may speak —
+        # opt-in, handover, escalation and the turn ceiling all live in
+        # `wa_agent.may_speak`, deliberately not duplicated here.
+        await wa_agent.handle(sender, row, intent=decision.intent)
     # 'human' → nothing is sent. We do not tell the customer "a human will
     # reply"; the thread is already in the owner's queue, and a promise we
     # make on the owner's behalf is one they may not keep.
