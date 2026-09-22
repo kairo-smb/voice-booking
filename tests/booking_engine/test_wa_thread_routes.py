@@ -481,8 +481,16 @@ def test_there_is_no_route_back_to_the_agent(client):
     """A deliberate absence, pinned so it is not added by reflex. The agent
     resumes on the customer's NEXT conversation; un-escalating this one would
     put it back into a thread a person is in the middle of — and could not work
-    anyway, since the same rule also fires on a reply already sent."""
-    paths = {r.path for r in client.app.routes}
+    anyway, since the same rule also fires on a reply already sent.
+
+    Read off the OpenAPI schema rather than walking `app.routes`: `fastapi>=0.115.0`
+    is unpinned, and 0.141 stopped flattening `include_router` into `app.routes` —
+    an included router is now an `_IncludedRouter` with no `.path` and no `.routes`,
+    so `{r.path for r in app.routes}` raises there while a skip-if-missing version
+    would come back empty and pass vacuously. The schema is the stable, public
+    answer to "which paths does this app serve". Routes registered with
+    `include_in_schema=False` are the one thing it cannot see."""
+    paths = set(client.app.openapi()["paths"])
     assert not any("resume" in p or "handback" in p or "unpause" in p
                    for p in paths)
 
