@@ -269,6 +269,88 @@ async def last_inbound_at(shop_id: UUID, phone: str) -> datetime | None:
     return row["last_inbound"] if row else None
 
 
+async def list_nudge_candidates(nudge_body: str) -> list[dict]:
+    """Every open-window thread the nudge sweep might invite, with the four
+    facts `wa_nudge.should_nudge` rules on.
+
+    The **only** filters applied here are the two that are cheap and cannot
+    change the verdict: the window must still be open (a closed one can never
+    be nudged, and this keeps the scan off the whole history), and the shop
+    must have opted the agent in (the INNER JOIN — no `shop_config` row is no
+    opt-in). Everything else is returned raw for the pure rule to judge, so
+    there is one place the policy lives and it is not SQL.
+
+    Each timestamp is the newest of its kind over all time, deliberately
+    **unscoped**: `should_nudge` compares each to `last_inbound` itself. Scoping
+    them here would put half the rule in the query and half in Python, which is
+    how the two come to disagree.
+
+    `last_nudge_at` matches on the body text because the nudge is recorded like
+    any other agent reply and carries no other mark — see `wa_nudge.sweep` for
+    why that is preferred to a column. The text is bound as a parameter from
+    `wa_nudge.NUDGE_BODY` rather than written here, so the marker and the
+    message cannot drift apart.
+
+    Phones are matched with the leading '+' stripped on both sides, the rule
+    the rest of this module already settled on: Meta sends `from` bare while
+    `to_phone` usually carries the plus.
+    """
+    return await execute(
+        """
+        WITH last_in AS (
+          SELECT DISTINCT ON (i.shop_id, ltrim(i.from_phone, '+'))
+                 i.shop_id,
+                 ltrim(i.from_phone, '+') AS key,
+                 i.from_phone             AS phone,
+                 i.received_at            AS last_inbound
+            FROM whatsapp.inbound_messages i
+           WHERE i.received_at > now() - $1::interval
+           ORDER BY i.shop_id, ltrim(i.from_phone, '+'), i.received_at DESC
+        )
+        SELECT li.shop_id,
+               li.phone,
+               li.last_inbound,
+               cfg.whatsapp_agent_enabled AS agent_enabled,
+               (SELECT max(coalesce(o.sent_at, o.created_at))
+                  FROM whatsapp.outbound_messages o
+                 WHERE o.shop_id = li.shop_id
+                   AND ltrim(o.to_phone, '+') = li.key
+                   AND o.origin = 'agent'
+                   AND o.status NOT IN ('suppressed', 'cancelled')) AS last_agent_at,
+               (SELECT max(coalesce(o.sent_at, o.created_at))
+                  FROM whatsapp.outbound_messages o
+                 WHERE o.shop_id = li.shop_id
+                   AND ltrim(o.to_phone, '+') = li.key
+                   AND o.origin = 'agent'
+                   AND o.preview = $2
+                   AND o.status NOT IN ('suppressed', 'cancelled')) AS last_nudge_at,
+               -- The handover signal, the same predicate `session_state` uses:
+               -- a marketing template landing mid-thread is not a person
+               -- choosing to answer it.
+               (SELECT max(coalesce(o.sent_at, o.created_at))
+                  FROM whatsapp.outbound_messages o
+                 WHERE o.shop_id = li.shop_id
+                   AND ltrim(o.to_phone, '+') = li.key
+                   AND o.origin IN ('kairo', 'phone')
+                   AND o.template_name IS NULL
+                   AND o.campaign_key IS NULL
+                   AND o.status NOT IN ('suppressed', 'cancelled')) AS human_replied_at,
+               coalesce((SELECT (c.outcome = 'escalated')
+                           FROM voice_agent.calls c
+                          WHERE c.shop_id = li.shop_id
+                            AND c.channel = 'whatsapp'
+                            AND ltrim(c.caller_number, '+') = li.key
+                          ORDER BY c.started_at DESC
+                          LIMIT 1), false) AS escalated
+          FROM last_in li
+          JOIN voice_agent.shop_config cfg ON cfg.shop_id = li.shop_id
+         WHERE cfg.whatsapp_agent_enabled
+         ORDER BY li.last_inbound ASC
+        """,
+        SERVICE_WINDOW, nudge_body,
+    )
+
+
 async def record_reply(
     *, shop_id: UUID, to_phone: str, body: str, provider_sid: str | None,
     origin: str = "kairo",
