@@ -898,3 +898,70 @@ async def withdraw_marketing_consent(customer_id: UUID) -> None:
         """,
         customer_id,
     )
+
+
+# ------------------------------------------------------------------- retention
+#
+# One statement, both directions, bounded by threads.
+#
+# **Both halves go together or neither does.** Half a conversation is still
+# personal data and is no longer readable as a conversation, so the two DELETEs
+# are CTEs of a single statement: they share one snapshot of `expired` and
+# commit together. Limiting each table independently would not do — a batch
+# that happened to fill up on inbound would leave that thread's outbound behind
+# until some later run.
+#
+# The batch is therefore counted in **threads**, not rows: the unit that must
+# not be split is the conversation. Within a chosen thread every expired row on
+# both sides goes, and everything newer than the cutoff stays — that is the
+# policy (a conversation truncated at six months), not a halving.
+#
+# Re-running immediately is a no-op by construction: the predicate is a
+# timestamp comparison against rows that no longer exist.
+#
+# The cutoff is `<=`, matching `wa_retention.is_expired`'s `>=` — a row that
+# has reached exactly six months has had its six months.
+_PURGE = """
+WITH expired AS (
+  SELECT shop_id, ltrim(from_phone, '+') AS key
+    FROM whatsapp.inbound_messages
+   WHERE received_at <= $1
+  UNION
+  SELECT shop_id, ltrim(to_phone, '+') AS key
+    FROM whatsapp.outbound_messages
+   WHERE coalesce(sent_at, created_at) <= $1
+   ORDER BY 1, 2
+   LIMIT $2
+), gone_in AS (
+  DELETE FROM whatsapp.inbound_messages i
+   USING expired e
+   WHERE i.shop_id = e.shop_id
+     AND ltrim(i.from_phone, '+') = e.key
+     AND i.received_at <= $1
+  RETURNING 1
+), gone_out AS (
+  DELETE FROM whatsapp.outbound_messages o
+   USING expired e
+   WHERE o.shop_id = e.shop_id
+     AND ltrim(o.to_phone, '+') = e.key
+     AND coalesce(o.sent_at, o.created_at) <= $1
+  RETURNING 1
+)
+SELECT (SELECT count(*) FROM expired)  AS threads,
+       (SELECT count(*) FROM gone_in)  AS inbound,
+       (SELECT count(*) FROM gone_out) AS outbound
+"""
+
+
+async def purge_expired_threads(*, cutoff, threads: int) -> dict:
+    """Delete every message older than `cutoff`, for at most `threads` threads.
+
+    Returns {'threads', 'inbound', 'outbound'} — how much this run actually
+    removed, which is what the tick reports.
+
+    `voice_agent.calls` is deliberately untouched: that row is the business
+    record of an appointment being made, it outlives the chat that produced it,
+    and it is not this policy's to expire.
+    """
+    row = await execute_one(_PURGE, cutoff, threads)
+    return dict(row or {"threads": 0, "inbound": 0, "outbound": 0})

@@ -21,6 +21,7 @@ from booking_engine.services.number_health import check_all
 from booking_engine.services.number_provisioning import provision_approved
 from booking_engine.services.number_release import sweep as release_sweep
 from booking_engine.services.messaging.wa_nudge import sweep as whatsapp_nudge_sweep
+from booking_engine.services.messaging.wa_retention import sweep as whatsapp_retention_sweep
 from booking_engine.services.messaging.whatsapp_automations import run_automations as whatsapp_run_automations
 from booking_engine.services.messaging.whatsapp_onboarding import sweep as whatsapp_sweep
 from booking_engine.services.messaging.whatsapp_send import send_due as whatsapp_send_due
@@ -122,6 +123,17 @@ async def tick(
         whatsapp_nudges = {"errors": 1}
         errors += 1
 
+    # Six-month retention. Last of the WhatsApp stages on purpose: it is the
+    # only destructive one, and nothing above it should ever be skipped because
+    # a delete had a bad minute. It counts its own errors rather than raising —
+    # see `wa_retention.sweep` — so the wrapper here is belt and braces.
+    try:
+        whatsapp_retention = await whatsapp_retention_sweep()
+    except Exception:  # noqa: BLE001 — see comment above
+        logger.exception("messaging_tick.whatsapp_retention_failed")
+        whatsapp_retention = {"errors": 1}
+    errors += int(whatsapp_retention.get("errors") or 0)
+
     return {"data": {
         "reviewed": reviewed,
         "provisioned": provisioned,
@@ -133,4 +145,5 @@ async def tick(
         "whatsapp_sends": whatsapp_sends,
         "whatsapp_automations": whatsapp_automations,
         "whatsapp_nudges": whatsapp_nudges,
+        "whatsapp_retention": whatsapp_retention,
     }}
