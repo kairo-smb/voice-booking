@@ -161,8 +161,17 @@ async def thread_list(shop_id: UUID) -> list[dict]:
           -- Without this an escalated thread whose intent is still 'booking'
           -- would read as handled — in the allowlist, therefore not the
           -- owner's problem — which is the exact thread most needing them.
+          --
+          -- `started_at` and `outcome_reason` come back for the owner-facing
+          -- verdict: the first scopes "did a human reply" to THIS conversation
+          -- (unscoped, a reply last month would silence the agent forever), the
+          -- second separates the owner pressing "rispondo io" from the agent
+          -- giving up, which are the same `escalated` row and very different
+          -- sentences.
           SELECT DISTINCT ON (ltrim(caller_number, '+'))
                  ltrim(caller_number, '+') AS key,
+                 started_at,
+                 outcome_reason,
                  (outcome = 'escalated')   AS escalated
             FROM voice_agent.calls
            WHERE shop_id = $1 AND channel = 'whatsapp'
@@ -177,12 +186,35 @@ async def thread_list(shop_id: UUID) -> list[dict]:
                lo.last_outbound,
                li.last_inbound + $3::interval AS window_expires_at,
                r.intent,
-               coalesce(e.escalated, false) AS escalated
+               coalesce(e.escalated, false) AS escalated,
+               e.outcome_reason,
+               -- No shop_config row is no opt-in: the LEFT JOIN yields NULL,
+               -- which the rule reads as silence. Failing that direction is
+               -- the point — a salon that never asked for a robot cannot get
+               -- one through a missing row.
+               cfg.whatsapp_agent_enabled AS agent_enabled,
+               -- The handover fact, the same predicate `session_state` uses:
+               -- the owner writing free-form from the webapp ('kairo') or from
+               -- the WhatsApp Business App on their own phone ('phone'). A
+               -- marketing template landing mid-thread is not a person
+               -- choosing to answer it, hence the two NULL checks.
+               (SELECT max(coalesce(o.sent_at, o.created_at))
+                  FROM whatsapp.outbound_messages o
+                 WHERE o.shop_id = $1
+                   AND ltrim(o.to_phone, '+') = li.key
+                   AND o.origin IN ('kairo', 'phone')
+                   AND o.template_name IS NULL
+                   AND o.campaign_key IS NULL
+                   AND o.status NOT IN ('suppressed', 'cancelled')
+                   AND e.started_at IS NOT NULL
+                   AND coalesce(o.sent_at, o.created_at) >= e.started_at
+               ) AS human_replied_at
           FROM last_in li
           JOIN unread u USING (key)
           LEFT JOIN last_out lo USING (key)
           LEFT JOIN routed r ON ltrim(r.from_phone, '+') = li.key
           LEFT JOIN escalations e USING (key)
+          LEFT JOIN voice_agent.shop_config cfg ON cfg.shop_id = $1
          ORDER BY li.last_inbound DESC
         """,
         # Both boundaries are bound as parameters, not written as literal

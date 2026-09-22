@@ -182,6 +182,60 @@ def test_the_list_is_one_query_not_one_per_thread(client, monkeypatch):
     assert threads.seen_phones == []
 
 
+def test_the_list_names_why_the_agent_is_quiet_on_every_row(client, monkeypatch):
+    """An owner who cannot tell why the agent is silent assumes it is broken
+    and switches it off. Four states, four different names on the wire — the
+    webapp renders one sentence each and can only do that if they arrive
+    distinct."""
+    base = {"last_inbound": _now(), "unread": 0}
+    rows = [
+        # Speaking.
+        {"phone": "393330000001", "intent": "booking", "escalated": False,
+         "agent_enabled": True, "human_replied_at": None, **base},
+        # The shop never asked for a robot.
+        {"phone": "393330000002", "intent": "booking", "escalated": False,
+         "agent_enabled": False, "human_replied_at": None, **base},
+        # Not a request the agent handles.
+        {"phone": "393330000003", "intent": "complaint", "escalated": False,
+         "agent_enabled": True, "human_replied_at": None, **base},
+        # The agent gave it back itself.
+        {"phone": "393330000004", "intent": "booking", "escalated": True,
+         "agent_enabled": True, "human_replied_at": None,
+         "outcome_reason": "turn_limit", **base},
+        # The owner answered — webapp or their own handset, same fact.
+        {"phone": "393330000005", "intent": "booking", "escalated": False,
+         "agent_enabled": True, "human_replied_at": _now(), **base},
+        # The owner pressed "rispondo io": an escalated row, but a person
+        # taking the thread, not the agent failing at it.
+        {"phone": "393330000006", "intent": "booking", "escalated": True,
+         "agent_enabled": True, "human_replied_at": None,
+         "outcome_reason": "human_took_over", **base},
+    ]
+    _wire(monkeypatch, threads=FakeThreads(threads=rows))
+
+    data = client.get(f"/api/v1/whatsapp/threads/{SHOP}", headers=AUTH).json()["data"]
+
+    assert [r["agent_active"] for r in data] == [True, False, False, False, False, False]
+    assert [r["agent_reason"] for r in data] == [
+        None, "not_opted_in", "intent_not_whitelisted", "escalated",
+        "human_took_over", "human_took_over",
+    ]
+
+
+def test_a_row_the_agent_knows_nothing_about_reads_as_opted_out(client, monkeypatch):
+    """No `shop_config` row is no opt-in, and the LEFT JOIN delivers that as a
+    missing key. Silence is the safe direction: claiming the agent is answering
+    a thread it is not has a customer on the other end of it."""
+    _wire(monkeypatch, threads=FakeThreads(threads=[
+        {"phone": BARE, "intent": "booking", "last_inbound": _now(), "unread": 0},
+    ]))
+
+    row = client.get(f"/api/v1/whatsapp/threads/{SHOP}", headers=AUTH).json()["data"][0]
+
+    assert row["agent_active"] is False
+    assert row["agent_reason"] == "not_opted_in"
+
+
 # ---------------------------------------------------------------- the timeline
 
 def test_reading_a_thread_marks_it_read(client, monkeypatch):
@@ -366,11 +420,79 @@ def test_a_send_that_could_not_be_recorded_still_reports_it_was_sent(client, mon
                                 "recorded": False}
 
 
+# -------------------------------------------------------------- "rispondo io"
+
+def _wire_takeover(monkeypatch, *, existing=None):
+    """Stub the session queries at their own module, same rule as the threads:
+    these pin behaviour, not the alias the routes import under."""
+    from booking_engine.db import wa_session_queries as wsq
+
+    state = {"opened": [], "escalated": [], "call_id": existing or uuid4()}
+
+    async def _open(*, shop_id, phone, customer_id):
+        state["opened"].append((shop_id, phone, customer_id))
+        return state["call_id"]
+
+    async def _escalate(*, call_id, reason):
+        state["escalated"].append((call_id, reason))
+
+    monkeypatch.setattr(wsq, "open_session", _open)
+    monkeypatch.setattr(wsq, "mark_escalated", _escalate)
+    return state
+
+
+def test_taking_over_writes_the_reason_the_inbox_reads_back(client, monkeypatch):
+    """The cross-file agreement this whole feature hangs on: the route writes
+    `outcome_reason`, and `agent_status` renames `escalated` to
+    `human_took_over` only for that exact string. A literal on either side that
+    drifts from the other reports 'l'assistente ti ha passato la conversazione'
+    to an owner who pressed the button themselves."""
+    from booking_engine.services.messaging import wa_agent
+
+    state = _wire_takeover(monkeypatch)
+
+    r = client.post(f"/api/v1/whatsapp/threads/{SHOP}/{PLUS}/takeover", headers=AUTH)
+
+    assert r.status_code == 200
+    assert r.json()["data"] == {"taken_over": True}
+    assert state["escalated"] == [(state["call_id"], wa_agent.TAKEOVER_REASON)]
+    # And that is exactly what the read side turns back into the owner's own
+    # sentence, rather than the agent-gave-up one.
+    assert wa_agent.agent_status({
+        "agent_enabled": True, "intent": "booking", "escalated": True,
+        "outcome_reason": wa_agent.TAKEOVER_REASON,
+    }) == (False, "human_took_over")
+
+
+def test_taking_over_a_thread_the_agent_never_spoke_on_still_lands(client, monkeypatch):
+    """The owner may take a conversation before the agent has answered — a
+    message that just arrived, or one it is still debouncing. With no session
+    row there would be nothing to mark, and the next inbound message would find
+    a clean slate and be answered anyway."""
+    state = _wire_takeover(monkeypatch)
+
+    client.post(f"/api/v1/whatsapp/threads/{SHOP}/{PLUS}/takeover", headers=AUTH)
+
+    assert state["opened"] == [(SHOP, PLUS, None)]
+    assert len(state["escalated"]) == 1
+
+
+def test_there_is_no_route_back_to_the_agent(client):
+    """A deliberate absence, pinned so it is not added by reflex. The agent
+    resumes on the customer's NEXT conversation; un-escalating this one would
+    put it back into a thread a person is in the middle of — and could not work
+    anyway, since the same rule also fires on a reply already sent."""
+    paths = {r.path for r in client.app.routes}
+    assert not any("resume" in p or "handback" in p or "unpause" in p
+                   for p in paths)
+
+
 # ------------------------------------------------------------------------ auth
 
 @pytest.mark.parametrize("method,path,payload", [
     ("get", f"/api/v1/whatsapp/threads/{SHOP}", None),
     ("get", f"/api/v1/whatsapp/threads/{SHOP}/{BARE}", None),
+    ("post", f"/api/v1/whatsapp/threads/{SHOP}/{BARE}/takeover", None),
     ("post", "/api/v1/whatsapp/reply", {"shop_id": str(SHOP), "phone": PLUS,
                                         "body": "Ciao"}),
 ])

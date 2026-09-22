@@ -25,6 +25,12 @@ _PATCHABLE_FIELDS = {
     "services_to_mention", "retention_days",
     "manual_fallback_number",
     "auto_topup_enabled", "auto_topup_threshold_tokens", "auto_topup_package_id",
+    # The WhatsApp booking agent's opt-in (migration 25). Patched here and not
+    # under /whatsapp for the same reason the intake questions are: it is a
+    # property of the shop's agent, and shop_config is where those live. The
+    # column is NOT NULL DEFAULT false, so the refusal survives a shop that
+    # never touches this endpoint — the UI is not what keeps it off.
+    "whatsapp_agent_enabled",
 }
 
 
@@ -44,6 +50,7 @@ class ConfigPatch(BaseModel):
     auto_topup_enabled: bool | None = None
     auto_topup_threshold_tokens: int | None = Field(default=None, ge=0)
     auto_topup_package_id: UUID | None = None
+    whatsapp_agent_enabled: bool | None = None
 
 
 class IntakePut(BaseModel):

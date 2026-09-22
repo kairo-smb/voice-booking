@@ -10,7 +10,7 @@ Endpoints the `webapp` Control Plane calls to manage voice config, telephony num
 |---|---|---|---|
 | `GET` | `/api/v1/voice/config/tones` | `voice_config.py` | list the 8 preset tones (+ any shop-authored ones) |
 | `GET` | `/api/v1/voice/config/{shop_id}` | `voice_config.py` | read Layer 1 config |
-| `PATCH` | `/api/v1/voice/config/{shop_id}` | `voice_config.py` | update any subset of `_PATCHABLE_FIELDS` (enabled, display_name, greetings, voice_preset, tone_id, business_hours, answer_mode, overflow_ring_count, services_to_mention, retention_days, manual_fallback_number, auto-topup settings) |
+| `PATCH` | `/api/v1/voice/config/{shop_id}` | `voice_config.py` | update any subset of `_PATCHABLE_FIELDS` (enabled, display_name, greetings, voice_preset, tone_id, business_hours, answer_mode, overflow_ring_count, services_to_mention, retention_days, manual_fallback_number, auto-topup settings, **whatsapp_agent_enabled**) |
 | `GET` | `/api/v1/voice/config/{shop_id}/intake` | `voice_config.py` | per-service intake questions the owner wrote — `[{service_id, questions, updated_at}]`, empty strings included |
 | `PUT` | `/api/v1/voice/config/{shop_id}/intake/{service_id}` | `voice_config.py` | write (or clear) one service's questions — `{"questions": "..."}`; **404 when the shop does not own the service**, same answer as an unknown id |
 | `GET` | `/api/v1/voice/balance/{shop_id}` | `voice_balance.py` | token balance + warning tier |

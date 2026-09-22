@@ -318,6 +318,44 @@ message's), `escalated` (the newest WhatsApp session's `outcome = 'escalated'`
 |---|---|
 | `window_open` | is a free-form reply legal right now |
 | `needs_attention` | belongs in "Da gestire": the session was escalated, or its intent is unrouted / outside `wa_routing.WHITELIST` — fails toward the human |
+| `agent_active` | is the booking agent answering this thread |
+| `agent_reason` | why it is not, when it is not — `null` while it is |
+
+`agent_active`/`agent_reason` come from `wa_agent.agent_status`, which is
+`may_speak` with one verdict renamed: the **same rule the agent itself obeys**,
+so the Inbox cannot claim the agent is handling a thread it has stood down on.
+The row supplies `agent_enabled` (LEFT JOIN on `shop_config` — no row is no
+opt-in), `escalated`, `outcome_reason` and `human_replied_at`; that last one is
+scoped to the newest session's `started_at`, because a reply the owner sent last
+month must not read as them holding today's conversation. The webapp renders one
+sentence per reason (`src/lib/whatsapp/agent.ts`), never a generic "the
+assistant is off" — see the refusal table above for why.
+
+`turn_limit` never appears here: it is the refusal that marks the session
+escalated, so by read time it presents as `escalated`, which is the true thing
+to say. Four reasons reach the owner, not five.
+
+### `POST /whatsapp/threads/{shop_id}/{phone}/takeover`
+
+"Rispondo io": the owner takes one conversation off the agent. Marks the
+session `outcome = 'escalated'` with `outcome_reason = 'human_took_over'`
+(`wa_agent.TAKEOVER_REASON`), opening a session first if the agent has not
+spoken on the thread yet — with no row there would be nothing to mark, and the
+next inbound message would find a clean slate and answer anyway.
+
+The distinct `outcome_reason` is what lets the read side tell the owner pressing
+the button apart from the agent giving up. Both are the same `escalated` row;
+"hai preso tu questa conversazione" and "l'assistente te l'ha passata" are not
+the same sentence.
+
+**There is no endpoint to hand a thread back**, deliberately. The agent resumes
+by itself on the customer's next conversation (a new session, past
+`wa_routing.SESSION_GAP`), which is what "resume" can honestly mean — and
+un-escalating *this* session would put the agent back into a thread a person is
+in the middle of. It could not work fully in any case: `may_speak` also silences
+on `human_replied_at`, derived from an outbound row that cannot be unsent, so a
+resume button would clear the escalation, change nothing visible, and read as
+broken.
 
 `escalated` is joined from the newest `voice_agent.calls` row for that phone
 with `channel = 'whatsapp'`. `needs_attention` has always read the field;

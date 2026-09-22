@@ -87,6 +87,38 @@ def may_speak(thread: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
+# The owner pressing "rispondo io" in the Inbox. Written into the session row's
+# `outcome_reason` so the read side can tell it apart from the agent giving up:
+# both are `outcome = 'escalated'`, and "hai preso tu questa conversazione" and
+# "l'assistente ti ha passato la conversazione" are not the same sentence.
+TAKEOVER_REASON = "human_took_over"
+
+
+def agent_status(thread: dict) -> tuple[bool, str | None]:
+    """What to TELL THE OWNER about a thread — the same rule, read aloud.
+
+    `may_speak` decides; this only renames one of its verdicts. There is no
+    second policy here on purpose: a status line that disagreed with the rule
+    would be worse than no status line, because the owner would trust it.
+
+    Returns `(active, reason)`, with `reason` None while the agent is speaking.
+    Four reasons reach the Inbox — `not_opted_in`, `intent_not_whitelisted`,
+    `escalated`, `human_took_over` — and `turn_limit` is not one of them: it is
+    the refusal that escalates the session, so by the time anyone reads the
+    thread back it presents as `escalated`, which is the true thing to say.
+
+    The rename: an explicit takeover is a *person taking the thread*, which is
+    what `human_took_over` means, and it arrives as an escalation only because
+    that is the durable row we already had to write it on.
+    """
+    ok, reason = may_speak(thread)
+    if ok:
+        return True, None
+    if reason == "escalated" and thread.get("outcome_reason") == TAKEOVER_REASON:
+        return False, TAKEOVER_REASON
+    return False, reason
+
+
 async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
     """Answer one inbound message, or stand down and say why.
 

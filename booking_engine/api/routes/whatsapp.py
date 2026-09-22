@@ -25,8 +25,10 @@ from booking_engine.config import Settings
 from booking_engine.db import whatsapp_audit_queries as waq
 from booking_engine.db import whatsapp_automation_queries as aq
 from booking_engine.db import whatsapp_queries as wq
+from booking_engine.db import wa_session_queries as wsq
 from booking_engine.db import whatsapp_thread_queries as tq
 from booking_engine.services.messaging import meta_limits
+from booking_engine.services.messaging import wa_agent
 from booking_engine.services.messaging import wa_inbound
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
 from booking_engine.services.messaging.whatsapp_pricing import price_list
@@ -546,12 +548,50 @@ async def threads(
     """
     rows = await tq.thread_list(shop_id)
     now = datetime.now(timezone.utc)
-    return {"data": [
-        {**row,
-         "window_open": tq.window_open(last_inbound=row.get("last_inbound"), now=now),
-         "needs_attention": tq.needs_attention(row)}
-        for row in rows
-    ]}
+    out = []
+    for row in rows:
+        # Who is holding this thread, in the agent's own words. An owner who
+        # cannot tell why the agent is quiet assumes it is broken and turns it
+        # off, so every silence comes back named rather than as a bare false.
+        active, reason = wa_agent.agent_status(row)
+        out.append({
+            **row,
+            "window_open": tq.window_open(last_inbound=row.get("last_inbound"), now=now),
+            "needs_attention": tq.needs_attention(row),
+            "agent_active": active,
+            "agent_reason": reason,
+        })
+    return {"data": out}
+
+
+@router.post("/threads/{shop_id}/{phone}/takeover")
+async def takeover(
+    shop_id: UUID,
+    phone: str,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """"Rispondo io": the owner takes this conversation off the agent.
+
+    Written on the session row, because that is where the handover rules
+    already read from — there is no per-thread state table and this is not the
+    place to invent one. `open_session` first, since the owner may take over a
+    thread the agent has not spoken on yet (a message that just arrived, or one
+    it is still debouncing); with no row there would be nothing to mark, and
+    the next inbound message would find a clean slate and answer anyway.
+
+    `customer_id` is not passed: it only matters when this call *creates* the
+    session, which is the case where no turn will ever run on it. Looking it up
+    to write `customer_match = 'existing'` on a row that exists solely to say
+    "a person has this" would be a query for a field nothing reads.
+
+    **One direction only — there is no endpoint to hand it back.** See the
+    module note on `wa_agent.TAKEOVER_REASON`: the agent resumes by itself on
+    the customer's next conversation, and un-escalating this one would put it
+    back into a thread a person is in the middle of.
+    """
+    call_id = await wsq.open_session(shop_id=shop_id, phone=phone, customer_id=None)
+    await wsq.mark_escalated(call_id=call_id, reason=wa_agent.TAKEOVER_REASON)
+    return {"data": {"taken_over": True}}
 
 
 @router.get("/threads/{shop_id}/{phone}")

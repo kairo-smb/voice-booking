@@ -173,6 +173,69 @@ def test_the_opt_in_default_is_off():
         == (False, "not_opted_in")
 
 
+def test_the_opt_in_is_reachable_through_the_config_patch():
+    """The switch the owner flips is `PATCH /voice/config/{shop_id}`, and that
+    endpoint drops any field not on its allowlist — silently, with a 200. A
+    toggle whose value never lands would look like it worked."""
+    from booking_engine.api.routes import voice_config
+
+    assert "whatsapp_agent_enabled" in voice_config._PATCHABLE_FIELDS
+    assert "whatsapp_agent_enabled" in voice_config.ConfigPatch.model_fields
+    body = voice_config.ConfigPatch(whatsapp_agent_enabled=False)
+    # exclude_unset is what the route uses: False must survive it, or turning
+    # the agent back OFF would be the one edit that cannot be made.
+    assert body.model_dump(exclude_unset=True) == {"whatsapp_agent_enabled": False}
+
+
+# --- what the owner is told -------------------------------------------------
+
+def test_agent_status_names_the_four_silences_the_inbox_renders():
+    """Four reasons reach the Inbox, each its own sentence. A generic 'the
+    assistant is off' for all four is the failure this exists to prevent."""
+    assert wa_agent.agent_status({}) == (False, "not_opted_in")
+    assert wa_agent.agent_status({"agent_enabled": True, "intent": "complaint"}) \
+        == (False, "intent_not_whitelisted")
+    assert wa_agent.agent_status({"agent_enabled": True, "intent": "booking",
+                                  "escalated": True}) == (False, "escalated")
+    assert wa_agent.agent_status({"agent_enabled": True, "intent": "booking",
+                                  "human_replied_at": NOW}) \
+        == (False, "human_took_over")
+
+
+def test_a_speaking_agent_has_no_reason_to_report():
+    assert wa_agent.agent_status({"agent_enabled": True, "intent": "booking"}) \
+        == (True, None)
+
+
+def test_an_explicit_takeover_reads_as_a_person_not_as_the_agent_giving_up():
+    """Both are `outcome = 'escalated'` on the same row. 'Hai preso tu questa
+    conversazione' and 'l'assistente te l'ha passata' are different facts, and
+    the owner who pressed the button must see their own click, not a report
+    that the robot failed."""
+    assert wa_agent.agent_status({
+        "agent_enabled": True, "intent": "booking", "escalated": True,
+        "outcome_reason": wa_agent.TAKEOVER_REASON,
+    }) == (False, "human_took_over")
+
+
+def test_the_agents_own_escalation_reasons_still_read_as_escalated():
+    """turn_limit and no_credit both escalate. Neither is the owner taking the
+    thread, so neither may borrow that sentence."""
+    for reason in ("turn_limit", "no_credit"):
+        assert wa_agent.agent_status({
+            "agent_enabled": True, "intent": "booking", "escalated": True,
+            "outcome_reason": reason,
+        }) == (False, "escalated")
+
+
+def test_agent_status_never_invents_a_verdict_may_speak_did_not_reach():
+    """It renames one refusal; it does not decide anything. An opted-out shop
+    whose row happens to carry a takeover reason is still opted out."""
+    assert wa_agent.agent_status({
+        "agent_enabled": False, "outcome_reason": wa_agent.TAKEOVER_REASON,
+    }) == (False, "not_opted_in")
+
+
 # --- opt-in and the allowlist -----------------------------------------------
 
 async def test_a_shop_that_has_not_opted_in_is_never_handled(wired):
