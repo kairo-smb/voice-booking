@@ -82,8 +82,16 @@ class Settings(BaseSettings):
     openai_realtime_model: str = "gpt-realtime"
     # OpenAI webhook signing secret (verify realtime.call.incoming when set)
     openai_webhook_secret: str = ""
-    # Voice agent — OpenAI tool + event webhook bearer token
-    openai_tool_secret: str = ""
+    # Bearer for this repo's agent-facing surface — `/voice/tools/*`,
+    # `/voice/events/*` and the `/mcp` mount (`require_tool_token`). Two callers
+    # present it: OpenAI's Realtime, which sends it back on every tool call, and
+    # the marketing-engine booking agent, which reaches the same routes over
+    # HTTP. Named for neither — it was `OPENAI_TOOL_SECRET` until 2026-09-22,
+    # which read as "a credential for authenticating *to* OpenAI" when it is
+    # the opposite: a token OpenAI and the engine use to call *us*. Deliberately
+    # not `CONTROL_PLANE_SECRET` (the webapp's `/api/v1` token): that one can buy
+    # phone numbers and send SMS, and a leaked agent token must not escalate.
+    voice_agent_tool_secret: str = ""
     # Token meter
     voice_kairo_tokens_per_second: int = 18
     voice_min_session_reserve_tokens: int = 1500

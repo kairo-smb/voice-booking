@@ -6,6 +6,100 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-22 — `OPENAI_TOOL_SECRET` was never an OpenAI credential, and both CI failures were local-vs-CI drift
+
+**The rename, and the two names it must not be confused with.** `openai_tool_secret`
+→ `voice_agent_tool_secret` (env `OPENAI_TOOL_SECRET` → `VOICE_AGENT_TOOL_SECRET`),
+everywhere it is read: `config.py`, `api/deps.py::require_tool_token`,
+`mcp_server.py`, `voice_openai.py`, both `scripts/`, the test suite, and
+`docs/knowledge/`. The old name read as *a credential for authenticating to
+OpenAI* and it is the exact opposite: it is the token two callers present **to
+us** — OpenAI's Realtime on every tool call (it is configured into the session at
+`voice_openai.py:81` and echoed back), and the marketing-engine booking agent
+reaching the same routes over HTTP. Neither party holds a stored copy; OpenAI
+receives it per session, so the value never leaves our own secret stores.
+
+**Two names, not one, because two formats — and that is the whole point.** The
+marketing-engine now reads `VOICE_AGENT_TOOLS_URL` + `VOICE_AGENT_TOOL_SECRET`,
+deliberately **not** the webapp's `VOICE_AGENT_API_URL`. Same service, different
+required value: the webapp's pair always ends in `/api/v1` (its docs call
+repeating that prefix "the single most repeated mistake against this service"),
+while `/voice/tools/*` is root-mounted — `app.py` includes those routers with
+**no** prefix — so the tools URL must not carry it. One variable name demanding
+two shapes is how the wrong one gets copied; two names is how the value stays
+honest. Verified against the deployed service rather than assumed: `POST
+/voice/tools/get_services` on `kairo-booking-engine-qa` answers **401 without a
+bearer and 200 `{"ok":true,"data":[]}` with it**.
+
+**Not collapsed into `CONTROL_PLANE_SECRET`, deliberately.** The webapp's
+`VOICE_AGENT_SECRET` *is* `control_plane_secret`, and its docs say "never add a
+second base-URL or secret env var for voice-booking — there is one service and
+one token." That rule is about the webapp's own `/api/v1` calls and is right for
+them; it is not a claim about how many credentials the service defines. Merging
+the two would mean a leaked agent token can also reach `/api/v1/voice/numbers/*`
+and buy a phone number. A sentence was added to the webapp's `providers.md`
+naming the exception and the escalation, so the next reader does not "fix" it.
+
+**Deploy order, which is the only sharp edge in a pure rename.** The new secret
+was set on both QA apps with the *existing* value — proven by digest rather than
+by trust: `VOICE_AGENT_TOOL_SECRET` and `OPENAI_TOOL_SECRET` both read back
+`0de449382af8070e`, so there is no rotation and no window where the two sides
+disagree. The old name stays until the renamed code is deployed, since the
+running image still reads it; removing it before then takes the tool surface
+down. **Prod was not touched**: `kairo-booking-engine` holds nine *staged*
+secrets (the `META_*` set and `WHATSAPP_TOKEN_KEY`), and any `fly secrets set`
+there deploys all of them as a side effect — that is a deliberate step, not
+something to trigger incidentally while renaming a variable.
+
+**Both red PRs were the same failure with two faces: the local check is not the
+CI gate.** *voice-booking*: `fastapi>=0.115.0` is unpinned, CI resolves 0.141.1,
+and 0.141 stopped flattening `include_router` into `app.routes` — an included
+router is now an `_IncludedRouter` with neither `.path` nor `.routes`, so
+`{r.path for r in client.app.routes}` raised `AttributeError` in CI while
+passing on the local 0.124.4. Reproduced locally in a scratch venv pinned to
+CI's versions. Skipping the objects that lack `.path` was rejected as the
+repair: the entire whatsapp surface is what gets skipped, so the test would have
+gone on passing while asserting nothing. It now reads the OpenAPI schema, which
+is stable public API and lists nested paths on both versions. *webapp*: the gate
+is `next build`, which runs ESLint, and `@typescript-eslint/no-require-imports`
+is an **error** there — three new thread-proxy tests used inline
+`require('next/server')`. `tsc --noEmit` and vitest do not run that rule, which
+is exactly why the previous verification came back green. Fixing it exposed a
+second, hidden fault: the static import replaced `any` with real types, and
+`function req(url, init?: RequestInit)` was typed with the **DOM** `RequestInit`,
+incompatible with `NextRequest`'s (its `signal` is not nullable). No call site
+passed `init`, so the parameter was deleted rather than cast.
+
+**A stale entry, recorded rather than rewritten.** The 2026-09-04 entry says the
+email alert for an expiring token is "the agreed next step and is not built" and
+that `expires_in` is unconfirmed against a real response. Both were superseded on
+**2026-09-20**, which has no entry here at all: `23_whatsapp_token_reminder.sql`
+exists, the nudge runs in the hourly sweep (`whatsapp_onboarding.py`, window 7
+days matching the webapp's `RENEW_WINDOW_DAYS`, cooldown 72h, recording the
+*attempt* in `token_reminder_sent_at`), the webapp has the template and the
+banner, and that migration's own comment records the first real onboarding
+returning `token_expires_at` exactly 60 days out. The gap is noted here because
+the 09-04 entry now reads as current when it is not.
+
+**Also in this pass:** `whatsapp_triage` and `whatsapp_agent` added to the
+webapp's `RUN_TYPES`. Nothing was ever unbilled — the engine settles both through
+`/chat/credits`, which reads `isRunType` and falls back to `run_kind='chat'` for a
+surface it does not know — but every triage call and agent turn arrived in
+`ai_run_ledger` indistinguishable from any other chat turn, which is what the cost
+audit reads. Neither is a `MarketingRunType`: both are single-phase and need no
+`FALLBACK_ESTIMATE_USD` entry.
+
+**Verification.** voice-booking **820 passed, 24 skipped** locally and **815/24**
+on a venv pinned to CI's `fastapi 0.141.1` / `starlette 1.6.0` (the difference is
+files CI does not collect; its own run was 807 passed + 1 failed + 31 skipped
+before the fix, and that one failure is now 25 passed). marketing-engine **1170
+passed, 3 skipped**, `tsc --noEmit` exit 0. webapp `npx next lint` exit 0 with
+zero errors, `tsc --noEmit` exit 0, vitest 48 passed. `VOICE_AGENT_TOOLS_URL` and
+`VOICE_AGENT_TOOL_SECRET` set on `marketing-engine-qa`;
+`VOICE_AGENT_TOOL_SECRET` set on `kairo-booking-engine-qa`; the tool surface
+curl-verified as above. **No Meta call was made** — consistent with every
+WhatsApp entry here.
+
 ## 2026-09-22 — WhatsApp becomes a conversation, and an agent books through it
 
 **Two increments on one branch, in this order, because the second needed every

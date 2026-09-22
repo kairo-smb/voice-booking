@@ -78,7 +78,7 @@ async def create_session(body: SessionRequest) -> JSONResponse:
                               if resolution.unique_match else None),
     )
     mcp_token = mint_call_token(shop_id=shop_id, call_id=call_id,
-                                secret=settings.openai_tool_secret)
+                                secret=settings.voice_agent_tool_secret)
     payload = await build_accept_payload(
         config=config, policy=policy, resolution=resolution,
         model=settings.openai_realtime_model,

@@ -44,7 +44,7 @@ def _slot(offset_days: int, hour: int = 11) -> datetime:
 
 
 def _token(shop_id, call_id, settings) -> str:
-    return mint_call_token(shop_id=shop_id, call_id=call_id, secret=settings.openai_tool_secret)
+    return mint_call_token(shop_id=shop_id, call_id=call_id, secret=settings.voice_agent_tool_secret)
 
 
 async def test_tampered_token_rejected(db_connection, tool_app, settings, cleanup_call_ids):
@@ -54,7 +54,7 @@ async def test_tampered_token_rejected(db_connection, tool_app, settings, cleanu
     tampered = token[:-1] + ("x" if token[-1] != "x" else "y")
 
     resp = await execute_tool(
-        "get_services", {}, token=tampered, secret=settings.openai_tool_secret, app=tool_app,
+        "get_services", {}, token=tampered, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp == {"ok": False, "error": "unauthorized"}
@@ -68,7 +68,7 @@ async def test_token_signed_with_wrong_secret_rejected(
     wrong_token = mint_call_token(shop_id=SHOP_ID, call_id=call_id, secret="not-the-real-secret")
 
     resp = await execute_tool(
-        "get_services", {}, token=wrong_token, secret=settings.openai_tool_secret, app=tool_app,
+        "get_services", {}, token=wrong_token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp == {"ok": False, "error": "unauthorized"}
@@ -80,7 +80,7 @@ async def test_unknown_tool_name_rejected(db_connection, tool_app, settings, cle
     token = _token(SHOP_ID, call_id, settings)
 
     resp = await execute_tool(
-        "drop_all_tables", {}, token=token, secret=settings.openai_tool_secret, app=tool_app,
+        "drop_all_tables", {}, token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp == {"ok": False, "error": "unknown_tool"}
@@ -107,7 +107,7 @@ async def test_modify_booking_rejects_call_from_different_shop(
         "modify_booking",
         {"appointment_id": str(appt["id"]),
          "new_slot_start": (start + timedelta(hours=2)).isoformat()},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is False
@@ -136,7 +136,7 @@ async def test_cancel_booking_rejects_call_from_different_shop(
 
     resp = await execute_tool(
         "cancel_booking", {"appointment_id": str(appt["id"])},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is False
@@ -168,7 +168,7 @@ async def test_modify_booking_rejects_phone_mismatch(
         "modify_booking",
         {"appointment_id": str(appt["id"]),
          "new_slot_start": (start + timedelta(hours=2)).isoformat()},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is False
@@ -196,7 +196,7 @@ async def test_modify_booking_rejects_within_lead_time(
         "modify_booking",
         {"appointment_id": str(appt["id"]),
          "new_slot_start": (start + timedelta(hours=3)).isoformat()},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is False
@@ -221,7 +221,7 @@ async def test_cancel_booking_rejects_within_lead_time(
 
     resp = await execute_tool(
         "cancel_booking", {"appointment_id": str(appt["id"])},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is False
@@ -244,7 +244,7 @@ async def test_create_booking_rejects_slot_in_past(
         {"customer_id": str(customer["id"]),
          "legs": [{"service_id": str(SVC_TAGLIO_UOMO), "staff_id": str(STAFF_MIRCO),
                    "slot_start": past.isoformat()}]},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is False
@@ -264,7 +264,7 @@ async def test_create_booking_nonexistent_customer_returns_clean_error(
         {"customer_id": str(nonexistent_customer_id),
          "legs": [{"service_id": str(SVC_TAGLIO_UOMO), "staff_id": str(STAFF_MIRCO),
                    "slot_start": _slot(66).isoformat()}]},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     # customer_id is well-formed but references no real row — this reaches
@@ -290,7 +290,7 @@ async def test_create_booking_nonexistent_staff_returns_clean_error(
         {"customer_id": str(customer["id"]),
          "legs": [{"service_id": str(SVC_TAGLIO_UOMO), "staff_id": str(nonexistent_staff_id),
                    "slot_start": _slot(66).isoformat()}]},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is False
@@ -307,7 +307,7 @@ async def test_create_booking_missing_required_field_returns_clean_error(
     resp = await execute_tool(
         "create_booking",
         {"customer_id": "not-a-real-uuid"},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     # Missing legs (required, min_length=1) and a malformed customer_id
@@ -341,7 +341,7 @@ async def test_update_customer_from_call_refuses_another_shops_customer(
         "update_customer_from_call",
         {"customer_id": str(other["id"]), "field": "email",
          "value": "attacker@example.com"},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is False
@@ -362,7 +362,7 @@ async def test_update_customer_from_call_rejects_unknown_customer(
     resp = await execute_tool(
         "update_customer_from_call",
         {"customer_id": str(uuid4()), "field": "email", "value": "x@example.com"},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp == {"ok": False, "data": None, "error": "customer_not_found"}

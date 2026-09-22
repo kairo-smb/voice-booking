@@ -78,7 +78,7 @@ async def incoming(
     mcp_url = f"{settings.public_base_url}/mcp/" if settings.public_base_url else None
     mcp_token = (
         mint_call_token(shop_id=shop_id, call_id=db_call_id,
-                        secret=settings.openai_tool_secret)
+                        secret=settings.voice_agent_tool_secret)
         if mcp_url else None
     )
     payload = await build_accept_payload(

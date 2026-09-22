@@ -18,7 +18,7 @@ AUTH = {"Authorization": "Bearer tool-secret", "X-Shop-Id": str(uuid4()),
 
 @pytest.fixture(autouse=True)
 def stub_secret(monkeypatch):
-    monkeypatch.setenv("OPENAI_TOOL_SECRET", "tool-secret")
+    monkeypatch.setenv("VOICE_AGENT_TOOL_SECRET", "tool-secret")
 
 
 @pytest.mark.asyncio

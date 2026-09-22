@@ -194,7 +194,7 @@ async def test_two_shops_with_the_same_number_get_separate_sessions(db):
 @pytest.mark.asyncio
 async def test_the_minted_token_authorises_the_booking_tools(db, monkeypatch):
     """Nothing about booking is rebuilt: the existing tool layer answers."""
-    monkeypatch.setenv("OPENAI_TOOL_SECRET", "tool-secret")
+    monkeypatch.setenv("VOICE_AGENT_TOOL_SECRET", "tool-secret")
     from booking_engine.services.mcp_tools import execute_tool
 
     call_id = await ws.open_session(shop_id=SHOP, phone=PHONE, customer_id=None)

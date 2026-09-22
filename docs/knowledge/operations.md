@@ -28,9 +28,9 @@ Applies every file in `booking_engine/db/sql/` in order, **except** `01_schema.s
 
 ## Secrets
 
-`CONTROL_PLANE_SECRET` and `OPENAI_TOOL_SECRET` are Fly app secrets, not GitHub Actions secrets — `flyctl deploy` doesn't inject them:
+`CONTROL_PLANE_SECRET` and `VOICE_AGENT_TOOL_SECRET` are Fly app secrets, not GitHub Actions secrets — `flyctl deploy` doesn't inject them:
 ```bash
-fly secrets set CONTROL_PLANE_SECRET='...' OPENAI_TOOL_SECRET='...' --app kairo-booking-engine
+fly secrets set CONTROL_PLANE_SECRET='...' VOICE_AGENT_TOOL_SECRET='...' --app kairo-booking-engine
 ```
 `WEBAPP_MIGRATE_DISPATCH_TOKEN` is the opposite case — a **GitHub Actions** repo secret only (a token with `actions:write` on `kairo-smb/webapp`), never a Fly secret. Without it the `migrate-via-webapp` job fails and neither environment deploys.
 

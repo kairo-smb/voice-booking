@@ -17,7 +17,7 @@ from booking_engine.api.app import create_app
 
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
-    monkeypatch.setenv("OPENAI_TOOL_SECRET", "tool-secret")
+    monkeypatch.setenv("VOICE_AGENT_TOOL_SECRET", "tool-secret")
 
 
 def test_create_app_registers_itself_with_mcp_server():
