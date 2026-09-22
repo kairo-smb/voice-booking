@@ -83,3 +83,12 @@ fly secrets unset ENABLE_CALL_SUPERVISOR CALL_SUPERVISOR_VERBOSE_LOGGING --app k
 pytest tests/ --ignore=tests/live_db -v          # no DB needed
 DATABASE_URL=postgresql://... pytest tests/live_db/ -v   # real/ephemeral Neon branch
 ```
+
+**Install from `booking_engine/requirements.txt`, not the root dev file, or "green locally" answers a different question than CI.** CI resolves the dependencies afresh on every run, so an unpinned requirement is a version nobody chose. That is not hypothetical: `fastapi>=0.115.0` let CI resolve 0.141.1 while a local venv held 0.124.4, and 0.141 changed how `include_router` builds the route table — the suite failed in CI on a test that passed locally. `fastapi` is now pinned to 0.141.1 (what CI and `kairo-booking-engine-qa` were both already running). To reproduce CI exactly rather than approximately:
+
+```bash
+python -m venv /tmp/ci && /tmp/ci/bin/pip install -r booking_engine/requirements.txt pytest pytest-asyncio httpx anyio respx
+/tmp/ci/bin/python -m pytest tests/voice_gateway/ tests/booking_engine/ -q
+```
+
+The remaining gap is deliberate: CI also runs `tests/live_db/` against an ephemeral Neon branch, which a local run skips unless `TEST_DATABASE_URL` is set. A green local run therefore says nothing about those.

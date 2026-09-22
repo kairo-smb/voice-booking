@@ -89,16 +89,48 @@ surface it does not know — but every triage call and agent turn arrived in
 audit reads. Neither is a `MarketingRunType`: both are single-phase and need no
 `FALLBACK_ESTIMATE_USD` entry.
 
+**Three cross-repo repairs, each closing the hole the CI failure came through
+rather than the failure itself.** (1) `fastapi` pinned to `==0.141.1` in **both**
+`requirements.txt` files — the shipped one and the dev one, since a disagreement
+between them is the same class of bug. Deliberately pinned to what CI and
+`kairo-booking-engine-qa` were **already** running (checked over `fly ssh`, not
+assumed) rather than to the newest release: this freezes the status quo instead
+of moving prod onto a version nobody has exercised. (2) `npm run verify` in the
+webapp — lint → typecheck → test, cheapest first, because the gate that bit us is
+the first step and the two habitual commands are the last two. (3) The
+cross-service env contract written down once, in `docs/knowledge/providers.md`:
+ten variables, which service holds each, its value format, and who presents it.
+Four Fly apps and the webapp's host are configured by hand from three repos'
+prose today, and the `/api/v1` format rule has already caused a wrong turn once.
+
+**A correction the env map forced, worth knowing on its own: the URL prefix is
+not a proxy for the credential.** `api/app.py` mounts **seven** routers at the
+root, and they do not share an auth scheme — `/voice/tools/*` and
+`/voice/events/*` want `require_tool_token`, but `/voice/memos/*` wants
+`require_control_plane_token`, which is why the webapp's memos proxy strips
+`/api/v1` off `VOICE_AGENT_API_URL` to reach it with the *control-plane* secret.
+The webapp's own comment called `voice_memos` "the one router mounted without
+prefix", which has not been true for months; corrected. So the durable
+distinction is the credential, not the shape of the path.
+
 **Verification.** voice-booking **820 passed, 24 skipped** locally and **815/24**
-on a venv pinned to CI's `fastapi 0.141.1` / `starlette 1.6.0` (the difference is
-files CI does not collect; its own run was 807 passed + 1 failed + 31 skipped
-before the fix, and that one failure is now 25 passed). marketing-engine **1170
-passed, 3 skipped**, `tsc --noEmit` exit 0. webapp `npx next lint` exit 0 with
-zero errors, `tsc --noEmit` exit 0, vitest 48 passed. `VOICE_AGENT_TOOLS_URL` and
-`VOICE_AGENT_TOOL_SECRET` set on `marketing-engine-qa`;
-`VOICE_AGENT_TOOL_SECRET` set on `kairo-booking-engine-qa`; the tool surface
-curl-verified as above. **No Meta call was made** — consistent with every
-WhatsApp entry here.
+on a venv built from `booking_engine/requirements.txt` — i.e. resolving the new
+pin — (the difference is files CI does not collect; CI's own run was 807 passed +
+1 failed + 31 skipped before the fix, and that one failure is now 25 passed).
+marketing-engine **1170 passed, 3 skipped**, `tsc --noEmit` exit 0. webapp
+`npm run verify` **exit 0, 237 files, 1720 tests passed** — the new gate, run as
+one command. `VOICE_AGENT_TOOLS_URL` and `VOICE_AGENT_TOOL_SECRET` set on
+`marketing-engine-qa`; `VOICE_AGENT_TOOL_SECRET` set on `kairo-booking-engine-qa`;
+the tool surface curl-verified as above. **No Meta call was made** — consistent
+with every WhatsApp entry here.
+
+**Two things found and left alone.** `AGENTS.md` in this repo is an untracked,
+stale copy of this file (dated 2026-09-04, so it has none of the WhatsApp
+history) — it is not edited here because it is not this file's to maintain, but
+whatever writes it is now feeding a second reader decisions from two months ago.
+And `kairo-booking-engine` has its machines stopped and **nine secrets staged**
+(the `META_*` set and `WHATSAPP_TOKEN_KEY`); any `fly secrets set` on that app
+deploys all nine as a side effect, which is why nothing in this pass touched prod.
 
 ## 2026-09-22 — WhatsApp becomes a conversation, and an agent books through it
 

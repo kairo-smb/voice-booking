@@ -6,6 +6,48 @@ Every external service this repo talks to: purpose, auth, and the hard rules tha
 
 ---
 
+## Cross-service environment contract
+
+Three services call each other on the same shared database — this repo
+(`booking_engine`), the webapp, and marketing-engine — plus OpenAI, which calls
+*us*. The credential names are not a free-for-all: each one is named for the
+thing it authenticates **into**, and one of them has a format rule that has
+already caused a wrong turn during a merge (see the `/api/v1` note below).
+Nothing generates these; every row is typed by hand into four Fly apps and the
+webapp's host, which is why they are written down once here.
+
+| Variable | Lives on | Value | Presented by |
+|---|---|---|---|
+| `CONTROL_PLANE_SECRET` | booking engine | random | the webapp holds the only copy, as `VOICE_AGENT_SECRET` below |
+| `VOICE_AGENT_API_URL` | **webapp** | voice-booking base **including `/api/v1`** | webapp → this repo's `/api/v1/*` |
+| `VOICE_AGENT_SECRET` | **webapp** | = this repo's `CONTROL_PLANE_SECRET` | webapp → this repo's `/api/v1/*` **and** `/voice/memos/*` |
+| `VOICE_AGENT_TOOLS_URL` | **marketing-engine** | voice-booking base **with NO `/api/v1`** | engine → this repo's `/voice/tools/*` |
+| `VOICE_AGENT_TOOL_SECRET` | booking engine + **marketing-engine** | = this repo's `voice_agent_tool_secret` | OpenAI Realtime (per session), and the engine's booking agent |
+| `MARKET_INTEL_API_URL` | booking engine | engine base **with NO `/api/v1`** | this repo → engine `/whatsapp/triage`, `/whatsapp/agent` |
+| `MARKET_INTEL_SECRET` | booking engine + marketing-engine + webapp | shared bearer | this repo → engine; both → webapp's credit + notify endpoints |
+| `WEBAPP_BASE_URL` | booking engine + marketing-engine | webapp base, no trailing slash | this repo + engine → webapp |
+| `JWT_SECRET` | webapp + marketing-engine | **byte-identical** | the engine verifies the webapp's session tokens on the browser-facing chat routes |
+| `WHATSAPP_TOKEN_KEY` | booking engine | Fernet key, **distinct per environment** | internal — encrypts `whatsapp.senders.access_token` at rest |
+
+**Two of these are `VOICE_AGENT_*` and they are not interchangeable.** `VOICE_AGENT_API_URL` always ends in `/api/v1`; `VOICE_AGENT_TOOLS_URL` must not. One variable name demanding two shapes is how the wrong value gets copied — which is why there are two names. Copying either into the other's slot produces a 404 on every call, and route tests do not catch it: they mock `fetch` and assert status and body, both of which stay green no matter how wrong the URL is.
+
+**The prefix is *not* a reliable proxy for the credential, so read the routes rather than the shape of the URL.** `api/app.py` mounts seven routers at the root — `voice_openai`, `voice_memos`, `voice_events`, and the four `voice_tools_*` — and they do not share an auth scheme:
+
+| Mounted at root | Guard |
+|---|---|
+| `/voice/tools/*` (catalog, booking, lifecycle, identity) | `require_tool_token` |
+| `/voice/events/*` | `require_tool_token` |
+| `/voice/memos/*` | **`require_control_plane_token`** — the webapp calls this one, which is why its proxy strips `/api/v1` off `VOICE_AGENT_API_URL` to reach it |
+| `/voice/openai/*` | no route-level dependency: it is the Twilio/OpenAI webhook and verifies its own signature in the handler |
+
+So the durable distinction is the **credential** (control plane = the webapp's app API; tool token = agents), not the prefix. `/api/v1/*` happens to be all-control-plane, but the root is mixed, and `/voice/memos/*` is the case that proves it.
+
+**`VOICE_AGENT_TOOL_SECRET` is deliberately not `CONTROL_PLANE_SECRET`.** They are two credentials for one service because they gate two surfaces with different blast radii: `/voice/tools/*` can create and cancel appointments, `/api/v1/voice/numbers/*` can buy a phone number. Collapsing them to satisfy a "one service, one token" reading would let a leaked agent credential spend money.
+
+**The value never rotates on a rename.** When `openai_tool_secret` became `voice_agent_tool_secret` (2026-09-22) the *name* changed on both sides and the value did not — verified by digest, both reading `0de449382af8070e` on `kairo-booking-engine-qa`, so there was no window where the two ends disagreed. A rename and a rotation at once is two risks wearing one commit.
+
+---
+
 ## Twilio
 
 **Purpose:** inbound phone numbers and call routing. `clients/twilio_numbers.py` searches/purchases/releases/fetches EU mobile numbers; `api/routes/voice_twiml.py` handles the per-call dynamic TwiML webhook that routes an inbound call to the right shop and dials it into OpenAI; `clients/twilio_regulatory.py` drives the Regulatory Compliance API (Regulations/EndUsers/SupportingDocuments/Bundles/Evaluations) for self-service number requests.
