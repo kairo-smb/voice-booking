@@ -679,58 +679,93 @@ async def campaign_progress(*, shop_id: UUID, campaign_key: str) -> dict:
 
 
 async def customer_campaign_messages(*, shop_id: UUID, customer_id: UUID) -> list[dict]:
-    """Everything a customer was part of: every message actually sent to them,
-    plus the campaigns they were assigned to but never received (holdout arm).
+    """Everything on file about this customer's WhatsApp conversation: every
+    message actually sent to them, the campaigns they were assigned to but
+    never received (holdout arm), and — now that they write back — every
+    message *they* sent us.
 
     This is the read behind the webapp's Anagrafiche → "Campagne" tab, which
-    doubles as the GDPR subject-access artifact: "what did you send me, and
-    when". The goal lives in market_intel.campaigns — the campaign data owner —
-    and is linked through campaign_key = campaign id, which is the campaign_key
+    doubles as the GDPR subject-access artifact: "what do you hold about me".
+    A response that showed only our side of a conversation was not one — half
+    of it is personal data the customer authored themselves, including a voice
+    note's words (`direction = 'in'`, `body` is `coalesce(transcript, body)`:
+    the transcript is what we actually hold, and leaving it out would show
+    "we have nothing" for a message we have the words of).
+
+    The goal lives in market_intel.campaigns — the campaign data owner — and
+    is linked through campaign_key = campaign id, which is the campaign_key
     the webapp passes when it enqueues a campaign. Marketing-engine's schema is
     a read here, exactly as this repo already reads business_app_core.
+
+    One UNION ALL, not three Python-merged queries: `inbound_messages` has no
+    campaign to join, so ordering the three shapes consistently belongs in SQL
+    rather than as a second, separate sort rule on the Python side. Every
+    typed NULL is deliberate — an untyped NULL in a UNION ALL is "could not
+    determine data type of parameter" the moment two branches disagree, the
+    same class of bug CLAUDE.md's 2026-07-18/2026-07-21 entries record for
+    ON CONFLICT predicates.
     """
-    messages = await execute(
+    return await execute(
         """
         SELECT
           om.id AS message_id,
           om.campaign_key,
           om.preview,
+          om.preview AS body,
           om.status AS delivery_status,
           om.sent_at,
           om.created_at,
           om.suppressed_reason,
           c.goal,
           c.personalization,
-          'send' AS arm
+          'send' AS arm,
+          'out' AS direction
         FROM whatsapp.outbound_messages om
         LEFT JOIN market_intel.campaigns c
           ON c.shop_id = om.shop_id AND c.id::text = om.campaign_key
         WHERE om.shop_id = $1 AND om.customer_id = $2
-        """,
-        shop_id, customer_id,
-    )
-    holdout = await execute(
-        """
+
+        UNION ALL
+
         SELECT
           NULL::uuid AS message_id,
           cr.campaign_id::text AS campaign_key,
           cr.preview,
+          cr.preview AS body,
           NULL::text AS delivery_status,
           NULL::timestamptz AS sent_at,
           c.created_at,
           NULL::text AS suppressed_reason,
           c.goal,
           c.personalization,
-          cr.arm
+          cr.arm,
+          NULL::text AS direction
         FROM market_intel.campaign_recipients cr
         JOIN market_intel.campaigns c ON c.id = cr.campaign_id
-        WHERE cr.customer_id = $1 AND c.shop_id = $2 AND cr.arm = 'holdout'
+        WHERE cr.customer_id = $2 AND c.shop_id = $1 AND cr.arm = 'holdout'
+
+        UNION ALL
+
+        SELECT
+          i.id AS message_id,
+          NULL::text AS campaign_key,
+          coalesce(i.transcript, i.body) AS preview,
+          coalesce(i.transcript, i.body) AS body,
+          NULL::text AS delivery_status,
+          NULL::timestamptz AS sent_at,
+          i.received_at AS created_at,
+          NULL::text AS suppressed_reason,
+          NULL::text AS goal,
+          NULL::text AS personalization,
+          NULL::text AS arm,
+          'in' AS direction
+        FROM whatsapp.inbound_messages i
+        WHERE i.shop_id = $1 AND i.customer_id = $2
+
+        ORDER BY created_at DESC
         """,
-        customer_id, shop_id,
+        shop_id, customer_id,
     )
-    rows = messages + holdout
-    rows.sort(key=lambda r: (r.get("created_at") or ""), reverse=True)
-    return rows
 
 
 async def record_inbound(

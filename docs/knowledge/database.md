@@ -146,6 +146,16 @@ Added 2026-08-21 (`14_whatsapp_schema.sql`), reshaped for Meta Cloud API on
 - **`senders.waba_id` is the only tenant router.** Meta posts every
   customer's traffic to one app-level webhook and identifies the shop solely
   by `entry[].id`. Hence the unique index on it.
+- **The subject-access artifact covers both directions** (2026-09-21).
+  `customer_campaign_messages` — behind `GET /whatsapp/messages/{shop_id}`,
+  the webapp's Anagrafiche → Campagne tab and the GDPR "what do you hold about
+  me" answer — used to return only what we *sent*, plus the holdout campaigns.
+  Once customers write back, half the record is personal data they authored,
+  so inbound is UNIONed in, tagged `direction`. A voice note appears as
+  `coalesce(transcript, body)`: the transcript is what we actually hold, and
+  an empty row would answer "nothing" about a message we have the words of.
+  Holdout rows carry `direction IS NULL` — they were never sent in either
+  direction, and calling them `out` would assert a send that never happened.
 - **`outbound_messages.status = 'sending'` is a claim, not a provider state.**
   The drip sweep flips rows into it in the same statement that selects them
   (`whatsapp_queries.claim_due`, `FOR UPDATE … SKIP LOCKED`), so two
