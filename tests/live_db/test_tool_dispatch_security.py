@@ -320,3 +320,49 @@ async def test_create_booking_missing_required_field_returns_clean_error(
     # is it degrades to *some* clean JSON dict, not a crash or raw traceback.
     assert resp.get("ok") is not True
     assert "Traceback" not in str(resp)
+
+
+async def test_update_customer_from_call_refuses_another_shops_customer(
+    db_connection, tool_app, settings, cleanup_call_ids, cleanup_customer_ids,
+):
+    """A token minted for shop A cannot edit shop B's customer.
+
+    The hole flagged 2026-07-17: the route had no ownership check at all, so
+    any validly minted call token could rewrite any customer's email in any
+    shop. The shop comes off the call row, like authorize_booking_change.
+    """
+    other = await create_customer(SHOP_ID_2, "Cross Shop Target")
+    cleanup_customer_ids.append(other["id"])
+    call_id = await insert_call(shop_id=SHOP_ID, caller_phone=None, matched_customer_id=None)
+    cleanup_call_ids.append(call_id)
+    token = _token(SHOP_ID, call_id, settings)
+
+    resp = await execute_tool(
+        "update_customer_from_call",
+        {"customer_id": str(other["id"]), "field": "email",
+         "value": "attacker@example.com"},
+        token=token, secret=settings.openai_tool_secret, app=tool_app,
+    )
+
+    assert resp["ok"] is False
+    assert resp["error"] == "wrong_shop"
+    row = await connection.execute_one(
+        "SELECT email FROM business_app_core.customers WHERE id = $1", other["id"],
+    )
+    assert row["email"] != "attacker@example.com"
+
+
+async def test_update_customer_from_call_rejects_unknown_customer(
+    db_connection, tool_app, settings, cleanup_call_ids,
+):
+    call_id = await insert_call(shop_id=SHOP_ID, caller_phone=None, matched_customer_id=None)
+    cleanup_call_ids.append(call_id)
+    token = _token(SHOP_ID, call_id, settings)
+
+    resp = await execute_tool(
+        "update_customer_from_call",
+        {"customer_id": str(uuid4()), "field": "email", "value": "x@example.com"},
+        token=token, secret=settings.openai_tool_secret, app=tool_app,
+    )
+
+    assert resp == {"ok": False, "data": None, "error": "customer_not_found"}

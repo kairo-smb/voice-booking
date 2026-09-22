@@ -11,8 +11,9 @@ from booking_engine.api.voice_tool_models import (
     CreateCustomerIn, CreatedCustomerOut, CustomerSummary, Envelope,
     LookupCustomerIn, UpdateCustomerIn,
 )
+from booking_engine.db.voice_calls_queries import get_call
 from booking_engine.db.voice_tool_queries import (
-    attach_customer_to_call, find_customers_by_phone,
+    attach_customer_to_call, find_customers_by_phone, get_customer_shop_id,
     insert_customer_from_call, update_customer_field,
 )
 from booking_engine.services.phone_normalize import digits_only
@@ -61,7 +62,29 @@ async def create_customer(
 async def update_customer(
     body: UpdateCustomerIn,
     _auth: Annotated[bool, Depends(require_tool_token)],
+    x_call_id: Annotated[UUID, Header(alias="X-Call-Id")],
 ) -> Envelope[dict]:
+    """Edit a customer this session's shop actually owns.
+
+    Server-side trust boundary, the same shape as
+    `booking_authz.authorize_booking_change`: the shop is read off the **call
+    row** we wrote ourselves, not off the X-Shop-Id header, and the customer's
+    owning shop comes from the database. `customer_id` arrives as a tool
+    argument from the model and is untrusted input like any other.
+
+    Until now there was no check at all: any validly minted token could edit
+    any customer's email/tags in any shop (flagged 2026-07-17). Sessions are
+    now minted on a second channel (WhatsApp), so this is closed.
+    """
+    call = await get_call(x_call_id)
+    if not call:
+        return Envelope[dict](ok=False, error="call_not_found")
+    owner_shop_id = await get_customer_shop_id(customer_id=body.customer_id)
+    if owner_shop_id is None:
+        return Envelope[dict](ok=False, error="customer_not_found")
+    if str(owner_shop_id) != str(call["shop_id"]):
+        return Envelope[dict](ok=False, error="wrong_shop")
+
     ok = await update_customer_field(
         customer_id=body.customer_id, field=body.field, value=body.value,
     )

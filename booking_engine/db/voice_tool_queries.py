@@ -55,6 +55,21 @@ async def insert_customer_from_call(
     return row["id"]
 
 
+async def get_customer_shop_id(*, customer_id: UUID) -> UUID | None:
+    """Which shop owns this customer. None when there is no such customer.
+
+    The ownership side of an authorization check, kept separate from the
+    write so "no such customer" and "not yours" stay distinguishable —
+    folding `AND shop_id = $2` into the UPDATE would collapse both into an
+    unexplained zero-row result.
+    """
+    row = await connection.execute_one(
+        "SELECT shop_id FROM business_app_core.customers WHERE id = $1",
+        customer_id,
+    )
+    return row["shop_id"] if row else None
+
+
 async def update_customer_field(
     *, customer_id: UUID, field: str, value: str
 ) -> bool:
