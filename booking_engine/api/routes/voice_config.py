@@ -56,9 +56,9 @@ class ConfigPatch(BaseModel):
 class IntakePut(BaseModel):
     """Deliberately without `max_length`: over the cap is truncated, not refused.
 
-    The webapp counts the characters down in front of the owner, so 501 is a
+    The webapp counts the characters down in front of the owner, so 2001 is a
     UI state, not a request anyone should ever be able to send. If one arrives
-    anyway — a second client, a retry of an older draft — storing the first 500
+    anyway — a second client, a retry of an older draft — storing the first 2000
     characters is a better answer than a 422 the owner cannot interpret.
     """
     questions: str = ""

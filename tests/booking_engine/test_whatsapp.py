@@ -1856,7 +1856,19 @@ def test_descriptor_keeps_the_field_name_its_consumers_read():
 def test_utility_descriptor_reports_no_generated_slot():
     from booking_engine.api.routes.whatsapp import _template_descriptor
 
-    assert _template_descriptor("feedback_v2")["generated_slot"] is None
+    assert _template_descriptor("reminder_v6")["generated_slot"] is None
+
+
+def test_the_feedback_descriptor_is_marketing_with_no_generated_slot():
+    """feedback_v2 is the category split's one exception: MARKETING, but every
+    variable is still a fact, so the webapp must be told there is no slot and
+    not offer a generate button for it."""
+    from booking_engine.api.routes.whatsapp import _template_descriptor
+
+    d = _template_descriptor("feedback_v2")
+    assert d["category"] == "MARKETING"
+    assert d["generated_slot"] is None
+    assert d["filled_by"] is None
 
 
 def test_descriptor_reports_who_fills_the_slot():
@@ -1866,7 +1878,7 @@ def test_descriptor_reports_who_fills_the_slot():
 
     assert _template_descriptor("promo_v1")["filled_by"] == "llm"
     assert _template_descriptor("promo_manual_v1")["filled_by"] == "owner"
-    assert _template_descriptor("feedback_v2")["filled_by"] is None
+    assert _template_descriptor("reminder_v6")["filled_by"] is None
 
 
 @pytest.mark.asyncio

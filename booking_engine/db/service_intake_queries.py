@@ -14,7 +14,7 @@ this repo does not alter it.
 **The cap is the point of this module, not a detail.** The text is re-read
 into the agent's prompt on *every turn of every conversation that touches the
 service*. An owner who pastes an essay pays for it on each one, and the
-agent's own instructions drown in it. So 500 characters, enforced here — the
+agent's own instructions drown in it. So 2000 characters, enforced here — the
 character counter in the webapp shows the owner the same limit, but a cap that
 only exists in a textarea is not a cap.
 """
@@ -25,8 +25,10 @@ from uuid import UUID
 from booking_engine.db.connection import execute, execute_one
 
 # Per service. Chosen against the prompt, not against the column: `questions`
-# is plain `text` and the database would take a novel.
-MAX_QUESTIONS_CHARS = 500
+# is plain `text` and the database would take a novel. Raised from 500 to 2000
+# for the webapp's builder, which composes several questions per service and
+# had outgrown the older, single-prompt budget.
+MAX_QUESTIONS_CHARS = 2000
 
 
 def normalise(questions: str | None) -> str:
@@ -35,7 +37,7 @@ def normalise(questions: str | None) -> str:
     Whitespace-only becomes `''` rather than `'   '`: the latter puts a blank
     line in the prompt and leaves the owner believing they configured
     something. Trimming happens **before** the cut so leading spaces cannot eat
-    into the 500 characters the owner is counting down in the UI.
+    into the 2000 characters the owner is counting down in the UI.
     """
     return (questions or "").strip()[:MAX_QUESTIONS_CHARS].strip()
 

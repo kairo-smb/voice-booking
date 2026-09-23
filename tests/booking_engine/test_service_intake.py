@@ -3,7 +3,7 @@
 The table is `voice_agent.service_intake` (migration 24). These tests are about
 three things, and two of them are about the text never being trusted as given:
 
-- the 500-character cap is the *server's*, not the textarea's — this text is
+- the 2000-character cap is the *server's*, not the textarea's — this text is
   re-read into the agent's prompt on every turn of every conversation that
   touches the service, so an owner who pastes an essay pays for it each time;
 - a shop can only write intake for a service it owns, because the one place a
@@ -90,17 +90,17 @@ def db():
 # --- the cap ----------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_questions_are_capped_at_500_characters(db):
+async def test_questions_are_capped_at_2000_characters(db):
     # The cap is the server's. A UI counter that the server does not back is
     # not a cap — this text enters the prompt on every single turn.
-    await si.set_questions(shop_id=SHOP, service_id=COLORE, questions="x" * 900)
+    await si.set_questions(shop_id=SHOP, service_id=COLORE, questions="x" * 3500)
     got = await si.for_services(SHOP, [COLORE])
-    assert len(got[str(COLORE)]) == si.MAX_QUESTIONS_CHARS == 500
+    assert len(got[str(COLORE)]) == si.MAX_QUESTIONS_CHARS == 2000
 
 
 @pytest.mark.asyncio
 async def test_text_at_the_cap_is_stored_whole(db):
-    exact = "y" * 500
+    exact = "y" * 2000
     row = await si.set_questions(shop_id=SHOP, service_id=COLORE, questions=exact)
     assert row["questions"] == exact
 
