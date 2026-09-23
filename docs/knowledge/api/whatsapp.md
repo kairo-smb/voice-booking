@@ -1,6 +1,6 @@
 # WhatsApp API
 
-`booking_engine/api/routes/whatsapp.py`, mounted at `/api/v1`. Onboards a salon onto WhatsApp with its own WABA, injects Kairo's approved templates into it, and queues personalised marketing that drips out across the day — or across a week, for a bulk campaign.
+`booking_engine/api/routes/whatsapp.py`, mounted at `/api/v1`. Onboards a salon onto WhatsApp with its own WABA, injects Kairo's approved templates into it, and queues personalised marketing that drips out across the day — or across a week, for a bulk campaign. It also serves the two-way Inbox: reading a customer's thread and answering it free-form inside Meta's 24h window.
 
 **Read [Providers → WhatsApp](../providers.md#whatsapp-meta-cloud-api-tech-provider) first** if you're new to this: the constraints (approved templates only, per-recipient marketing caps, coexistence) explain why these endpoints exist in this shape.
 
@@ -10,7 +10,7 @@
 
 | Routes | Scheme |
 |---|---|
-| `/whatsapp/onboarding/*`, `/whatsapp/status/*`, `/whatsapp/templates/*`, `/whatsapp/campaigns*`, `/whatsapp/receipts`, `/whatsapp/messages/*` | Control-plane bearer (`CONTROL_PLANE_SECRET`) — the webapp is the only caller |
+| `/whatsapp/onboarding/*`, `/whatsapp/status/*`, `/whatsapp/templates/*`, `/whatsapp/campaigns*`, `/whatsapp/receipts`, `/whatsapp/messages/*`, `/whatsapp/threads/*`, `/whatsapp/reply` | Control-plane bearer (`CONTROL_PLANE_SECRET`) — the webapp is the only caller |
 | `GET /whatsapp/webhook` | Meta's handshake: `hub.verify_token` must equal `META_VERIFY_TOKEN` |
 | `POST /whatsapp/webhook` | `X-Hub-Signature-256`, HMAC-SHA256 of the **raw body** with `META_APP_SECRET` |
 
@@ -272,6 +272,183 @@ Each row: `message_id` (null for holdout), `campaign_key`, `goal`,
 
 ---
 
+## Threads (the two-way Inbox)
+
+A "thread" is not a table: it is every message to and from one phone number,
+collapsed per phone at read time out of `whatsapp.inbound_messages` and
+`whatsapp.outbound_messages` (`booking_engine/db/whatsapp_thread_queries.py`).
+
+**Phone numbers are matched with the leading `+` stripped on both sides**
+(`ltrim(phone,'+')`, in the SQL and nowhere else). Meta reports `from` as bare
+E.164 while the webapp holds whatever the customer record says, usually with
+the plus — either spelling addresses the same thread, and the routes forward
+the caller's spelling verbatim rather than normalising a second time.
+
+### The 24h service window
+
+Meta permits **free-form** (non-template) messages only within 24 hours of the
+customer's *last inbound message*. The window resets on every customer message;
+our own sends do not extend it, and neither does an echo from the owner's own
+WhatsApp Business App (`outbound_messages.origin = 'phone'`) — that is not a
+customer message, which is why the window is computed from `inbound_messages`
+alone. At exactly 24h it is **closed** (`now < expires`, strictly).
+
+Outside it, a send fails at Meta with **`131047`**, which reaches the owner as
+an opaque provider error they cannot act on. So `POST /whatsapp/reply` checks
+the window **before** the Graph call, never after: a closed window returns a
+named refusal and makes no Graph request at all. Reaching a customer after the
+window means a template (a campaign), not a reply.
+
+### `GET /whatsapp/threads/{shop_id}`
+
+One row per phone the shop has heard from, newest first. Keyed on **inbound**,
+so a customer who was only ever messaged by a campaign and never replied does
+not appear — there is no window on that phone and nothing there to answer.
+
+One query, not one per thread: the session's routed intent is derived inside
+the list SQL, because this is the Inbox's first screen.
+
+Each row: `phone`, `customer_id`, `last_inbound`, `last_message` (a voice note
+reads as its transcript), `message_type`, `unread`, `last_outbound`,
+`window_expires_at`, `intent` (the **session's** verdict, not the last
+message's), `escalated` (the newest WhatsApp session's `outcome = 'escalated'`
+— see below), plus two fields computed per row from the pure helpers:
+
+| field | meaning |
+|---|---|
+| `window_open` | is a free-form reply legal right now |
+| `needs_attention` | belongs in "Da gestire": the session was escalated, or its intent is unrouted / outside `wa_routing.WHITELIST` — fails toward the human |
+| `agent_active` | is the booking agent answering this thread |
+| `agent_reason` | why it is not, when it is not — `null` while it is |
+
+`agent_active`/`agent_reason` come from `wa_agent.agent_status`, which is
+`may_speak` with one verdict renamed: the **same rule the agent itself obeys**,
+so the Inbox cannot claim the agent is handling a thread it has stood down on.
+The row supplies `agent_enabled` (LEFT JOIN on `shop_config` — no row is no
+opt-in), `escalated`, `outcome_reason` and `human_replied_at`; that last one is
+scoped to the newest session's `started_at`, because a reply the owner sent last
+month must not read as them holding today's conversation. The webapp renders one
+sentence per reason (`src/lib/whatsapp/agent.ts`), never a generic "the
+assistant is off" — see the refusal table above for why.
+
+`turn_limit` never appears here: it is the refusal that marks the session
+escalated, so by read time it presents as `escalated`, which is the true thing
+to say. Four reasons reach the owner, not five.
+
+### `POST /whatsapp/threads/{shop_id}/{phone}/takeover`
+
+"Rispondo io": the owner takes one conversation off the agent. Marks the
+session `outcome = 'escalated'` with `outcome_reason = 'human_took_over'`
+(`wa_agent.TAKEOVER_REASON`), opening a session first if the agent has not
+spoken on the thread yet — with no row there would be nothing to mark, and the
+next inbound message would find a clean slate and answer anyway.
+
+The distinct `outcome_reason` is what lets the read side tell the owner pressing
+the button apart from the agent giving up. Both are the same `escalated` row;
+"hai preso tu questa conversazione" and "l'assistente te l'ha passata" are not
+the same sentence.
+
+**There is no endpoint to hand a thread back**, deliberately. The agent resumes
+by itself on the customer's next conversation (a new session, past
+`wa_routing.SESSION_GAP`), which is what "resume" can honestly mean — and
+un-escalating *this* session would put the agent back into a thread a person is
+in the middle of. It could not work fully in any case: `may_speak` also silences
+on `human_replied_at`, derived from an outbound row that cannot be unsent, so a
+resume button would clear the escalation, change nothing visible, and read as
+broken.
+
+`escalated` is joined from the newest `voice_agent.calls` row for that phone
+with `channel = 'whatsapp'`. `needs_attention` has always read the field;
+nothing wrote it until the booking agent existed. Without it an escalated
+thread whose intent is still `booking` reads as handled — inside the allowlist,
+therefore not the owner's problem — which is precisely the thread that most
+needs them.
+
+### The booking agent, and every reason it stays quiet
+
+On a `'route'` decision the inbound worker hands the thread to
+`services/messaging/wa_agent.py`. **Three writers share one thread and only one
+is ours** — the customer, the owner (webapp *and* the WhatsApp Business App on
+their own phone, since every sender is coexistence), and the agent. So every
+rule in that module is about the agent standing down.
+
+`may_speak(thread) -> (bool, reason)` is pure — a dict in, a verdict out, no
+clock and no database, the same shape as `wa_routing.decide` and
+`number_health.decide_health`. It is an **allowlist of conditions**, so an
+unknown thread state defaults to silence rather than to speech; a blank dict
+falls out at the first rule. Every refusal carries a distinct reason, because
+"the agent is quiet and nobody can say why" is the state that makes an owner
+switch it off:
+
+| reason | meaning |
+|---|---|
+| `not_opted_in` | `voice_agent.shop_config.whatsapp_agent_enabled` is false. **The default** — a salon that has not asked for a robot must never get one |
+| `intent_not_whitelisted` | the session's intent is outside `wa_routing.WHITELIST`. Opted in is not enough; a complaint is a person's |
+| `escalated` | the session was handed to a human and stays handed over — the *next* message does not run a turn either |
+| `human_took_over` | the owner replied, from the webapp (`kairo`) or their phone (`phone`). Not marked escalated: they are already handling it |
+| `turn_limit` | `MAX_SESSION_TURNS` (12) reached **in this session**. A booking is four or five exchanges; twelve means the conversation is not going where the agent thinks it is, and the honest move is a person. The one refusal here that is escalated, because it is something happening rather than a thread that was never the agent's |
+
+**The debounce is a sleep plus a re-read, not a per-thread timer.**
+`DEBOUNCE_SECONDS = 2.0`: people send "ciao" / "volevo prenotare" / "per
+sabato" as three messages, and answering each is three replies to one thought
+and three billed turns. Every task sleeps, then asks the database one question —
+"is my message still the newest on this thread?" — whose answer is the same for
+whoever asks it. The last message wins because it is last, not because anyone
+coordinated. A timer would need a mutable per-thread registry plus cancellation,
+and two Fly machines would each keep their own copy, so it would not actually
+debounce across them. It **batches rather than drops**: the surviving task reads
+the whole session back out of the database, so all three messages reach the
+agent — only the two earlier *turns* are dropped.
+
+**An escalation sends nothing.** `text` is empty whenever `escalate` is true,
+and the empty basket (402 from the gateway) arrives as `reason='no_credit'` and
+takes the same path: silence, and the thread lands in the owner's queue via
+`outcome = 'escalated'`.
+
+### `GET /whatsapp/threads/{shop_id}/{phone}`
+
+The timeline: inbound and outbound merged, oldest first. Each message carries
+`direction` (`in`/`out`), `at`, `text`, `message_type`, `origin` on outbound
+(`kairo` = we sent it, `phone` = the owner answered from the Business App),
+`status`, `intent`, `read_at`.
+
+**Reading the thread is what marks it read** — the two are the same act, so
+there is no separate mark-read endpoint for the webapp to forget to call. The
+update is idempotent (`read_at IS NULL`), and an unknown phone returns an empty
+`messages` list rather than a 404: "this customer has never written" is an
+answer, not an error.
+
+### `POST /whatsapp/reply`
+
+```json
+{ "shop_id": "…", "phone": "+393331112222", "body": "Ciao, a domani!" }
+```
+
+Sends one free-form text now (synchronous, like receipts — not the campaign
+queue) and records it in `outbound_messages` with `origin = 'kairo'`,
+`template_name` and `campaign_key` NULL. The campaign idempotency index is
+partial on both of those, so it does not apply here and the owner may
+legitimately send the same words twice.
+
+Returns `{"data": {"sent": true, "provider_sid": "wamid…"}}`. Refusals come
+back 200 with `{"ok": false, "error": …}`:
+
+| error | when |
+|---|---|
+| `empty_body` | blank or whitespace-only — Graph rejects it, and refusing locally names the problem |
+| `sender_offline` | no sender row, or its status isn't `online` |
+| `session_window_closed` | the 24h window has passed (or the customer never wrote) — **no Graph call is made** |
+
+If Meta accepts the send but recording it fails, the response is
+`{"sent": true, "provider_sid": …, "recorded": false}` and the loss is logged
+(`whatsapp.reply_not_recorded`). The customer's phone already has the message;
+reporting failure would have the owner send it a second time.
+
+**No credit debit**, like every other send on this channel — see
+[Billing](#billing).
+
+---
+
 ## Receipts (Smart Receipt)
 
 ### `POST /whatsapp/receipts`
@@ -330,9 +507,37 @@ Always answers **200** on a genuine request. Meta retries on anything else and d
 |---|---|
 | `messages` → `statuses[]` | `sent`/`delivered`/`read`/`failed` written to `outbound_messages` by `wamid` |
 | `messages` → `messages[]` | Inbound reply persisted to `whatsapp.inbound_messages` (migration 17) — campaign measurement ("replied within 72h", design §9) reads it; a reply is matched back by phone (`from_phone` == the sent message's `to_phone`) |
+| `smb_message_echoes` → `message_echoes[]` | A message the **owner** sent from their own WhatsApp Business App, recorded as an `outbound_messages` row with `origin = 'phone'` (migration 24) |
 | `message_template_status_update` | Meta's verdict, applied to `(shop_id, name)` — **never by name alone**, since every salon's copy carries the same name |
 
+Any other field is ignored and still answers 200 — Meta adds fields (`history`, `smb_app_state_sync`) to a subscription without asking.
+
 Template verdicts arrive here within minutes instead of on the next hourly tick. The tick's poll survives as a **reconciler**: a missed webhook would otherwise leave a template `pending` forever, blocking every send for that shop and looking like nothing at all.
+
+### Deduplication: Meta replays webhooks
+
+`inbound_messages.wa_message_id` (Meta's `wamid`, migration 24) is the dedup key, and the insert is `ON CONFLICT (wa_message_id) WHERE wa_message_id IS NOT NULL DO NOTHING RETURNING *`. A replay therefore returns **no row**, which is also how the caller knows to skip everything downstream — the dedup and "have we already processed this?" are the same question, answered in one statement with no check-then-act race. Without it a retry is a second bubble in the thread and a second AI classification that costs real money.
+
+**The `WHERE` in that clause is not optional.** `inbound_messages_wa_id_uniq` is a *partial* index; Postgres cannot infer a partial index unless the `ON CONFLICT` clause repeats its predicate, and the statement fails outright with *"no unique or exclusion constraint matching the ON CONFLICT specification"* — the message is lost and the webhook 500s back to Meta. Verified against a real Postgres, both directions. See `CLAUDE.md` 2026-07-18 and 2026-07-21, which are the same inference failure twice.
+
+A message Meta sends without an `id` conflicts with nothing and always records, which is why the column is nullable and the index partial.
+
+### Echoes from the owner's phone
+
+Every sender is `coexistence`: the number is still live in the WhatsApp Business App on the owner's phone and they answer from there. Meta reports those under its own field, `smb_message_echoes`, whose `value.message_echoes[]` entries carry `from` (the business), `to` (the customer), `id`, `timestamp`, `type` and the type-specific body. Recorded so the thread is a whole conversation rather than Kairo's half of one.
+
+Two rules, both load-bearing:
+
+- **An echo does not extend the 24h service window.** That window is `max(received_at)` over *customer* inbound alone, and `record_echo` never touches `inbound_messages.received_at`. An echo that extended it would let us send into a conversation Meta considers closed — which comes back as an opaque provider error long after the cause.
+- **An echo clears the unread state** on that thread (`read_at`). The owner has already answered; the Inbox must not keep asking them to.
+
+Echo dedup is best-effort: the wamid goes into `provider_sid`, which has only a plain index behind it, so a genuinely concurrent retry could still double-write. A duplicate bubble is cosmetic; the inbound path, where a duplicate costs an AI call, is the one a unique index guards.
+
+> **Unverified against a live WABA.** The echo payload shape is confirmed from Meta's Coexistence documentation as mirrored by two BSPs (Gupshup, 360dialog), not from a real webhook — no connected WABA exists yet. The parser is `.get()` chains that degrade to empty throughout, and the handler accepts both `smb_message_echoes` and `message_echoes` as the field name, because accepting a name Meta never sends costs nothing and missing the one it does send costs every echo.
+
+### Interactive replies
+
+A tap on a button or list we sent arrives as `type: "interactive"` with `interactive.button_reply.id` (or `list_reply.id`). That id is one **we** defined, so it *is* the intent: it is stored straight into `inbound_messages.intent` with `confidence = 1.0`, and the reply's `title` is stored as `body` so the thread shows the customer what they saw themselves tap. No model call, no cost, no possibility of a hallucinated intent. Anything typed arrives with both columns NULL, for the classifier.
 
 ### Opt-out vs. frequency cap
 
@@ -427,15 +632,16 @@ New `suppressed_reason` values: `recently_contacted`,
 
 ## The hourly tick
 
-`POST /messaging/tick` ([Number Provisioning](number-provisioning.md)) has two WhatsApp stages, each independently wrapped so one failure can't suppress the others:
+`POST /messaging/tick` ([Number Provisioning](number-provisioning.md)) has four WhatsApp stages, each independently wrapped so one failure can't suppress the others:
 
 - `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver, and carries the **only retry of the propagation gate**: live senders missing part of the catalogue — **or holding an outdated body** — are pushed once Kairo's own copy of that exact text turns `approved`. The worklist (`list_senders_needing_templates`) is keyed on `template_key|body_hash` per catalogue entry rather than on a count of rows, which fixed two things at once: a count could not see a body that changed under an unchanged name, and it was inflated by templates outside the catalogue, so a shop holding `purchase_receipt_1` and missing a real template counted as complete and was never revisited. Kairo's WABA is asked once per run, not once per shop — the answer is identical for everyone. An empty gate (unconfigured, or a Graph error) skips the stage entirely rather than pushing on a guess. Counts add `propagated`, `edited` and `approved_on_kairo`.
 - `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed` (`no_consent`, `opted_out`, `recently_contacted`), `failed`, `deferred` (over daily cap, retried in an hour), `rate_capped` (Meta 131049, retried in 24h), `requeued` (claimed but never sent, recovered from a crashed tick).
+- `whatsapp_nudges` — **the 20h nudge**. Meta's service window permits free-form messages only within 24h of the customer's *last* message, and it resets every time they write — so the only thing truly forbidden is speaking first after 24h of silence, which needs an approved template. One last free message inside the window (`NUDGE_AFTER_HOURS = 20`, `wa_nudge.NUDGE_BODY`) invites the customer to write back, and their reply is what reopens it. `should_nudge` is pure, `now` an argument, and refuses on every one of: shop not opted in, thread escalated, the owner already replied (webapp or phone echo), the customer replied after the agent (the thread is waiting on *us*), the agent never spoke, already nudged since their last message, and the window already closed. "At most once" is **derived from a row**, not a column: the nudge is recorded like any other agent reply (`origin='agent'`, `preview = NUDGE_BODY`) and `list_nudge_candidates` reads that back — so it survives a restart, and there is no second fact about the same send to keep true. Counts: `nudged`, `errors`.
 
 ---
 
 ## Out of scope
 
-- Inbound replies are **persisted** (migration 17) and read by campaign measurement, but nothing answers them. A reply opens Meta's 24h session window, inside which free-form messages *are* allowed — the obvious next phase, and the only path to genuinely free-form personalised copy.
+- Inbound replies are **persisted** (migration 17), read by campaign measurement, and now readable and answerable by the owner through [Threads](#threads-the-two-way-inbox) — but nothing answers them *automatically*. An agent that replies on the salon's behalf is the next phase; `POST /whatsapp/reply` is the same send path it will use.
 - Contact / chat-history sync (`POST /{phone_number_id}/smb_app_data`). One-shot and irreversible per onboarding, and there is nowhere to put the data yet.
 - The LLM template-picker that would *choose* among the marketing templates (`promo_v1`/`winback_v1`/`rebook_v1`/`promo_manual_v1`) per customer isn't built — the webapp names the `template_key` explicitly today.

@@ -53,7 +53,7 @@ async def _call_tool(name: str, arguments: dict) -> list[types.ContentBlock]:
         pass
     result = await execute_tool(
         name, arguments, token=token,
-        secret=settings.openai_tool_secret,
+        secret=settings.voice_agent_tool_secret,
         app=_app_ref,
     )
     return [types.TextContent(type="text", text=json.dumps(result))]

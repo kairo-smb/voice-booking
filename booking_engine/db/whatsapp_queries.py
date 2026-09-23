@@ -679,75 +679,201 @@ async def campaign_progress(*, shop_id: UUID, campaign_key: str) -> dict:
 
 
 async def customer_campaign_messages(*, shop_id: UUID, customer_id: UUID) -> list[dict]:
-    """Everything a customer was part of: every message actually sent to them,
-    plus the campaigns they were assigned to but never received (holdout arm).
+    """Everything on file about this customer's WhatsApp conversation: every
+    message actually sent to them, the campaigns they were assigned to but
+    never received (holdout arm), and — now that they write back — every
+    message *they* sent us.
 
     This is the read behind the webapp's Anagrafiche → "Campagne" tab, which
-    doubles as the GDPR subject-access artifact: "what did you send me, and
-    when". The goal lives in market_intel.campaigns — the campaign data owner —
-    and is linked through campaign_key = campaign id, which is the campaign_key
+    doubles as the GDPR subject-access artifact: "what do you hold about me".
+    A response that showed only our side of a conversation was not one — half
+    of it is personal data the customer authored themselves, including a voice
+    note's words (`direction = 'in'`, `body` is `coalesce(transcript, body)`:
+    the transcript is what we actually hold, and leaving it out would show
+    "we have nothing" for a message we have the words of).
+
+    The goal lives in market_intel.campaigns — the campaign data owner — and
+    is linked through campaign_key = campaign id, which is the campaign_key
     the webapp passes when it enqueues a campaign. Marketing-engine's schema is
     a read here, exactly as this repo already reads business_app_core.
+
+    One UNION ALL, not three Python-merged queries: `inbound_messages` has no
+    campaign to join, so ordering the three shapes consistently belongs in SQL
+    rather than as a second, separate sort rule on the Python side. Every
+    typed NULL is deliberate — an untyped NULL in a UNION ALL is "could not
+    determine data type of parameter" the moment two branches disagree, the
+    same class of bug CLAUDE.md's 2026-07-18/2026-07-21 entries record for
+    ON CONFLICT predicates.
     """
-    messages = await execute(
+    return await execute(
         """
         SELECT
           om.id AS message_id,
           om.campaign_key,
           om.preview,
+          om.preview AS body,
           om.status AS delivery_status,
           om.sent_at,
           om.created_at,
           om.suppressed_reason,
           c.goal,
           c.personalization,
-          'send' AS arm
+          'send' AS arm,
+          'out' AS direction
         FROM whatsapp.outbound_messages om
         LEFT JOIN market_intel.campaigns c
           ON c.shop_id = om.shop_id AND c.id::text = om.campaign_key
         WHERE om.shop_id = $1 AND om.customer_id = $2
-        """,
-        shop_id, customer_id,
-    )
-    holdout = await execute(
-        """
+
+        UNION ALL
+
         SELECT
           NULL::uuid AS message_id,
           cr.campaign_id::text AS campaign_key,
           cr.preview,
+          cr.preview AS body,
           NULL::text AS delivery_status,
           NULL::timestamptz AS sent_at,
           c.created_at,
           NULL::text AS suppressed_reason,
           c.goal,
           c.personalization,
-          cr.arm
+          cr.arm,
+          NULL::text AS direction
         FROM market_intel.campaign_recipients cr
         JOIN market_intel.campaigns c ON c.id = cr.campaign_id
-        WHERE cr.customer_id = $1 AND c.shop_id = $2 AND cr.arm = 'holdout'
+        WHERE cr.customer_id = $2 AND c.shop_id = $1 AND cr.arm = 'holdout'
+
+        UNION ALL
+
+        SELECT
+          i.id AS message_id,
+          NULL::text AS campaign_key,
+          coalesce(i.transcript, i.body) AS preview,
+          coalesce(i.transcript, i.body) AS body,
+          NULL::text AS delivery_status,
+          NULL::timestamptz AS sent_at,
+          i.received_at AS created_at,
+          NULL::text AS suppressed_reason,
+          NULL::text AS goal,
+          NULL::text AS personalization,
+          NULL::text AS arm,
+          'in' AS direction
+        FROM whatsapp.inbound_messages i
+        WHERE i.shop_id = $1 AND i.customer_id = $2
+
+        ORDER BY created_at DESC
         """,
-        customer_id, shop_id,
+        shop_id, customer_id,
     )
-    rows = messages + holdout
-    rows.sort(key=lambda r: (r.get("created_at") or ""), reverse=True)
-    return rows
 
 
-async def record_inbound(*, shop_id: UUID, from_phone: str, body: str, message_type: str) -> None:
-    """Persist one inbound reply.
+async def record_inbound(
+    *,
+    shop_id: UUID,
+    from_phone: str,
+    body: str,
+    message_type: str,
+    wa_message_id: str | None = None,
+    intent: str | None = None,
+    confidence: float | None = None,
+) -> dict | None:
+    """Persist one inbound reply. Returns the row, or None if it is a replay.
 
     The webhook previously logged and discarded these; campaign measurement
     (design §9, "replies within 72h") needs them as a queryable signal. A reply
     is linked back to the message it answers by phone — from_phone of the reply
     equals to_phone of the sent message — so no sender identity is needed here.
+
+    `wa_message_id` is Meta's `wamid`, and the dedup key: Meta retries a webhook
+    it believes failed, and without this a retry is a second bubble in the
+    thread and a second AI classification that costs real money. Returning
+    None on the conflict answers "have we already processed this?" in the same
+    statement — one question, one round trip, no check-then-act race.
+
+    **The ON CONFLICT predicate is not optional.** `inbound_messages_wa_id_uniq`
+    is a *partial* index (`WHERE wa_message_id IS NOT NULL`, migration 24), and
+    Postgres cannot infer a partial index unless the clause repeats its
+    predicate — without it the statement fails outright with "no unique or
+    exclusion constraint matching the ON CONFLICT specification". This repo has
+    been bitten by exactly that twice; see CLAUDE.md 2026-07-18 and 2026-07-21.
+    A NULL id therefore conflicts with nothing, which is the point: a message
+    Meta sent us without an id still gets recorded, every time.
+
+    `intent`/`confidence` are filled here only for a tap on a button we
+    defined — the id *is* the intent, so there is nothing for a model to rule
+    on. Everything typed arrives with both NULL, for the classifier.
     """
+    return await execute_one(
+        """
+        INSERT INTO whatsapp.inbound_messages
+          (shop_id, from_phone, body, message_type, wa_message_id, intent, confidence)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (wa_message_id) WHERE wa_message_id IS NOT NULL DO NOTHING
+        RETURNING *
+        """,
+        shop_id, from_phone, body, message_type, wa_message_id, intent, confidence,
+    )
+
+
+async def record_echo(
+    *,
+    shop_id: UUID,
+    to_phone: str,
+    from_number: str,
+    body: str,
+    wa_message_id: str | None = None,
+) -> dict | None:
+    """Record a message the owner sent from their own WhatsApp Business App.
+
+    Every sender is coexistence: the number is still live on the owner's phone
+    and they answer from there, which Meta reports on its own webhook field.
+    Stored as an outbound row with `origin = 'phone'` (migration 24) so the
+    thread is a whole conversation rather than our half of one.
+
+    Two things it deliberately is not:
+
+    - It is **not** a send of ours: no template, no campaign, no provider
+      status lifecycle to follow. It lands as `sent`, once, and stays there.
+    - It does **not** touch `inbound_messages`, and so cannot extend the 24h
+      service window. That window is driven by *customer* inbound alone; an
+      echo that extended it would let us send into a conversation Meta
+      considers closed, which comes back as an opaque provider error long
+      after the cause.
+
+    It does clear the unread state on the thread — the owner has answered, and
+    the Inbox must not keep asking them to.
+
+    Dedup is best-effort: `provider_sid` carries the wamid but has only a plain
+    index behind it, so a genuinely concurrent retry could still double-write.
+    A duplicate bubble in a thread is cosmetic; the inbound path, where a
+    duplicate costs an AI call, is the one guarded by a unique index.
+    """
+    row = await execute_one(
+        """
+        INSERT INTO whatsapp.outbound_messages
+          (shop_id, to_phone, from_number, preview, provider_sid,
+           origin, status, sent_at)
+        SELECT $1, $2, $3, $4, $5::text, 'phone', 'sent', now()
+        WHERE $5::text IS NULL OR NOT EXISTS (
+          SELECT 1 FROM whatsapp.outbound_messages
+          WHERE provider_sid = $5::text AND origin = 'phone'
+        )
+        RETURNING *
+        """,
+        shop_id, to_phone, from_number, body, wa_message_id or None,
+    )
     await execute_void(
         """
-        INSERT INTO whatsapp.inbound_messages (shop_id, from_phone, body, message_type)
-        VALUES ($1, $2, $3, $4)
+        UPDATE whatsapp.inbound_messages
+        SET read_at = now()
+        WHERE shop_id = $1
+          AND ltrim(from_phone, '+') = ltrim($2, '+')
+          AND read_at IS NULL
         """,
-        shop_id, from_phone, body, message_type,
+        shop_id, to_phone,
     )
+    return row
 
 
 async def withdraw_marketing_consent(customer_id: UUID) -> None:
@@ -772,3 +898,70 @@ async def withdraw_marketing_consent(customer_id: UUID) -> None:
         """,
         customer_id,
     )
+
+
+# ------------------------------------------------------------------- retention
+#
+# One statement, both directions, bounded by threads.
+#
+# **Both halves go together or neither does.** Half a conversation is still
+# personal data and is no longer readable as a conversation, so the two DELETEs
+# are CTEs of a single statement: they share one snapshot of `expired` and
+# commit together. Limiting each table independently would not do — a batch
+# that happened to fill up on inbound would leave that thread's outbound behind
+# until some later run.
+#
+# The batch is therefore counted in **threads**, not rows: the unit that must
+# not be split is the conversation. Within a chosen thread every expired row on
+# both sides goes, and everything newer than the cutoff stays — that is the
+# policy (a conversation truncated at six months), not a halving.
+#
+# Re-running immediately is a no-op by construction: the predicate is a
+# timestamp comparison against rows that no longer exist.
+#
+# The cutoff is `<=`, matching `wa_retention.is_expired`'s `>=` — a row that
+# has reached exactly six months has had its six months.
+_PURGE = """
+WITH expired AS (
+  SELECT shop_id, ltrim(from_phone, '+') AS key
+    FROM whatsapp.inbound_messages
+   WHERE received_at <= $1
+  UNION
+  SELECT shop_id, ltrim(to_phone, '+') AS key
+    FROM whatsapp.outbound_messages
+   WHERE coalesce(sent_at, created_at) <= $1
+   ORDER BY 1, 2
+   LIMIT $2
+), gone_in AS (
+  DELETE FROM whatsapp.inbound_messages i
+   USING expired e
+   WHERE i.shop_id = e.shop_id
+     AND ltrim(i.from_phone, '+') = e.key
+     AND i.received_at <= $1
+  RETURNING 1
+), gone_out AS (
+  DELETE FROM whatsapp.outbound_messages o
+   USING expired e
+   WHERE o.shop_id = e.shop_id
+     AND ltrim(o.to_phone, '+') = e.key
+     AND coalesce(o.sent_at, o.created_at) <= $1
+  RETURNING 1
+)
+SELECT (SELECT count(*) FROM expired)  AS threads,
+       (SELECT count(*) FROM gone_in)  AS inbound,
+       (SELECT count(*) FROM gone_out) AS outbound
+"""
+
+
+async def purge_expired_threads(*, cutoff, threads: int) -> dict:
+    """Delete every message older than `cutoff`, for at most `threads` threads.
+
+    Returns {'threads', 'inbound', 'outbound'} — how much this run actually
+    removed, which is what the tick reports.
+
+    `voice_agent.calls` is deliberately untouched: that row is the business
+    record of an appointment being made, it outlives the chat that produced it,
+    and it is not this policy's to expire.
+    """
+    row = await execute_one(_PURGE, cutoff, threads)
+    return dict(row or {"threads": 0, "inbound": 0, "outbound": 0})

@@ -1,6 +1,6 @@
 # Voice Tools
 
-The 12 tools OpenAI calls during a live session, over MCP (`/mcp`, dispatched in-process — see [Architecture](../architecture.md#call-flow)) or directly via their own `/voice/tools/*` routes. All require `Authorization: Bearer <OPENAI_TOOL_SECRET>` (`require_tool_token`). Tool semantics/rules: [Voice Agent Logic](../voice-agent-logic.md).
+The 12 tools OpenAI calls during a live session, over MCP (`/mcp`, dispatched in-process — see [Architecture](../architecture.md#call-flow)) or directly via their own `/voice/tools/*` routes. All require `Authorization: Bearer <VOICE_AGENT_TOOL_SECRET>` (`require_tool_token`). Tool semantics/rules: [Voice Agent Logic](../voice-agent-logic.md).
 
 > **Maintenance rule:** a tool added/removed/changed (in `safety_layer.py` or its route file) updates this file in the same change. See [../README](../README.md#maintenance-rule).
 

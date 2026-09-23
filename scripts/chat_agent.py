@@ -115,7 +115,7 @@ async def chat(shop_id: UUID, caller: str, messages: list[str], live: bool) -> N
             model=settings.openai_realtime_model,
         )
         runner = ToolRunner(shop_id=shop_id, call_id=call_id,
-                            secret=settings.openai_tool_secret, live=live)
+                            secret=settings.voice_agent_tool_secret, live=live)
 
         url = f"wss://api.openai.com/v1/realtime?model={settings.openai_realtime_model}"
         headers = {"Authorization": f"Bearer {settings.openai_api_key}"}

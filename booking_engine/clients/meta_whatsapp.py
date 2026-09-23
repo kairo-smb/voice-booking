@@ -369,6 +369,91 @@ async def delete_template(*, waba_id: str, name: str, token: str) -> None:
 
 # ---------------------------------------------------------------------- send
 
+async def send_text(*, phone_number_id: str, to: str, body: str, token: str) -> str:
+    """Free-form text. Returns Meta's `wamid`.
+
+    Legal only inside the 24h customer-initiated service window — the caller
+    checks that, not this function. This is also the conversational agent's
+    send path (a reply, not a template), so a second check in here would just
+    be a second place for that rule to get out of sync with the first.
+    """
+    body_resp = await _request(
+        "POST", f"{phone_number_id}/messages", token=token,
+        json_body={
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "text",
+            "text": {"body": body},
+        },
+    )
+    messages = body_resp.get("messages") or [{}]
+    return messages[0].get("id", "")
+
+
+# Meta's own ceiling on a reply-button message. A fourth button is silently
+# dropped by Graph rather than rejected, which is worse than refusing here —
+# the menu would be missing an option and nobody would notice why.
+MAX_REPLY_BUTTONS = 3
+MAX_BUTTON_TITLE = 20
+
+
+async def send_interactive(
+    *, phone_number_id: str, to: str, body: str,
+    buttons: list[tuple[str, str]], token: str,
+) -> str:
+    """A reply-button menu. Returns Meta's `wamid`.
+
+    `buttons` is `[(id, title)]` — the id is opaque to Meta and comes back
+    unchanged on the webhook as `interactive.button_reply.id`, which is what
+    the inbound handler routes on. A title over Meta's 20-character limit is
+    truncated rather than rejected, since the caller's copy is fixed English/
+    Italian strings, not user input — silent truncation of our own copy is a
+    safer failure than refusing to send the menu at all.
+    """
+    if len(buttons) > MAX_REPLY_BUTTONS:
+        raise ValueError(f"at most {MAX_REPLY_BUTTONS} reply buttons, got {len(buttons)}")
+    body_resp = await _request(
+        "POST", f"{phone_number_id}/messages", token=token,
+        json_body={
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body},
+                "action": {
+                    "buttons": [
+                        {"type": "reply",
+                         "reply": {"id": bid, "title": title[:MAX_BUTTON_TITLE]}}
+                        for bid, title in buttons
+                    ],
+                },
+            },
+        },
+    )
+    messages = body_resp.get("messages") or [{}]
+    return messages[0].get("id", "")
+
+
+async def get_media(*, media_id: str, token: str) -> bytes:
+    """Download an inbound media attachment. Two Graph hops, both required.
+
+    The first resolves the media id to a short-lived download URL; the second
+    fetches the bytes from that URL, carrying the same bearer token Graph
+    requires on the download itself. The URL is never persisted — it expires
+    within minutes, so a caller that stores it instead of the bytes would work
+    once and then fail silently later.
+    """
+    meta_info = await _request("GET", media_id, token=token)
+    url = meta_info.get("url") or ""
+    if not url:
+        raise MetaError(None, "media_url_missing")
+    async with AsyncClient(timeout=_TIMEOUT) as client:
+        response = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+        response.raise_for_status()
+        return response.content
+
+
 async def send_template(
     *, phone_number_id: str, token: str, to: str,
     name: str, language: str, variables: dict[str, str],
