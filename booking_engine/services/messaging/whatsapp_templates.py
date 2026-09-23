@@ -326,14 +326,36 @@ def body_hash(body: str) -> str:
 
 
 def catalogue_fingerprints() -> list[str]:
-    """`key|hash` per catalogue entry — the worklist key for the hourly sweep.
+    """`key|hash` per catalogue entry — the body-with-variables half of the worklist.
 
     One array covers both questions the sweep has to ask ("is a template
-    missing?" and "is one stale?") in a single count, and being keyed on the
-    catalogue is also what stops non-catalogue rows (the receipt) from padding
-    that count until a shop missing a real template looks complete.
+    missing?" and "is one stale?") in a single count. The catalogue alone is
+    not the push list any more: the document templates join it in
+    `propagation_fingerprints()`, which is what the sweep actually passes on.
     """
     return [f"{key}|{body_hash(tpl.body)}" for key, tpl in CATALOGUE.items()]
+
+
+def document_fingerprints() -> list[str]:
+    """`key|hash` per DOCUMENT_TEMPLATES entry — the receipt's half of the worklist.
+
+    Same `key|body_hash` shape as the catalogue's, built generically from the
+    dict so a second document template joins the push list without a new
+    function. The receipt's body is the compared payload: the document header
+    is opaque (`header_handle`), only the BODY text is reviewable.
+    """
+    return [f"{key}|{body_hash(tpl.body)}" for key, tpl in DOCUMENT_TEMPLATES.items()]
+
+
+def propagation_fingerprints() -> list[str]:
+    """Catalogue + document templates — what the hourly sweep actually pushes.
+
+    The catalogue is the push list and so are the document templates
+    (`purchase_receipt_1`), so a shop missing the receipt — or holding a
+    stale one — comes back on the worklist exactly like one missing a
+    marketing template. `catalogue_fingerprints()` alone would undercount.
+    """
+    return catalogue_fingerprints() + document_fingerprints()
 
 
 def clean_variable(value: str) -> str:

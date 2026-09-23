@@ -6,6 +6,63 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-23 — `purchase_receipt_1` propagates proactively: the receipt rides the sweep
+
+**The receipt was the one template propagation waited for a receipt send to
+need.** It was created on a customer WABA lazily, inside
+`ensure_receipt_template`, the first time the webapp asked to send one — so
+the first receipt after onboarding either waited on that synchronous send or
+failed it, and the hourly sweep never went back for the template it was
+already reconciling everything else with. Since Kairo's own copy is approved
+with a body matching `RECEIPT_TEMPLATE_BODY` (Meta id 1112279824574521) and
+`META_RECEIPT_SAMPLE_URL` is set, nothing blocked it but the loop it wasn't
+in.
+
+**Now the sweep pushes it like any catalogue entry.** `DOCUMENT_TEMPLATES` has
+its own loop in `ensure_templates` with the identical gate/skip/adopt rules —
+the gate (`approved_on_kairo_waba`) fetches the receipt by its verbatim preset
+name (never `{locale}_{key}`) and requires approved **plus** a body match; a
+missing row is created via `create_document_template` with
+`META_RECEIPT_SAMPLE_URL` (missing URL is reported as `not_ready`, never a
+guaranteed-rejection create, and never aborts the catalogue results); a stale
+body is edited body-only; a create refusal adopts Meta's copy by name. The
+worklist is now keyed on `propagation_fingerprints()` = catalogue +
+document fingerprints, which **reverses the 2026-09-02 "padding" semantics on
+purpose**: a shop holding only the receipt no longer *pads* a count — a shop
+holding the whole catalogue but missing the receipt now comes back on the
+worklist, and one whose receipt hash matches doesn't. (The original padding
+bug stays dead: the count is matched against `key|hash` pairs, never rows.)
+
+**`ensure_receipt_template` is unchanged and stays.** The lazy send-time path
+is now a self-heal for a shop the sweep missed rather than the only way the
+template exists. The "one manual step" narrative in the 2026-09-02 entry
+below still holds — the operator step it described (`push-templates` for
+Kairo's own WABA + the sample URL) is the same gate the sweep reads; after
+this change nothing per-salon is manual for the receipt either.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **830 passed, 24 skipped, 0 failed** (up from
+820/24: ten new tests — gate includes/excludes/pends the receipt, document
+create/edit/pending/not-ready/missing-sample-url loop, verbatim-name fetch,
+worklist SQL shape pin). No lint/typecheck is configured in this repo; no Meta
+call made. No SQL or migration touched — `list_senders_needing_templates` was
+already fingerprint-array-driven and needed no change.
+
+- **The body-only edit preserving the DOCUMENT header is asserted, never
+  tested.** That a body-only `POST /{message_template_id}` edit keeps the
+  header component intact is Meta-side Graph semantics, claimed in three
+  places (`whatsapp_onboarding.py`, `scripts/kairo_waba.py`,
+  `docs/knowledge/api/whatsapp.md`) and pinned by no test. Operational rule:
+  the first real change to `RECEIPT_TEMPLATE_BODY` must be verified live —
+  run `scripts/kairo_waba.py push-templates`, confirm on Kairo's WABA (via
+  `templates` / Graph GET) that the header component survived the edit —
+  **before** letting the sweep fan the new body out to customer WABAs.
+- **There is no retire path for document templates.** `retire_template`
+  refuses any key not in `CATALOGUE`, so `purchase_receipt_1` cannot be
+  retired through the scripted fan-out. Removing it from `DOCUMENT_TEMPLATES`
+  stops future propagation only; deleting it from customer WABAs (Meta's
+  30-day name lock) stays manual.
+
 ## 2026-09-23 — This file is now AGENTS.md
 
 Renamed from CLAUDE.md so the same tool-agnostic developer guide name works

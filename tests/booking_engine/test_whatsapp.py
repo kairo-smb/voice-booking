@@ -35,6 +35,7 @@ class FakeSettings:
     meta_verify_token = "verify"
     meta_kairo_waba_id = "KAIRO_WABA"
     meta_kairo_token = "kairo-token"
+    meta_receipt_sample_url = "https://example.test/sample.pdf"
 
 
 def _consenting(**over):
@@ -666,10 +667,19 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
     async def _create_template(**kw):
         calls.setdefault("create_template", []).append(kw)
         return "TPL1", "pending"
+    async def _create_document_template(**kw):
+        calls.setdefault("create_document_template", []).append(kw)
+        return "TPLDOC", "pending"
     async def _fetch_template(**kw):
         calls.setdefault("fetch_template", []).append(kw)
         # Kairo's WABA holds the catalogue's *current* body — the gate compares
-        # text, not just status, so the fake has to carry it.
+        # text, not just status, so the fake has to carry it. The receipt is
+        # fetched by Meta's preset name verbatim, not `{locale}_{key}`.
+        if kw["name"] == wt.RECEIPT_TEMPLATE_NAME:
+            return meta.TemplateStatus(
+                status="approved", rejection_reason=None,
+                body=wt.RECEIPT_TEMPLATE_BODY,
+            )
         tpl = wt.CATALOGUE.get(kw["name"].split("_", 1)[1])
         return meta.TemplateStatus(
             status="approved", rejection_reason=None,
@@ -693,6 +703,7 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
         calls.setdefault("edit_template", []).append(kw)
         return "pending"
     monkeypatch.setattr(meta, "create_template", _create_template)
+    monkeypatch.setattr(meta, "create_document_template", _create_document_template)
     monkeypatch.setattr(meta, "edit_template", _edit_template)
     monkeypatch.setattr(meta, "fetch_template", _fetch_template)
     return calls
@@ -916,7 +927,9 @@ async def test_ensure_templates_survives_one_rejected_template(monkeypatch):
     result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
 
     assert result["ok"] is True
-    assert result["created"] == 0
+    # Every catalogue entry failed; only the receipt (a separate create call)
+    # went through.
+    assert result["created"] == len(wt.DOCUMENT_TEMPLATES)
     assert set(result["failed"]) == set(wt.CATALOGUE)
     del calls
 
@@ -938,8 +951,9 @@ async def test_ensure_templates_skips_a_template_not_yet_approved_on_kairo_waba(
     result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
 
     assert result["created"] == 0
-    assert set(result["not_ready"]) == set(wt.CATALOGUE)
+    assert set(result["not_ready"]) == set(wt.CATALOGUE) | set(wt.DOCUMENT_TEMPLATES)
     assert "create_template" not in calls
+    assert "create_document_template" not in calls
 
 
 @pytest.mark.asyncio
@@ -959,8 +973,9 @@ async def test_ensure_templates_fails_closed_without_kairo_waba_configured(monke
     result = await wo.ensure_templates(shop_id=SHOP, settings=NoKairoWaba())
 
     assert result["created"] == 0
-    assert set(result["not_ready"]) == set(wt.CATALOGUE)
+    assert set(result["not_ready"]) == set(wt.CATALOGUE) | set(wt.DOCUMENT_TEMPLATES)
     assert "create_template" not in calls
+    assert "create_document_template" not in calls
     assert "fetch_template" not in calls
 
 
@@ -1023,9 +1038,11 @@ async def test_sweep_propagates_to_an_online_shop_once_kairo_gets_approved(monke
 
     counts = await wo.sweep(settings=FakeSettings())
 
-    assert counts["propagated"] == len(wt.CATALOGUE)
-    assert calls["missing_query"] == [wt.catalogue_fingerprints()]
+    assert counts["propagated"] == len(wt.CATALOGUE) + len(wt.DOCUMENT_TEMPLATES)
+    assert calls["missing_query"] == [wt.propagation_fingerprints()]
     assert [c["waba_id"] for c in calls["create_template"]] == ["WABA1"] * len(wt.CATALOGUE)
+    # The receipt rides the same worklist, created as a document template.
+    assert [c["waba_id"] for c in calls["create_document_template"]] == ["WABA1"]
 
 
 @pytest.mark.asyncio
@@ -1045,8 +1062,10 @@ async def test_sweep_asks_kairos_waba_once_not_once_per_shop(monkeypatch):
 
     await wo.sweep(settings=FakeSettings())
 
-    assert len(calls["fetch_template"]) == len(wt.CATALOGUE)
+    # One fetch per catalogue entry per locale plus one for the receipt.
+    assert len(calls["fetch_template"]) == len(wt.CATALOGUE) + len(wt.DOCUMENT_TEMPLATES)
     assert len(calls["create_template"]) == 3 * len(wt.CATALOGUE)
+    assert len(calls["create_document_template"]) == 3 * len(wt.DOCUMENT_TEMPLATES)
 
 
 @pytest.mark.asyncio
@@ -1323,7 +1342,8 @@ async def test_ensure_templates_edits_a_template_whose_body_changed(monkeypatch)
     result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
 
     assert result["edited"] == 1
-    assert result["created"] == len(wt.CATALOGUE) - 1
+    # The other catalogue keys are created, plus the receipt (its own create).
+    assert result["created"] == len(wt.CATALOGUE) - 1 + len(wt.DOCUMENT_TEMPLATES)
     edit = calls["edit_template"][0]
     # Edited in place, on the template it belongs to: delete-and-recreate would
     # take the salon off the air for Meta's 30-day name lock.
@@ -1348,7 +1368,8 @@ async def test_ensure_templates_leaves_a_current_body_alone(monkeypatch):
     )
 
     async def _get_template(shop_id, template_key):
-        tpl = wt.CATALOGUE[template_key]
+        tpl = (wt.CATALOGUE.get(template_key)
+               or wt.DOCUMENT_TEMPLATES.get(template_key))
         return {"template_key": template_key, "meta_template_id": f"id_{template_key}",
                 "status": "approved", "body_hash": wt.body_hash(tpl.body)}
     monkeypatch.setattr(wq, "get_template", _get_template)
@@ -1362,6 +1383,7 @@ async def test_ensure_templates_leaves_a_current_body_alone(monkeypatch):
     assert result == {"ok": True, "created": 0, "edited": 0,
                       "failed": [], "not_ready": []}
     assert "create_template" not in calls
+    assert "create_document_template" not in calls
 
 
 @pytest.mark.asyncio
@@ -1396,24 +1418,38 @@ async def test_ensure_templates_does_not_push_new_copy_kairo_has_not_approved(mo
     result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
 
     assert result["edited"] == 0
-    assert set(result["not_ready"]) == set(wt.CATALOGUE)
+    assert set(result["not_ready"]) == set(wt.CATALOGUE) | set(wt.DOCUMENT_TEMPLATES)
     del calls
 
 
-def test_catalogue_fingerprints_move_with_the_copy():
-    """The sweep's worklist key: one entry per catalogue key, hash of its body.
+def test_propagation_fingerprints_cover_the_receipt_the_worklist_must_visit():
+    """The sweep's worklist key: one entry per pushed template, hash of its body.
 
-    Counting rows was both blind to a changed body and inflated by templates
-    outside the catalogue — a shop holding `purchase_receipt_1` and missing a
-    real template counted as complete and was never revisited.
+    Catalogue + document templates are the push list. Before 2026-09-23 the
+    worklist was catalogue-only, and the rationale ran the other way: a
+    `purchase_receipt_1` row was treated as *padding* that could make a shop
+    look complete while it missed a real template. With the receipt now
+    propagated proactively by the sweep, the reversal is the point — a shop
+    holding every catalogue entry but no receipt row must come back, and a
+    shop whose receipt hash matches must not. (The padding bug is still dead:
+    the count is matched against `key|hash` pairs, never rows.)
     """
-    fingerprints = wt.catalogue_fingerprints()
-    assert len(fingerprints) == len(wt.CATALOGUE)
-    assert all("|" in f for f in fingerprints)
-    assert wt.RECEIPT_TEMPLATE_KEY not in [f.split("|")[0] for f in fingerprints]
+    catalogue = wt.catalogue_fingerprints()
+    assert len(catalogue) == len(wt.CATALOGUE)
+    assert all("|" in f for f in catalogue)
     key, tpl = next(iter(wt.CATALOGUE.items()))
-    assert f"{key}|{wt.body_hash(tpl.body)}" in fingerprints
+    assert f"{key}|{wt.body_hash(tpl.body)}" in catalogue
     assert wt.body_hash(tpl.body) != wt.body_hash(tpl.body + " ")
+
+    doc = wt.DOCUMENT_TEMPLATES[wt.RECEIPT_TEMPLATE_KEY]
+    assert wt.document_fingerprints() == [
+        f"{wt.RECEIPT_TEMPLATE_KEY}|{wt.body_hash(doc.body)}"
+    ]
+    # The receipt is one of the pushed, so it is one of the counted: a shop
+    # missing it shows up on the worklist, a shop holding the current copy
+    # does not.
+    assert wt.propagation_fingerprints() == catalogue + wt.document_fingerprints()
+    assert f"{wt.RECEIPT_TEMPLATE_KEY}|{wt.body_hash(doc.body)}" in wt.propagation_fingerprints()
 
 
 def test_signup_config_asks_meta_for_the_coexistence_branch():
@@ -1467,11 +1503,15 @@ async def test_ensure_templates_names_the_shops_own_locale(monkeypatch):
         f"it_{key}" for key in wt.CATALOGUE
     }
     assert {c["language"] for c in created} == {"it"}
+    # The receipt is fetched and created by its verbatim preset name, never
+    # locale-prefixed.
+    assert calls["create_document_template"][0]["name"] == wt.RECEIPT_TEMPLATE_NAME
+    assert calls["create_document_template"][0]["language"] == wt.RECEIPT_TEMPLATE_LANGUAGE
     # The gate was asked about the same locale it then created, or a shop can
     # be told a template is ready and be given one that is not.
     assert {f["name"] for f in calls["fetch_template"]} == {
         f"it_{key}" for key in wt.CATALOGUE
-    }
+    } | {wt.RECEIPT_TEMPLATE_NAME}
 
 
 def test_unknown_meta_template_status_is_never_treated_as_approved():
@@ -2110,6 +2150,244 @@ async def test_a_template_meta_does_not_have_is_still_a_failure(monkeypatch):
 
     assert set(result["failed"]) == set(wt.CATALOGUE)
     assert not calls.get("templates")
+
+
+# ---------------------------------------------------- receipt rides the sweep
+
+def _patch_kairo_gate(monkeypatch, *, receipt_verdict):
+    """The gate's fetch fake: catalogue bodies from the catalogue, the receipt
+    by its verbatim preset name with the verdict the test chooses."""
+    calls = []
+    async def _fetch(*, waba_id, name, token):
+        calls.append({"waba_id": waba_id, "name": name, "token": token})
+        if name == wt.RECEIPT_TEMPLATE_NAME:
+            return receipt_verdict
+        tpl = wt.CATALOGUE.get(name.split("_", 1)[1])
+        return meta.TemplateStatus(status="approved", rejection_reason=None,
+                                   body=tpl.body if tpl else "")
+    monkeypatch.setattr(meta, "fetch_template", _fetch)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_approved_on_kairo_waba_includes_the_receipt_once_kairo_holds_it(monkeypatch):
+    """The receipt is in the gate's answer, fetched by its verbatim name.
+
+    That pair is what unblocks the sweep's document loop, exactly like a
+    catalogue pair unblocks `create_template`.
+    """
+    calls = _patch_kairo_gate(monkeypatch, receipt_verdict=meta.TemplateStatus(
+        status="approved", rejection_reason=None, body=wt.RECEIPT_TEMPLATE_BODY))
+
+    approved = await wo.approved_on_kairo_waba(FakeSettings())
+
+    assert approved == ({("it", k) for k in wt.CATALOGUE}
+                        | {(wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY)})
+    assert wt.RECEIPT_TEMPLATE_NAME in [c["name"] for c in calls]
+    assert f"it_{wt.RECEIPT_TEMPLATE_KEY}" not in [c["name"] for c in calls]
+
+
+@pytest.mark.asyncio
+async def test_approved_on_kairo_waba_excludes_a_receipt_whose_body_drifted(monkeypatch):
+    """Same rule as the catalogue: approved *name* with different copy is not
+    approved — pushing it would hand unreviewed text to every salon."""
+    _patch_kairo_gate(monkeypatch, receipt_verdict=meta.TemplateStatus(
+        status="approved", rejection_reason=None, body="il testo che Meta ha già"))
+
+    approved = await wo.approved_on_kairo_waba(FakeSettings())
+
+    assert approved == {("it", k) for k in wt.CATALOGUE}
+
+
+@pytest.mark.asyncio
+async def test_approved_on_kairo_waba_excludes_a_receipt_not_yet_ruled_on(monkeypatch):
+    """Pending is not approved — the gate fails closed on a missing verdict."""
+    _patch_kairo_gate(monkeypatch, receipt_verdict=meta.TemplateStatus(
+        status="pending", rejection_reason=None, body=wt.RECEIPT_TEMPLATE_BODY))
+
+    approved = await wo.approved_on_kairo_waba(FakeSettings())
+
+    assert (wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY) not in approved
+
+
+@pytest.mark.asyncio
+async def test_approved_on_kairo_waba_fails_closed_when_unconfigured():
+    class NoKairoWaba(FakeSettings):
+        meta_kairo_waba_id = ""
+        meta_kairo_token = ""
+
+    assert await wo.approved_on_kairo_waba(NoKairoWaba()) == set()
+
+
+def _current_rows_or(monkeypatch, receipt_row):
+    """get_template: current-hash rows for the catalogue, `receipt_row` for the
+    receipt — so catalogue noise stays out of the receipt-loop assertions."""
+    async def _get_template(shop_id, template_key):
+        if template_key == wt.RECEIPT_TEMPLATE_KEY:
+            return receipt_row
+        tpl = wt.CATALOGUE[template_key]
+        return {"template_key": template_key,
+                "meta_template_id": f"id_{template_key}",
+                "status": "approved", "body_hash": wt.body_hash(tpl.body)}
+    monkeypatch.setattr(wq, "get_template", _get_template)
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_creates_the_receipt_as_a_document_template(monkeypatch):
+    """Proactive propagation: same gate, a document create, a verbatim name."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    _current_rows_or(monkeypatch, receipt_row=None)
+    approved = ({("it", k) for k in wt.CATALOGUE}
+                | {(wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY)})
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(), approved=approved,
+    )
+
+    created = calls["create_document_template"]
+    assert len(created) == len(wt.DOCUMENT_TEMPLATES)
+    doc = created[0]
+    assert doc["waba_id"] == "WABA1" and doc["token"] == "tok"
+    assert doc["name"] == wt.RECEIPT_TEMPLATE_NAME
+    assert doc["language"] == wt.RECEIPT_TEMPLATE_LANGUAGE
+    assert doc["category"] == "UTILITY"
+    assert doc["body_text"] == wt.RECEIPT_TEMPLATE_BODY
+    assert doc["example_url"] == FakeSettings.meta_receipt_sample_url
+    row = next(t for t in calls["templates"]
+               if t["template_key"] == wt.RECEIPT_TEMPLATE_KEY)
+    assert row["name"] == wt.RECEIPT_TEMPLATE_NAME
+    assert row["variable_count"] == 0
+    assert row["body_hash"] == wt.body_hash(wt.RECEIPT_TEMPLATE_BODY)
+    # The catalogue rows are already current in this fixture: only the receipt
+    # is pushed, and it lands through the document create, not `create_template`.
+    assert result["created"] == len(wt.DOCUMENT_TEMPLATES)
+    assert "create_template" not in calls
+    assert wt.RECEIPT_TEMPLATE_KEY not in result["failed"]
+    assert wt.RECEIPT_TEMPLATE_KEY not in result["not_ready"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_edits_a_stale_receipt_body_only(monkeypatch):
+    """An approved receipt whose hash no longer matches is edited in place —
+    body only, never the header (Meta never hands the handle back, so a
+    header resubmit would need the sample URL again for no gain)."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    _current_rows_or(monkeypatch, receipt_row={
+        "template_key": wt.RECEIPT_TEMPLATE_KEY,
+        "meta_template_id": "RECEIPT-ID", "status": "approved",
+        "body_hash": "il-corpo-che-meta-ha"})
+    approved = ({("it", k) for k in wt.CATALOGUE}
+                | {(wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY)})
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(), approved=approved,
+    )
+
+    assert "create_document_template" not in calls
+    # The catalogue rows are already current here: the one edit is the receipt.
+    edits = calls["edit_template"]
+    assert len(edits) == len(wt.DOCUMENT_TEMPLATES)
+    receipt_edit = edits[0]
+    assert receipt_edit["template_id"] == "RECEIPT-ID"
+    assert receipt_edit["body_text"] == wt.RECEIPT_TEMPLATE_BODY
+    assert receipt_edit["sample_variables"] == {}
+    assert result["edited"] == len(wt.DOCUMENT_TEMPLATES)
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_leaves_a_receipt_meta_is_still_reviewing_alone(monkeypatch):
+    """Meta refuses to edit a template under review — the same skip as the
+    catalogue, and the row is revisited on the first sweep after the verdict."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    _current_rows_or(monkeypatch, receipt_row={
+        "template_key": wt.RECEIPT_TEMPLATE_KEY,
+        "meta_template_id": "RECEIPT-ID", "status": "pending",
+        "body_hash": "il-corpo-che-meta-ha"})
+    approved = ({("it", k) for k in wt.CATALOGUE}
+                | {(wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY)})
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(), approved=approved,
+    )
+
+    assert result["created"] == 0 and result["edited"] == 0
+    assert not calls.get("edit_template")
+    assert "create_document_template" not in calls
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_reports_the_receipt_not_ready_when_the_gate_has_it_pending(monkeypatch):
+    """Kairo's copy not approved means the receipt waits with the catalogue."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    _current_rows_or(monkeypatch, receipt_row=None)
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(),
+        approved={("it", k) for k in wt.CATALOGUE},
+    )
+
+    assert result["created"] == 0
+    assert wt.RECEIPT_TEMPLATE_KEY in result["not_ready"]
+    assert "create_document_template" not in calls
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_fails_soft_on_the_receipt_without_a_sample_url(monkeypatch):
+    """A missing `META_RECEIPT_SAMPLE_URL` is reported as not_ready, never a
+    guaranteed-rejection create — and the catalogue loop above is untouched."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    _current_rows_or(monkeypatch, receipt_row=None)
+
+    class NoSample(FakeSettings):
+        meta_receipt_sample_url = ""
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=NoSample(),
+        approved={("it", k) for k in wt.CATALOGUE}
+        | {(wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY)},
+    )
+
+    assert result["ok"] is True
+    assert wt.RECEIPT_TEMPLATE_KEY in result["not_ready"]
+    assert "create_document_template" not in calls
+
+
+def test_worklist_counts_fingerprint_pairs_not_rows():
+    """A shop with every catalogue fingerprint but no receipt row must appear;
+    one whose receipt hash matches must not. The query knows nothing about
+    which templates exist — appearance is decided entirely by the fingerprint
+    array the sweep passes it (`propagation_fingerprints`, pinned above), so
+    what is pinned here is the array-driven shape of the SQL."""
+    import inspect
+    source = inspect.getsource(wq.list_senders_needing_templates)
+    assert "t.template_key || '|' || coalesce(t.body_hash, '')" in source
+    assert "= ANY($1)" in source
+    assert "cardinality($1::text[])" in source
 
 
 # ---------------------------------------------------------------- secret box

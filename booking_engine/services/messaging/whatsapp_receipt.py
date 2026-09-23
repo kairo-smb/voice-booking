@@ -6,9 +6,11 @@ webapp renders the PDF and posts it here to upload and deliver as the DOCUMENT
 header of Meta's `purchase_receipt_1` utility template.
 
 The template is NOT in the marketing CATALOGUE — it is a document header, not a
-body-with-variables — so it has its own ensure step (`ensure_receipt_template`),
-gated on Meta having approved the same-named template on Kairo's own WABA first,
-exactly like the catalogue gate.
+body-with-variables — so it cannot ride the catalogue's `create_template`. It
+propagates proactively via the sweep's DOCUMENT_TEMPLATES loop (2026-09-23);
+`ensure_receipt_template` remains as the lazy send-time self-heal, gated on Meta
+having approved the same-named template on Kairo's own WABA first, exactly like
+the catalogue gate.
 """
 from __future__ import annotations
 

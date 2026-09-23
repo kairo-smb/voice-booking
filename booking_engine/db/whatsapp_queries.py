@@ -252,7 +252,7 @@ async def set_template_status(
 
 
 async def list_senders_needing_templates(fingerprints: list[str]) -> list[dict]:
-    """Live senders missing a catalogue entry, or holding an outdated body.
+    """Live senders missing a pushed template, or holding an outdated body.
 
     The gap this closes: propagation is gated on Kairo's own copy being
     approved, so a salon that onboards while a template is still pending gets
@@ -263,15 +263,17 @@ async def list_senders_needing_templates(fingerprints: list[str]) -> list[dict]:
     template, not a missing one. The result was a shop that could never send,
     with nothing anywhere saying why.
 
-    **`key|body_hash`, not a plain count of rows.** Two bugs in one shape:
-    counting rows meant a non-catalogue template (`purchase_receipt_1`, which
-    is a document header and deliberately outside `CATALOGUE`) padded the total,
-    so a shop with the receipt and one real template missing counted as complete
-    and was never revisited. And a count of any kind cannot see a body that
-    changed under an unchanged name.
+    **`key|body_hash`, not a plain count of rows.** A count of any kind cannot
+    see a body that changed under an unchanged name, and it was inflated by
+    rows for templates the sweep didn't push, so a shop could look complete
+    while missing a real one. The caller decides what "complete" means by
+    passing `propagation_fingerprints()` — catalogue plus the document
+    templates (the receipt is one of the pushed since 2026-09-23) — so this
+    query itself stays agnostic about which templates exist.
 
-    Cheap enough to run every tick: one count per sender, and shops holding the
-    current catalogue — which is all of them, steady-state — don't come back.
+    Cheap enough to run every tick: one count per sender, and shops holding
+    every current fingerprint — which is all of them, steady-state — don't
+    come back.
     """
     return await execute(
         """

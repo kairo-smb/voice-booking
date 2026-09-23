@@ -170,9 +170,11 @@ A create that fails for a key with no row now reads the template back by name an
 
 Related: `MetaError` now leads with `error_user_msg`. Graph's `message` is a generic label shared by a whole family of unrelated refusals, and dropping the field that names the cause is what made this opaque.
 
-**Gated on Kairo's own WABA — status *and* body (2026-09-02).** A template is pushed to Kairo's own WABA first (`scripts/kairo_waba.py push-templates`, then `scripts/kairo_waba.py templates` to watch it move to `approved`); this endpoint only propagates a catalogue entry into a *customer's* WABA once Meta has approved **that exact body** there, read live from `GET {waba_id}/message_templates?name=…&fields=…,components`. Status alone answers a question about a *name*: change the copy here and deploy before `push-templates` runs, and a name-only gate reports "approved" for last month's text — then hands the drift path below a green light to push unreviewed copy to every salon. Rejection is a Meta judgment on content, identical on every WABA, so this avoids burning the same rejection (and its quality-rating hit) once per salon. Requires `META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN`; unset means nothing propagates, not "propagate unchecked."
+**Gated on Kairo's own WABA — status *and* body (2026-09-02).** A template is pushed to Kairo's own WABA first (`scripts/kairo_waba.py push-templates`, then `scripts/kairo_waba.py templates` to watch it move to `approved`); this endpoint only propagates a template into a *customer's* WABA once Meta has approved **that exact body** there, read live from `GET {waba_id}/message_templates?name=…&fields=…,components`. The gate now covers the catalogue **and** the document templates (2026-09-23): `purchase_receipt_1` is fetched on Kairo's WABA by its verbatim preset name — never `{locale}_{key}` — and needs the same approved-status-plus-body-match before the loop below will push it. Status alone answers a question about a *name*: change the copy here and deploy before `push-templates` runs, and a name-only gate reports "approved" for last month's text — then hands the drift path below a green light to push unreviewed copy to every salon. Rejection is a Meta judgment on content, identical on every WABA, so this avoids burning the same rejection (and its quality-rating hit) once per salon. Requires `META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN`; unset means nothing propagates, not "propagate unchecked."
 
-Returns `{"created": N, "edited": N, "failed": ["key", …], "not_ready": ["key", …]}`. `not_ready` is not approved on Kairo's WABA yet (or the approved copy there isn't the catalogue's, or Kairo's WABA isn't configured) — expected right after changing copy, before you've pushed it and had it approved on Kairo's own WABA. One rejected template never aborts the rest of the catalogue.
+**The document templates ride the same loop (2026-09-23).** After the catalogue, `DOCUMENT_TEMPLATES` (the receipt) runs the identical gate/skip/adopt sequence with a document-specific create/edit: a missing row is created with `create_document_template` — the `HEADER`/`DOCUMENT` component requires `META_RECEIPT_SAMPLE_URL` (a missing URL is reported as `not_ready` rather than submitted to a guaranteed rejection, and never aborts the catalogue results above) — a stale body is edited body-only (the header is untouched, since Meta never hands the `header_handle` back), a create refusal adopts Meta's copy by name, and a row Meta is still reviewing is skipped. Counts share `created`/`edited` with the catalogue.
+
+Returns `{"created": N, "edited": N, "failed": ["key", …], "not_ready": ["key", …]}`. `not_ready` is not approved on Kairo's WABA yet (or the approved copy there isn't the current body, or Kairo's WABA isn't configured) — expected right after changing copy, before you've pushed it and had it approved on Kairo's own WABA. One rejected template never aborts the rest of the catalogue.
 
 **Copy drift is tracked by `whatsapp.templates.body_hash` (2026-09-02).** It records *which version* of the copy each WABA holds — `status = 'approved'` only ever meant "a template with this name passed review". Before it, an existing row was an unconditional skip: re-voicing a template reached Kairo's WABA and stopped there, and every connected salon kept sending the old text with nothing anywhere disagreeing. An edit keeps the name (`POST /{template_id}`), so the salon keeps sending the previously approved copy while Meta re-reviews the new one — delete-and-recreate would take them off the air for Meta's 30-day name lock. `NULL` means "unknown version" and is treated as stale, which is what every pre-migration row is.
 
@@ -475,7 +477,9 @@ utility receipt template).
 ```
 
 Flow: sender must be `online` → template `purchase_receipt_1` must be `approved`
-on the shop's WABA (created lazily via `ensure_receipt_template` if missing) →
+on the shop's WABA (propagated proactively by the hourly sweep since 2026-09-23;
+`ensure_receipt_template` still creates it lazily here if the row is missing —
+the send-time self-heal) →
 `POST /{phone_number_id}/media` (upload) → `POST /{phone_number_id}/messages`
 with a `header` document parameter → record into `outbound_messages` with
 `campaign_key = NULL` (so the campaign idempotency index does not apply and a
@@ -491,10 +495,14 @@ Manager. Separate from the catalogue because the payload is an attachment: a
 `HEADER`/`DOCUMENT` component, `create_document_template` rather than
 `create_template`, no variables to fill, and the name is Meta's preset used
 **verbatim** (`purchase_receipt_1`, never `it_purchase_receipt_1`). It propagates
-to customer WABAs by its own `ensure_receipt_template` — lazily, on the first send
-— gated on Meta having approved the same name **and the same body** on Kairo's
-WABA, and requiring `META_RECEIPT_SAMPLE_URL` (a publicly-hosted sample PDF Meta
-reviews against a document header). Fails closed when either is unconfigured.
+to customer WABAs proactively — since 2026-09-23 it rides the hourly sweep
+inside `ensure_templates` (gate: the same name **and the same body** approved on
+Kairo's WABA, created with `create_document_template` + the sample URL), and the
+worklist is keyed on `propagation_fingerprints()` = catalogue + document
+fingerprints, so a shop missing the receipt is revisited like any other gap.
+`ensure_receipt_template` remains as the lazy send-time self-heal, gated the same
+way (`META_RECEIPT_SAMPLE_URL` required to create). Fails closed when either is
+unconfigured.
 
 ---
 
@@ -635,7 +643,7 @@ New `suppressed_reason` values: `recently_contacted`,
 
 `POST /messaging/tick` ([Number Provisioning](number-provisioning.md)) has four WhatsApp stages, each independently wrapped so one failure can't suppress the others:
 
-- `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver, and carries the **only retry of the propagation gate**: live senders missing part of the catalogue — **or holding an outdated body** — are pushed once Kairo's own copy of that exact text turns `approved`. The worklist (`list_senders_needing_templates`) is keyed on `template_key|body_hash` per catalogue entry rather than on a count of rows, which fixed two things at once: a count could not see a body that changed under an unchanged name, and it was inflated by templates outside the catalogue, so a shop holding `purchase_receipt_1` and missing a real template counted as complete and was never revisited. Kairo's WABA is asked once per run, not once per shop — the answer is identical for everyone. An empty gate (unconfigured, or a Graph error) skips the stage entirely rather than pushing on a guess. Counts add `propagated`, `edited` and `approved_on_kairo`.
+- `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver, and carries the **only retry of the propagation gate**: live senders missing part of the catalogue — the receipt included since 2026-09-23 (`propagation_fingerprints()` = catalogue + document fingerprints) — **or holding an outdated body** are pushed once Kairo's own copy of that exact text turns `approved`. The worklist (`list_senders_needing_templates`) is keyed on `template_key|body_hash` pairs rather than on a count of rows, which fixed two things at once: a count could not see a body that changed under an unchanged name, and it was inflated by non-pushed templates, so a shop could look complete while missing something. The receipt flipped sides in 2026-09-23: it used to be the padding to exclude, and is now one of the fingerprints a shop must hold. Kairo's WABA is asked once per run, not once per shop — the answer is identical for everyone. An empty gate (unconfigured, or a Graph error) skips the stage entirely rather than pushing on a guess. Counts add `propagated`, `edited` and `approved_on_kairo`.
 - `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed` (`no_consent`, `opted_out`, `recently_contacted`), `failed`, `deferred` (over daily cap, retried in an hour), `rate_capped` (Meta 131049, retried in 24h), `requeued` (claimed but never sent, recovered from a crashed tick).
 - `whatsapp_nudges` — **the 20h nudge**. Meta's service window permits free-form messages only within 24h of the customer's *last* message, and it resets every time they write — so the only thing truly forbidden is speaking first after 24h of silence, which needs an approved template. One last free message inside the window (`NUDGE_AFTER_HOURS = 20`, `wa_nudge.NUDGE_BODY`) invites the customer to write back, and their reply is what reopens it. `should_nudge` is pure, `now` an argument, and refuses on every one of: shop not opted in, thread escalated, the owner already replied (webapp or phone echo), the customer replied after the agent (the thread is waiting on *us*), the agent never spoke, already nudged since their last message, and the window already closed. "At most once" is **derived from a row**, not a column: the nudge is recorded like any other agent reply (`origin='agent'`, `preview = NUDGE_BODY`) and `list_nudge_candidates` reads that back — so it survives a restart, and there is no second fact about the same send to keep true. Counts: `nudged`, `errors`.
 

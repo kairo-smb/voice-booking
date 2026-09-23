@@ -31,8 +31,8 @@ from booking_engine.clients import webapp_notify
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging.whatsapp_templates import (
-    CATALOGUE, SUPPORTED_LANGUAGES, body_hash, catalogue_fingerprints,
-    resolve_language,
+    CATALOGUE, DOCUMENT_TEMPLATES, SUPPORTED_LANGUAGES, body_hash,
+    propagation_fingerprints, resolve_language,
 )
 
 logger = logging.getLogger(__name__)
@@ -424,6 +424,31 @@ async def approved_on_kairo_waba(settings) -> set[tuple[str, str]]:
                 )
                 continue
             approved.add((language, key))
+    # The document templates ride the same gate. The name is Meta's preset used
+    # verbatim (never locale-prefixed), and the body is the compared payload —
+    # the document header comes back as an opaque `header_handle`, so status
+    # plus BODY text is the whole check. Same fail-closed rule: not approved,
+    # or approved with different copy, means the receipt propagates nowhere.
+    for key, doc in DOCUMENT_TEMPLATES.items():
+        try:
+            verdict = await meta.fetch_template(
+                waba_id=settings.meta_kairo_waba_id,
+                name=doc.name,
+                token=settings.meta_kairo_token,
+            )
+        except meta.MetaError as exc:
+            logger.warning("whatsapp.kairo_gate_fetch_failed name=%s err=%s", doc.name, exc)
+            continue
+        if not verdict or verdict.status != "approved":
+            continue
+        if verdict.body != doc.body:
+            logger.info(
+                "whatsapp.kairo_body_drift name=%s — approved copy is not the "
+                "catalogue's; run kairo_waba.py push-templates",
+                doc.name,
+            )
+            continue
+        approved.add((doc.language, key))
     return approved
 
 
@@ -453,6 +478,13 @@ async def ensure_templates(
 
     `approved` is the gate's answer, passed in by the sweep so it is computed
     once for the whole run; alone, this function asks for itself.
+
+    The catalogue is not the only push list (2026-09-23): `DOCUMENT_TEMPLATES`
+    — the receipt — reconciles in the same run with the identical gate, skip
+    and adopt rules, and a document-specific create/edit. The gate now also
+    includes it, so once Kairo's own copy is approved the hourly sweep pushes
+    it to every connected salon proactively; the lazy `ensure_receipt_template`
+    at send time stays as the self-heal for a shop the sweep missed.
     """
     row = await wq.get_sender(shop_id)
     if not row or not row.get("waba_id") or not row.get("access_token"):
@@ -545,6 +577,87 @@ async def ensure_templates(
             edited += 1
         else:
             created += 1
+
+    # The document templates (the receipt) ride the same reconcile, with the
+    # document-specific create: a HEADER/DOCUMENT component that needs
+    # `META_RECEIPT_SAMPLE_URL` (a sample PDF for Meta to review) and Meta's
+    # preset name used verbatim. Every gate/skip/adopt rule is the catalogue's.
+    for key, doc in DOCUMENT_TEMPLATES.items():
+        existing = await wq.get_template(shop_id, key)
+        wanted = body_hash(doc.body)
+        if existing and existing.get("body_hash") == wanted:
+            continue
+        # Same rule as the catalogue: Meta refuses to edit a template it is
+        # still ruling on, so the drift waits for the first sweep after the
+        # verdict — the shop keeps matching `list_senders_needing_templates`.
+        if existing and existing.get("status") in ("pending", "received"):
+            continue
+        if (doc.language, key) not in approved:
+            not_ready.append(key)
+            continue
+        # The sample URL is only needed to CREATE (an edit resubmits just the
+        # body, and the header is untouched). Submitting without it would be a
+        # guaranteed Meta rejection, so it is reported as not_ready instead —
+        # one missing setting must not abort the results above.
+        if not existing and not settings.meta_receipt_sample_url:
+            logger.warning(
+                "whatsapp.receipt_sample_not_configured shop=%s key=%s — "
+                "META_RECEIPT_SAMPLE_URL must be set to create the document "
+                "template", shop_id, key,
+            )
+            not_ready.append(key)
+            continue
+        try:
+            if existing:
+                # Body-only edit: Meta never hands back the header_handle it
+                # holds, so the header is left exactly as approved.
+                meta_id = existing["meta_template_id"]
+                status = await meta.edit_template(
+                    template_id=meta_id, token=row["access_token"],
+                    body_text=doc.body, sample_variables={},
+                )
+                tpl_category = doc.category
+            else:
+                meta_id, status = await meta.create_document_template(
+                    waba_id=row["waba_id"], token=row["access_token"],
+                    name=doc.name, language=doc.language,
+                    category=doc.category, body_text=doc.body,
+                    example_url=settings.meta_receipt_sample_url,
+                )
+                tpl_category = doc.category
+        except meta.MetaError as exc:
+            # Same adopt rule as the catalogue: the name may already exist on
+            # that WABA (Meta re-categorised it on review, or the create's row
+            # was lost), and refusing would mean the sweep retried the
+            # identical create hourly forever.
+            adopted = None
+            if not existing:
+                adopted = await meta.fetch_template(
+                    waba_id=row["waba_id"], name=doc.name,
+                    token=row["access_token"],
+                )
+            if not adopted or not adopted.id:
+                logger.warning("whatsapp.template_push_failed shop=%s key=%s err=%s",
+                               shop_id, key, exc)
+                failed.append(key)
+                continue
+            logger.warning("whatsapp.template_adopted shop=%s key=%s status=%s "
+                           "category=%s (create refused: %s)",
+                           shop_id, key, adopted.status, adopted.category, exc)
+            meta_id, status = adopted.id, adopted.status
+            wanted = body_hash(adopted.body)
+            tpl_category = adopted.category or doc.category
+        await wq.upsert_template(
+            shop_id=shop_id, template_key=key, name=doc.name,
+            meta_template_id=meta_id, language=doc.language,
+            category=tpl_category, status=TEMPLATE_STATUS.get(status, "pending"),
+            variable_count=0, body_hash=wanted,
+        )
+        if existing:
+            edited += 1
+        else:
+            created += 1
+
     return {"ok": True, "created": created, "edited": edited,
             "failed": failed, "not_ready": not_ready}
 
@@ -598,11 +711,13 @@ async def sweep(*, settings) -> dict:
             logger.exception("whatsapp.sender_poll_failed shop=%s", row["shop_id"])
             counts["errors"] += 1
 
-    # Live senders missing part of the catalogue, or holding an outdated body.
+    # Live senders missing part of the catalogue — or the document template —
+    # or holding an outdated body. The fingerprints include the receipt since
+    # 2026-09-23, so a shop without it is on the worklist like any other gap.
     # Skipped entirely when the gate is empty — there is nothing to give them,
     # and asking would be one pointless query per shop per hour.
     if approved:
-        for row in await wq.list_senders_needing_templates(catalogue_fingerprints()):
+        for row in await wq.list_senders_needing_templates(propagation_fingerprints()):
             try:
                 result = await ensure_templates(
                     shop_id=row["shop_id"], settings=settings, approved=approved
