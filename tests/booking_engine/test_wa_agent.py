@@ -458,7 +458,7 @@ async def test_each_turn_is_charged_against_the_basket(wired, monkeypatch):
     So a turn is paid for exactly once, and what this pins is both halves: the
     engine is asked — which is what triggers its gate-and-charge — and nothing
     on this side bills a second time. A `charge_actual` here would stack an
-    invented flat charge on top of a real one, the double-debit CLAUDE.md's
+    invented flat charge on top of a real one, the double-debit AGENTS.md's
     2026-08-12 entry forbids and the 2026-09-03 entry deleted this repo's own
     basket arithmetic to prevent.
     """

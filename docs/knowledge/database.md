@@ -14,7 +14,7 @@ Three schemas in one Neon Postgres database:
 | `voice_agent` | this repo | owns it fully — DDL lives in `booking_engine/db/sql/`, applied in order by `scripts/migrate.sh` |
 | `sms` | this repo | owns it fully, added 2026-08-12 — see [`sms` schema](#sms-schema--authoritative-here) below |
 
-**Do not hand-copy `business_app_core`'s schema into a doc.** That has already gone stale and caused real bugs at least twice (`CLAUDE.md` §2026-07-24 "Repo cleanup..." and the schema-mismatch history it references). The accurate, current mapping is `booking_engine/db/queries.py`, exercised against real Neon-shaped data by `tests/live_db/*`. Read that file for column names, not this one.
+**Do not hand-copy `business_app_core`'s schema into a doc.** That has already gone stale and caused real bugs at least twice (`AGENTS.md` §2026-07-24 "Repo cleanup..." and the schema-mismatch history it references). The accurate, current mapping is `booking_engine/db/queries.py`, exercised against real Neon-shaped data by `tests/live_db/*`. Read that file for column names, not this one.
 
 ### `business_app_core` write contract, by table
 
@@ -39,7 +39,7 @@ The Control Plane (`webapp`) has full CRUD on all of the above except `appointme
 
 **Other stable conventions:** soft deletes via `is_active = false` (never hard-delete a row with dependent appointments); timezone is hardcoded `Europe/Rome` for all slot calculations (`ZoneInfo("Europe/Rome")` in `queries.py`).
 
-**`customers.marketing_consent*` columns appear in no migration in this repo.** They arrive via the webapp's own migration chain, not this repo's — noted here so nobody re-diagnoses that as a missing-migration bug (found while grounding the 2026-08-14 number-provisioning docs; see `CLAUDE.md`).
+**`customers.marketing_consent*` columns appear in no migration in this repo.** They arrive via the webapp's own migration chain, not this repo's — noted here so nobody re-diagnoses that as a missing-migration bug (found while grounding the 2026-08-14 number-provisioning docs; see `AGENTS.md`).
 
 ## `voice_agent` schema — authoritative here
 
@@ -57,7 +57,7 @@ DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `13_number_releas
 | `auth_events` | 04 | identity-verification audit trail |
 | `system_policy` | 04 | disclosure/consent text (seeded it-IT) |
 | `voice_tones` | 06 | 8 seeded presets (`is_preset=true`) plus room for shop-authored custom tones (`created_by_shop_id`); seeded names: professionale, amichevole, efficiente, luxury, tecnico, casual, empatico, conciso |
-| `number_requests` | 12, extended 13 | one row per shop, PK `shop_id`: self-service Estonian-number regulatory-bundle lifecycle (`status` draft→evaluating→pending_review→approved/rejected→provisioned→**released** (13), the Twilio `regulation_sid`/`bundle_sid`/`end_user_sid`/`document_sid`, `evaluation_errors` jsonb verbatim from Twilio, `rejection_reason`, `released_at`/`released_number` (13, kept for history — see below)). Polled hourly by `POST /api/v1/messaging/tick`. See [Architecture](architecture.md#self-service-number-provisioning-path-2-onboarding) and `CLAUDE.md` §2026-08-14. |
+| `number_requests` | 12, extended 13 | one row per shop, PK `shop_id`: self-service Estonian-number regulatory-bundle lifecycle (`status` draft→evaluating→pending_review→approved/rejected→provisioned→**released** (13), the Twilio `regulation_sid`/`bundle_sid`/`end_user_sid`/`document_sid`, `evaluation_errors` jsonb verbatim from Twilio, `rejection_reason`, `released_at`/`released_number` (13, kept for history — see below)). Polled hourly by `POST /api/v1/messaging/tick`. See [Architecture](architecture.md#self-service-number-provisioning-path-2-onboarding) and `AGENTS.md` §2026-08-14. |
 
 **`calls` is a two-channel session table (24), not a telephony table.** It never was one: `shop_id`, `caller_number`, `customer_id`, `customer_match`, `outcome`, `summary` and `appointment_id` describe a conversation, `twilio_call_sid` is UNIQUE but **nullable**, and `duration_seconds` is the only genuinely voice-specific column. Migration 24 adds `channel` (`CHECK (channel IN ('voice','whatsapp'))`, default `'voice'`, so every pre-existing row is correct without a backfill), and a WhatsApp booking conversation is a row here with `channel = 'whatsapp'`.
 
@@ -82,9 +82,9 @@ DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `13_number_releas
 - **Tenancy is in the write statement, not around it.** `set_questions` is one `INSERT … SELECT … WHERE EXISTS (SELECT 1 FROM business_app_core.services WHERE id = $2 AND shop_id = $1) … ON CONFLICT (shop_id, service_id) DO UPDATE`, so a service the shop does not own inserts nothing and returns nothing (the route answers 404 — the same answer as an id that does not exist, which is all a caller for another shop is entitled to learn). A check-then-write would leave a window, and the only thing this table feeds is text that goes into a prompt, which is exactly where a cross-tenant leak would be invisible. Reads scope by `shop_id` on their own and never trust the caller to have passed ids it owns.
 - **Service *names* are not here and are not returned.** They live in `business_app_core.services`, which this repo reads but does not own, and the config screen has the service list in hand already.
 
-**`shop_telephony`'s health semaphore (12):** `health_status` (`unknown`/`green`/`red`, default `unknown`) records whether a provisioned number still exists at Twilio with its voice webhook pointed at us. A Twilio-unreachable probe deliberately leaves the prior status untouched rather than flipping to red — only a confirmed 404 or voice-webhook drift changes the light (`services/number_health.py::decide_health`). `sms_url` is deliberately not checked — there is no inbound SMS handler any more (STOP handling removed; see `CLAUDE.md`), so there is nothing for it to correctly point at.
+**`shop_telephony`'s health semaphore (12):** `health_status` (`unknown`/`green`/`red`, default `unknown`) records whether a provisioned number still exists at Twilio with its voice webhook pointed at us. A Twilio-unreachable probe deliberately leaves the prior status untouched rather than flipping to red — only a confirmed 404 or voice-webhook drift changes the light (`services/number_health.py::decide_health`). `sms_url` is deliberately not checked — there is no inbound SMS handler any more (STOP handling removed; see `AGENTS.md`), so there is nothing for it to correctly point at.
 
-**Grace-period number release (13), closes the cancellation gap flagged in `CLAUDE.md` §2026-08-14.** When a shop's plan lapses (`shops.plan_id` goes `NULL`), the hourly tick doesn't release the number immediately — it stamps `shop_telephony.release_scheduled_at = now() + 14 days` the first time it notices, clears it if the plan comes back before that deadline, and only calls Twilio to release the number once the deadline has passed (`services/number_release.py::decide_release`/`sweep`). The deadline lives here, in `voice_agent`, derived from when *we* first observed the lapse — deliberately not a `plan_lapsed_at` column on `business_app_core.shops`, which is the webapp repo's schema. On release, `shop_telephony`'s row is deleted (Twilio confirms first, row deletion second — a lost Twilio call must not delete a row we're still paying for) and `number_requests.status` moves to `released` with `released_at`/`released_number` stamped so the history survives after the row is gone.
+**Grace-period number release (13), closes the cancellation gap flagged in `AGENTS.md` §2026-08-14.** When a shop's plan lapses (`shops.plan_id` goes `NULL`), the hourly tick doesn't release the number immediately — it stamps `shop_telephony.release_scheduled_at = now() + 14 days` the first time it notices, clears it if the plan comes back before that deadline, and only calls Twilio to release the number once the deadline has passed (`services/number_release.py::decide_release`/`sweep`). The deadline lives here, in `voice_agent`, derived from when *we* first observed the lapse — deliberately not a `plan_lapsed_at` column on `business_app_core.shops`, which is the webapp repo's schema. On release, `shop_telephony`'s row is deleted (Twilio confirms first, row deletion second — a lost Twilio call must not delete a row we're still paying for) and `number_requests.status` moves to `released` with `released_at`/`released_number` stamped so the history survives after the row is gone.
 
 `business_app_core.shops` also gained two columns directly in migration 03: `voice` (default `'alloy'`) and `language` (default `'it'`) — the one place this repo's migrations touch the other schema, both additive/nullable-safe.
 
@@ -93,14 +93,14 @@ DDL: `booking_engine/db/sql/03_voice_agent_schema.sql` through `13_number_releas
 Added 2026-08-12 (`booking_engine/db/sql/11_sms_schema.sql`), owned by this
 repo like `voice_agent`. Phase 1 of a larger SMS/WhatsApp messaging design —
 see [Architecture → SMS marketing send](architecture.md#sms-marketing-send-phase-1-of-messaging)
-and `CLAUDE.md` §2026-08-12. WhatsApp now has its own schema — see
+and `AGENTS.md` §2026-08-12. WhatsApp now has its own schema — see
 [`whatsapp` schema](#whatsapp-schema--authoritative-here) below.
 
 | Table | Purpose |
 |---|---|
 | `campaigns` | batch-send container (`draft → approved → sending → sent/cancelled`). **Exists, nothing writes to it yet** — Phase 1 is one-off sends only. |
 | `outbound_messages` | one row per send attempt, including refused ones (`status='suppressed'`, `suppressed_reason` — a refusal is always persisted, never silently dropped). `credits_charged`/`price_usd` are the billed figures; `campaign_id IS NULL` means a one-off send. Unique on `(campaign_id, customer_id)` where both are set, so re-running a batch send can't double-message a customer. |
-| `opt_outs` | **unused as of the STOP-removal (see `CLAUDE.md`).** Kept in the schema, no `DROP TABLE` — intentionally left behind rather than dropped — but nothing reads or writes it any more. |
+| `opt_outs` | **unused as of the STOP-removal (see `AGENTS.md`).** Kept in the schema, no `DROP TABLE` — intentionally left behind rather than dropped — but nothing reads or writes it any more. |
 
 **STOP handling removed; suppression is `customers.marketing_consent`
 alone.** This repo previously reimplemented STOP-keyword parsing in
@@ -111,7 +111,7 @@ decided to remove that entirely — opt-out is now handled in-store, by a
 staff member clearing marketing consent in the app. There is no inbound SMS
 webhook and no opt-out footer any more; `sms_send.py`'s only suppression
 check is `customers.marketing_consent`/`_granted_at`/`_withdrawn_at`. See
-`CLAUDE.md`'s STOP-removal entry for the full reasoning, including the
+`AGENTS.md`'s STOP-removal entry for the full reasoning, including the
 explicit note that this is a weaker position under Italian marketing rules,
 accepted as the owner's decision.
 
@@ -142,7 +142,7 @@ Added 2026-08-21 (`14_whatsapp_schema.sql`), reshaped for Meta Cloud API on
 2026-08-24 (`15_whatsapp_meta.sql`). Owned by this repo. See
 [Architecture → WhatsApp marketing](architecture.md#whatsapp-marketing-one-waba-per-salon),
 [Providers → WhatsApp](providers.md#whatsapp-meta-cloud-api-tech-provider),
-[API → WhatsApp](api/whatsapp.md), and `CLAUDE.md` §2026-08-24.
+[API → WhatsApp](api/whatsapp.md), and `AGENTS.md` §2026-08-24.
 
 | Table | Purpose |
 |---|---|
@@ -247,4 +247,4 @@ is pinned by tests rather than left to a comment.
 
 ## Connection
 
-`booking_engine/db/connection.py` — a single asyncpg pool (`pool_min_size=2`, `pool_max_size=10`, both from `Settings`). **No `pool.acquire()` timeout is configured anywhere in this codebase** — under enough concurrent calls the pool itself becomes a contention point with no bound on the wait (flagged, not yet actioned, in `CLAUDE.md` §2026-07-24 "Root-caused session 'dead air'..."; not urgent while call volume is near zero).
+`booking_engine/db/connection.py` — a single asyncpg pool (`pool_min_size=2`, `pool_max_size=10`, both from `Settings`). **No `pool.acquire()` timeout is configured anywhere in this codebase** — under enough concurrent calls the pool itself becomes a contention point with no bound on the wait (flagged, not yet actioned, in `AGENTS.md` §2026-07-24 "Root-caused session 'dead air'..."; not urgent while call volume is near zero).

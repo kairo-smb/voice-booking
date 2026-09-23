@@ -74,7 +74,7 @@ def purchase_number(
 
     No `sms_url` is set: there is no inbound SMS handler (STOP handling was
     removed — opt-out is now in-store, via customers.marketing_consent; see
-    CLAUDE.md). Leaving the number's SMS webhook unset is intentional, not a
+    AGENTS.md). Leaving the number's SMS webhook unset is intentional, not a
     gap.
     """
     client = Client(account_sid, auth_token)

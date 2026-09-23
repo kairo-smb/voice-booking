@@ -18,7 +18,7 @@ salon — removed 2026-08-30: every sender is BYO WABA now, so there is no
 second path to keep in sync, and `register_phone_number` (only ever called for
 that path) is gone with it.
 
-See CLAUDE.md §2026-08-24, §2026-08-30 and docs/knowledge/api/whatsapp.md.
+See AGENTS.md §2026-08-24, §2026-08-30 and docs/knowledge/api/whatsapp.md.
 """
 from __future__ import annotations
 

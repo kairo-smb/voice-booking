@@ -49,7 +49,7 @@ def decide_health(probe: HealthProbe, *, base_url: str) -> tuple[str | None, str
     2. found=False: Twilio returned a confirmed 404 — the number is gone.
     3. webhook drift: found, but voice_url doesn't start with our own
        base_url. sms_url is deliberately not checked — there is no inbound
-       SMS handler any more (STOP handling was removed; see CLAUDE.md), so
+       SMS handler any more (STOP handling was removed; see AGENTS.md), so
        there is nothing for sms_url to correctly point at.
     4. otherwise green.
     """

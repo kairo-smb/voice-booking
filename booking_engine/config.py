@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     twilio_auth_token: str = ""
     twilio_default_country: str = "EE"
     # One-time regulatory Bundle (KYC) for the shared Kairo entity, reused
-    # across every provisioned DID — see CLAUDE.md, "Telephony provider:
+    # across every provisioned DID — see AGENTS.md, "Telephony provider:
     # Telnyx -> Twilio"
     twilio_bundle_sid: str = ""
     twilio_address_sid: str = ""

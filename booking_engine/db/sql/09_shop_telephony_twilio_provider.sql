@@ -1,7 +1,7 @@
 -- Migration 09: shop_telephony.provider defaults to 'twilio'
 --
 -- Telnyx -> Twilio migration. Existing rows are untouched; nothing is live
--- yet. See CLAUDE.md, "Telephony provider: Telnyx -> Twilio".
+-- yet. See AGENTS.md, "Telephony provider: Telnyx -> Twilio".
 -- Idempotent — safe to re-run.
 --
 -- Apply to Neon BEFORE deploying the code that assumes this default:

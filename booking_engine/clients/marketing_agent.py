@@ -7,7 +7,7 @@ marketing-engine repo. This is the thin HTTP client that asks for one.
 reads the shop's basket before it calls a provider and answers **402** when it
 is empty; on a turn that ran, it settles the *actual* LLM cost against that
 same basket itself. So there is exactly one debit path for a turn, which is the
-standing rule in CLAUDE.md (2026-08-12: "Two debit paths for the same charge
+standing rule in AGENTS.md (2026-08-12: "Two debit paths for the same charge
 would eventually double-charge or drift", and 2026-09-03, which deleted this
 repo's own basket arithmetic for precisely that reason). A `charge_actual` call
 from this side would be a second, invented, flat charge stacked on top of a

@@ -518,7 +518,7 @@ Template verdicts arrive here within minutes instead of on the next hourly tick.
 
 `inbound_messages.wa_message_id` (Meta's `wamid`, migration 24) is the dedup key, and the insert is `ON CONFLICT (wa_message_id) WHERE wa_message_id IS NOT NULL DO NOTHING RETURNING *`. A replay therefore returns **no row**, which is also how the caller knows to skip everything downstream — the dedup and "have we already processed this?" are the same question, answered in one statement with no check-then-act race. Without it a retry is a second bubble in the thread and a second AI classification that costs real money.
 
-**The `WHERE` in that clause is not optional.** `inbound_messages_wa_id_uniq` is a *partial* index; Postgres cannot infer a partial index unless the `ON CONFLICT` clause repeats its predicate, and the statement fails outright with *"no unique or exclusion constraint matching the ON CONFLICT specification"* — the message is lost and the webhook 500s back to Meta. Verified against a real Postgres, both directions. See `CLAUDE.md` 2026-07-18 and 2026-07-21, which are the same inference failure twice.
+**The `WHERE` in that clause is not optional.** `inbound_messages_wa_id_uniq` is a *partial* index; Postgres cannot infer a partial index unless the `ON CONFLICT` clause repeats its predicate, and the statement fails outright with *"no unique or exclusion constraint matching the ON CONFLICT specification"* — the message is lost and the webhook 500s back to Meta. Verified against a real Postgres, both directions. See `AGENTS.md` 2026-07-18 and 2026-07-21, which are the same inference failure twice.
 
 A message Meta sends without an `id` conflicts with nothing and always records, which is why the column is nullable and the index partial.
 

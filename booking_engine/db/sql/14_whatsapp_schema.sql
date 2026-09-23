@@ -1,6 +1,6 @@
 -- WhatsApp marketing: one sender (and one WABA, in one Twilio subaccount) per
 -- salon, plus the per-salon approved templates and the drip queue.
--- See CLAUDE.md's WhatsApp entry. Idempotent: migrate.sh re-applies every file.
+-- See AGENTS.md's WhatsApp entry. Idempotent: migrate.sh re-applies every file.
 
 CREATE SCHEMA IF NOT EXISTS whatsapp;
 

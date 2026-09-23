@@ -702,7 +702,7 @@ async def customer_campaign_messages(*, shop_id: UUID, customer_id: UUID) -> lis
     rather than as a second, separate sort rule on the Python side. Every
     typed NULL is deliberate — an untyped NULL in a UNION ALL is "could not
     determine data type of parameter" the moment two branches disagree, the
-    same class of bug CLAUDE.md's 2026-07-18/2026-07-21 entries record for
+    same class of bug AGENTS.md's 2026-07-18/2026-07-21 entries record for
     ON CONFLICT predicates.
     """
     return await execute(
@@ -796,7 +796,7 @@ async def record_inbound(
     Postgres cannot infer a partial index unless the clause repeats its
     predicate — without it the statement fails outright with "no unique or
     exclusion constraint matching the ON CONFLICT specification". This repo has
-    been bitten by exactly that twice; see CLAUDE.md 2026-07-18 and 2026-07-21.
+    been bitten by exactly that twice; see AGENTS.md 2026-07-18 and 2026-07-21.
     A NULL id therefore conflicts with nothing, which is the point: a message
     Meta sent us without an id still gets recorded, every time.
 

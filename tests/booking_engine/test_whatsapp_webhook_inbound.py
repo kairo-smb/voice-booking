@@ -5,7 +5,7 @@ writes and is deliberately strict about the one property a plain mock would
 hide: `inbound_messages_wa_id_uniq` is a **partial** index, so an INSERT whose
 ON CONFLICT clause omits the predicate is rejected here the way Postgres
 rejects it ("no unique or exclusion constraint matching..."). This repo has
-shipped that exact inference failure twice — CLAUDE.md 2026-07-18, 2026-07-21.
+shipped that exact inference failure twice — AGENTS.md 2026-07-18, 2026-07-21.
 
 The webhook's posture is load-bearing and asserted throughout: a genuine
 request always gets a 200. Meta retries anything else and disables a webhook

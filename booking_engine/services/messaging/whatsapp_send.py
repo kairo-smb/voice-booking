@@ -321,7 +321,7 @@ async def send_due(*, settings) -> dict:
         # credit line to share: the salon's own card is on its own WABA and
         # Meta bills it directly, so charging AI credits here would bill the
         # same message twice. The SMS path still debits — there Kairo really
-        # does pay Twilio. See CLAUDE.md §2026-08-24.
+        # does pay Twilio. See AGENTS.md §2026-08-24.
         await pacer.wait()
         try:
             provider_sid = await meta.send_template(

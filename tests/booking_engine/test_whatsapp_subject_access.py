@@ -2,7 +2,7 @@
 
 Real Postgres, not a mock: the function issues a single three-branch
 `UNION ALL` with hand-typed NULLs, and this repo has shipped that exact class
-of bug twice before (CLAUDE.md 2026-07-18, 2026-07-21 — an untyped NULL or a
+of bug twice before (AGENTS.md 2026-07-18, 2026-07-21 — an untyped NULL or a
 mistyped interval that only Postgres itself catches). A mocked `execute()`
 would happily accept a query that fails to plan.
 

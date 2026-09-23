@@ -4,7 +4,7 @@ Two properties are load-bearing here, and both are asserted rather than argued:
 
 1. **The task is held.** asyncio keeps only a weak reference to a bare
    `create_task`, so a dropped return value can be collected mid-flight. This
-   repo shipped exactly that bug in the call supervisor (CLAUDE.md 2026-07-21)
+   repo shipped exactly that bug in the call supervisor (AGENTS.md 2026-07-21)
    and it presented as intermittent silence — the hardest symptom to diagnose.
 2. **Nothing escapes `process`.** It is awaited from a fire-and-forget task,
    where an uncaught exception is a customer message silently lost with no

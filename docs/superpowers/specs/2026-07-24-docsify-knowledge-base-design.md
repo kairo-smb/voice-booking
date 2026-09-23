@@ -7,18 +7,18 @@ human-oriented documentation site covering both technical architecture and the
 domain/logical rules the voice agent enforces, kept current by a stated
 maintenance convention rather than tooling.
 
-`CLAUDE.md` stays exactly what it is — an append-only chronological log of
+`AGENTS.md` stays exactly what it is — an append-only chronological log of
 decisions and incidents, the historical record. The knowledge base is a
 different axis: the current-state reference (“what exists and how it behaves
 right now”), not a log of how it got there. `decisions.md` is the one page
-that deliberately bridges the two, as a short topic index into `CLAUDE.md`.
+that deliberately bridges the two, as a short topic index into `AGENTS.md`.
 
 ## Precedent
 
 `~/Documents/kairo/webapp/docs/knowledge/` is the reference implementation:
 plain markdown rendered client-side by Docsify (CDN script, no build step), a
 `README.md` stating a maintenance rule, per-topic pages, and an `api/`
-subfolder grouping REST contract docs by domain. `webapp/CLAUDE.md` (lines
+subfolder grouping REST contract docs by domain. `webapp/AGENTS.md` (lines
 ~17–24) carries a short pointer section listing the pages and the rule; this
 is the mechanism being mirrored, not any specific page content (the two
 repos' domains differ).
@@ -71,7 +71,7 @@ description, and the maintenance-rule blockquote:
 native SIP → `booking_engine` on Fly.io → Neon), sourced from
 `booking_engine/api/app.py` (route mounts), `voice_twiml.py`/`voice_openai.py`
 (call acceptance flow), `mcp_server.py`/`services/mcp_tools.py` (in-process
-MCP dispatch — the self-proxying/timeout history from `CLAUDE.md`'s
+MCP dispatch — the self-proxying/timeout history from `AGENTS.md`'s
 2026-07-24 "dead air" entry belongs here as the *current* behavior, without
 repeating the incident narrative), and `services/call_supervisor.py` (the
 flag-gated control-WS greet/nudge mechanism).
@@ -83,7 +83,7 @@ order via `scripts/migrate.sh`, `01`/`02` explicitly excluded as a
 local-only bootstrap pair). Documents `voice_agent` tables by reading the
 actual `03`–`10` SQL files, not by copying old doc content — this is the
 exact anti-pattern (`INTEGRATION_GUIDE.md`'s hand-copied, silently-stale
-schema) the 2026-07-24 cleanup entry in `CLAUDE.md` just fixed. For
+schema) the 2026-07-24 cleanup entry in `AGENTS.md` just fixed. For
 `business_app_core`, states plainly that this repo doesn't own that schema
 and points at `booking_engine/db/queries.py` and `tests/live_db/*` as the
 canonical mapping, same as the just-rewritten `INTEGRATION_GUIDE.md` does —
@@ -102,7 +102,7 @@ can't say for itself" in the webapp README's phrasing — why a rule exists,
 not just that it does.
 
 **`providers.md`** — Twilio (numbers, TwiML webhook, signature verification,
-Estonia-mobile-number rationale summarized with a link to the full `CLAUDE.md`
+Estonia-mobile-number rationale summarized with a link to the full `AGENTS.md`
 entry), OpenAI Realtime (native SIP acceptance, hosted MCP tool-result
 auto-continue gap and the call-supervisor workaround, summarized not
 re-narrated), Neon (pooler vs direct connection, ephemeral-branch CI usage).
@@ -118,10 +118,10 @@ debug flags). Rewritten into webapp's page style (maintenance-rule blockquote
 at top), not a verbatim copy.
 
 **`decisions.md`** — a short (~1 line per entry) chronological or topical
-index into `CLAUDE.md` sections, e.g. "Telnyx → Twilio (Estonia mobile
-numbers) — see CLAUDE.md §2026-07-16" — enough for someone to find the
+index into `AGENTS.md` sections, e.g. "Telnyx → Twilio (Estonia mobile
+numbers) — see AGENTS.md §2026-07-16" — enough for someone to find the
 relevant history entry without reading the whole log, kept in sync manually
-alongside `CLAUDE.md` edits (per the user's explicit choice over linking out
+alongside `AGENTS.md` edits (per the user's explicit choice over linking out
 with no index).
 
 **`api/README.md`** — response envelope conventions (`{"data": ...}` /
@@ -163,14 +163,14 @@ already accurate as of the last cleanup pass; this is a move-and-reformat
 into the new page shape, re-verifying anything that touches a route path or
 schema detail rather than trusting the copy.
 
-## CLAUDE.md change
+## AGENTS.md change
 
-A short new block (~8 lines, mirroring webapp's `CLAUDE.md` lines ~17–24) is
+A short new block (~8 lines, mirroring webapp's `AGENTS.md` lines ~17–24) is
 inserted after the existing header note, before the first dated entry. It
 names each `docs/knowledge/*.md` page in one line and states the maintenance
 rule in one sentence, pointing to the full rule in
 `docs/knowledge/README.md`. It does not duplicate page content and does not
-change `CLAUDE.md`'s existing role as the append-only history log — that
+change `AGENTS.md`'s existing role as the append-only history log — that
 framing in the current header stays untouched.
 
 ## Out of scope (explicit non-goals)
@@ -183,5 +183,5 @@ framing in the current header stays untouched.
 - No change to FastAPI's own auto-generated `/docs` (Swagger) — that remains
   the live request/response schema reference; the new `api/*.md` pages are
   the narrative/auth/gotcha layer on top of it, not a replacement.
-- Not rewriting `CLAUDE.md`'s existing entries or its role as the history
+- Not rewriting `AGENTS.md`'s existing entries or its role as the history
   log.

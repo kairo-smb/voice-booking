@@ -104,7 +104,7 @@ async def _transcribe(
     # transcript nobody paid for.
     #
     # This is deliberately the OPPOSITE order from the SMS path, which debits
-    # only after Twilio accepts (CLAUDE.md 2026-08-12), and the asymmetry is a
+    # only after Twilio accepts (AGENTS.md 2026-08-12), and the asymmetry is a
     # decision rather than an oversight. There, a rejected send is routine and
     # the charge is ~186 credits. Here the only way to keep the gate *and*
     # refund a failed run would be to POST a negative amount to charge-actual —

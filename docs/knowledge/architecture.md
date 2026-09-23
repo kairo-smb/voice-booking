@@ -14,14 +14,14 @@ Caller (phone) → Twilio (TwiML) → OpenAI Realtime API (native SIP, STT/LLM/T
                                     Neon PostgreSQL (business_app_core + voice_agent)
 ```
 
-One deployed service — `booking_engine`, a FastAPI app (`booking_engine/api/app.py`). There is no separate "voice gateway" process; an earlier two-service split was folded into this one before the current history log begins — the only surviving trace is the `tests/voice_gateway/` directory name, which today tests `booking_engine/services/*` (`CLAUDE.md` §2026-07-24 "Repo cleanup...", which deleted the last dead references to it).
+One deployed service — `booking_engine`, a FastAPI app (`booking_engine/api/app.py`). There is no separate "voice gateway" process; an earlier two-service split was folded into this one before the current history log begins — the only surviving trace is the `tests/voice_gateway/` directory name, which today tests `booking_engine/services/*` (`AGENTS.md` §2026-07-24 "Repo cleanup...", which deleted the last dead references to it).
 
 ## Call flow
 
 1. A call reaches a Twilio number. Twilio POSTs to `POST /api/v1/voice/twiml/incoming` (`voice_twiml.py`), signature-checked against `TWILIO_AUTH_TOKEN`. The handler looks up the shop by the dialed number and returns TwiML that `<Dial><Sip>`s straight into OpenAI's SIP gateway, passing the shop id as a custom SIP header (`X-Shop-Id`, via Twilio's `<Dial><Sip>` query-string-after-host convention — see `services/realtime_session.py::build_sip_uri`).
 2. OpenAI fires `realtime.call.incoming` to `POST /voice/openai/incoming` (`voice_openai.py`, top-level path, not under `/api/v1`). The handler reads `X-Shop-Id` back out of the SIP headers (or, QA-only, falls back to `SIP_TEST_FALLBACK_SHOP_ID` for a raw softphone test call with no Twilio in the path), resolves the caller by phone (`services/identity_resolver.py`), assembles the session prompt (`services/prompt_assembler.py` — see [Voice Agent Logic](voice-agent-logic.md)), and calls `accept_sip_call()` (`clients/openai_realtime.py`) with that prompt + the 12 tool schemas.
-3. During the call, OpenAI calls tools over MCP against `/mcp` (mounted directly on this app in `app.py`, via `booking_engine/mcp_server.py`). Tool dispatch is **in-process** — `execute_tool()` uses an `ASGITransport(app=app)` call into the exact same running process rather than a real HTTP hop, wrapped in a 10s `asyncio.wait_for` (`TOOL_CALL_TIMEOUT_SECONDS`, `services/mcp_tools.py`) that returns a clean `{"ok": false, "error": "tool_timeout"}` on a stuck downstream call rather than hanging. This was a deliberate fix for real "dead air" latency caused by an earlier version that made a genuine outbound HTTPS request to the app's own public URL on every tool call — full incident in `CLAUDE.md` §2026-07-24.
-4. If `ENABLE_CALL_SUPERVISOR` is set, a per-call background task (`services/call_supervisor.py`) opens its own control WebSocket to the accepted call and sends `response.create` on connect (greeting) and after each tool result (`response.output_item.done` for an `mcp_call`) — working around OpenAI's hosted MCP not auto-continuing after a tool result on its own. Off by default; see `CLAUDE.md` §2026-07-21 for why it exists and its current live-test status.
+3. During the call, OpenAI calls tools over MCP against `/mcp` (mounted directly on this app in `app.py`, via `booking_engine/mcp_server.py`). Tool dispatch is **in-process** — `execute_tool()` uses an `ASGITransport(app=app)` call into the exact same running process rather than a real HTTP hop, wrapped in a 10s `asyncio.wait_for` (`TOOL_CALL_TIMEOUT_SECONDS`, `services/mcp_tools.py`) that returns a clean `{"ok": false, "error": "tool_timeout"}` on a stuck downstream call rather than hanging. This was a deliberate fix for real "dead air" latency caused by an earlier version that made a genuine outbound HTTPS request to the app's own public URL on every tool call — full incident in `AGENTS.md` §2026-07-24.
+4. If `ENABLE_CALL_SUPERVISOR` is set, a per-call background task (`services/call_supervisor.py`) opens its own control WebSocket to the accepted call and sends `response.create` on connect (greeting) and after each tool result (`response.output_item.done` for an `mcp_call`) — working around OpenAI's hosted MCP not auto-continuing after a tool result on its own. Off by default; see `AGENTS.md` §2026-07-21 for why it exists and its current live-test status.
 5. On hangup, the call is finalized via `voice_events.py`'s `session.*` webhooks (started/turn/ended), persisting to `voice_agent.calls`/`call_transcripts`/`call_events`.
 
 ## Auth boundaries
@@ -38,11 +38,11 @@ Four distinct auth schemes across the surface — see [API overview](api/README.
 A second, independent flow alongside the SIP call path above — no caller involved, just the webapp and Twilio's Regulatory Compliance API:
 
 1. Webapp's "Richiedi numero" panel (Inbox → Configurazione → Canali) POSTs `business_name`/`contact_email`/a commercial-register document to `POST /api/v1/voice/numbers/request` (`voice_telephony.py`, control-plane bearer). `services/number_provisioning.py::submit_request` builds **that salon's own** Twilio regulatory bundle — regulation lookup → End-User → document upload → Bundle → 2× ItemAssignment → synchronous Evaluate → submit-if-compliant — persisting each Twilio SID to `voice_agent.number_requests` as soon as it exists, not batched at the end.
-2. `POST /api/v1/messaging/tick` (`messaging_tick.py`), hit hourly by `.github/workflows/messaging-cron.yml`, polls every `pending_review` request's bundle status, calls `services/number_provisioning.py::provision_approved` to purchase the number once Twilio approves, refreshes the green/red health semaphore (`services/number_health.py`) for every already-provisioned number, then — last, and wrapped in its own try/except so its failure can't suppress the health refresh above it — runs `services/number_release.py::sweep`, the grace-period release of numbers whose shop's plan has lapsed (schedule → clear-if-plan-returns → release-past-deadline; see `api/number-provisioning.md` and `CLAUDE.md` §2026-08-15).
+2. `POST /api/v1/messaging/tick` (`messaging_tick.py`), hit hourly by `.github/workflows/messaging-cron.yml`, polls every `pending_review` request's bundle status, calls `services/number_provisioning.py::provision_approved` to purchase the number once Twilio approves, refreshes the green/red health semaphore (`services/number_health.py`) for every already-provisioned number, then — last, and wrapped in its own try/except so its failure can't suppress the health refresh above it — runs `services/number_release.py::sweep`, the grace-period release of numbers whose shop's plan has lapsed (schedule → clear-if-plan-returns → release-past-deadline; see `api/number-provisioning.md` and `AGENTS.md` §2026-08-15).
 3. `GET /api/v1/voice/numbers/request/{shop_id}` is the webapp's poll target — returns the request row and the telephony row (if any) so the UI can pick which state to render.
 4. `POST /api/v1/voice/numbers/release` (`voice_telephony.py`) is the owner-initiated counterpart to the sweep above — a salon deliberately giving up its number, bypassing the grace period on purpose. Calls the same `release_for_shop` the sweep uses.
 
-**This coexists with, and does not replace, the older manual `/voice/numbers/search` + `/voice/numbers/provision` pair** — those still purchase against the one shared Kairo-entity bundle (`TWILIO_BUNDLE_SID`) from the 2026-07-16 decision, used for Path 1 (forwarding) and ops-triggered onboarding. Only the new `/request` path builds a bundle per salon. Full rationale for why a shared bundle is no longer viable for self-service: `CLAUDE.md` §2026-08-14. Design detail (regulatory model, the orphaned-number bug and its fix, the health-semaphore contract): see the git history of the now-deleted `docs/number-provisioning-design.md`, or `CLAUDE.md` §2026-08-14.
+**This coexists with, and does not replace, the older manual `/voice/numbers/search` + `/voice/numbers/provision` pair** — those still purchase against the one shared Kairo-entity bundle (`TWILIO_BUNDLE_SID`) from the 2026-07-16 decision, used for Path 1 (forwarding) and ops-triggered onboarding. Only the new `/request` path builds a bundle per salon. Full rationale for why a shared bundle is no longer viable for self-service: `AGENTS.md` §2026-08-14. Design detail (regulatory model, the orphaned-number bug and its fix, the health-semaphore contract): see the git history of the now-deleted `docs/number-provisioning-design.md`, or `AGENTS.md` §2026-08-14.
 ## SMS marketing send (Phase 1 of messaging)
 
 First shipped piece of a larger SMS/WhatsApp messaging design
@@ -50,7 +50,7 @@ First shipped piece of a larger SMS/WhatsApp messaging design
 design ships; the durable record is this section, [Database → `sms`
 schema](database.md#sms-schema--authoritative-here), [Providers →
 SMS](providers.md#sms-sending-twilio-messaging-api), [API →
-SMS](api/sms.md), and `CLAUDE.md` §2026-08-12). Phase 1 is one outbound SMS
+SMS](api/sms.md), and `AGENTS.md` §2026-08-12). Phase 1 is one outbound SMS
 to one consenting customer, triggered from the webapp:
 
 ```
@@ -65,7 +65,7 @@ webapp (owner clicks "Invia SMS" in a modal)
 ```
 
 **No inbound SMS webhook / STOP handling.** Opt-out was removed as an
-in-message mechanism — see `CLAUDE.md`'s STOP-removal entry. Suppression is
+in-message mechanism — see `AGENTS.md`'s STOP-removal entry. Suppression is
 `business_app_core.customers.marketing_consent` alone, cleared in-store by
 staff. Twilio still POSTs delivery/price callbacks to
 `POST /api/v1/sms/webhook/status`, `X-Twilio-Signature`-verified with the
@@ -91,7 +91,7 @@ Personalised promotions over WhatsApp instead of SMS, ~50/day/salon dripped
 across opening hours. Durable record: this section, [Database → `whatsapp`
 schema](database.md#whatsapp-schema--authoritative-here), [Providers →
 WhatsApp](providers.md#whatsapp-meta-tech-provider--twilio), [API →
-WhatsApp](api/whatsapp.md), and `CLAUDE.md` §2026-08-21.
+WhatsApp](api/whatsapp.md), and `AGENTS.md` §2026-08-21.
 
 **The shape is forced by two hard external rules, not chosen:**
 
@@ -170,7 +170,7 @@ native "Stop promotions" button on every marketing template; a refusal comes
 back as error **`131050`** on the status webhook, which writes
 `marketing_consent = false` into `business_app_core.customers`. That is a
 materially stronger position under Italian marketing rules than the SMS path
-(see `CLAUDE.md`'s STOP-removal entry), and it comes from Meta, not from us.
+(see `AGENTS.md`'s STOP-removal entry), and it comes from Meta, not from us.
 
 **`131049` is a different thing and must not be conflated with it.** That is
 Meta's per-user *cross-brand* marketing cap — the recipient has had enough

@@ -50,4 +50,4 @@ CREATE INDEX IF NOT EXISTS sms_outbound_provider_sid_idx
 -- STOP handling was dropped — opt-out is now in-store staff clearing
 -- customers.marketing_consent, the sole suppression rule. No DROP TABLE was
 -- added: environments that already created the table keep it, harmlessly
--- empty and unused. See CLAUDE.md's STOP-removal entry.
+-- empty and unused. See AGENTS.md's STOP-removal entry.

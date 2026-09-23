@@ -6,6 +6,14 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-23 — This file is now AGENTS.md
+
+Renamed from CLAUDE.md so the same tool-agnostic developer guide name works
+across every Kairo repo (webapp, voice-booking, marketing-engine). No content
+changed; the append-only history below is untouched. The stale untracked
+AGENTS.md copy mentioned in the 2026-09-22 entry is superseded by this file.
+References across this repo and the webapp now point at AGENTS.md.
+
 ## 2026-09-22 — `OPENAI_TOOL_SECRET` was never an OpenAI credential, and both CI failures were local-vs-CI drift
 
 **The rename, and the two names it must not be confused with.** `openai_tool_secret`

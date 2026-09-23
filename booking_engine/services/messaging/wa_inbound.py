@@ -48,7 +48,7 @@ MENU_BUTTONS = [
 
 # asyncio holds only a WEAK reference to a task, so a bare `create_task` whose
 # return value is dropped can be garbage-collected mid-flight. This repo
-# shipped exactly that bug in the call supervisor (CLAUDE.md 2026-07-21) and
+# shipped exactly that bug in the call supervisor (AGENTS.md 2026-07-21) and
 # it presented as intermittent silence — the hardest possible symptom to
 # diagnose. The set is the strong reference; the done callback is what stops
 # it growing forever.

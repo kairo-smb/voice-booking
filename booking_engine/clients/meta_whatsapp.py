@@ -1,6 +1,6 @@
 """Meta WhatsApp Cloud API — Graph client.
 
-Replaced the Twilio BSP client on 2026-08-24; see CLAUDE.md for why Twilio
+Replaced the Twilio BSP client on 2026-08-24; see AGENTS.md for why Twilio
 could not hold a salon's own WABA at all.
 
 Every call into a salon's WABA is authenticated with **that salon's** business

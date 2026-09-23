@@ -590,13 +590,13 @@ Automated tests fake the provider. This is the run that proves the flow.
 - [ ] **Step 2 (safe):** create a real End-User, document and bundle for a test shop, and **evaluate** it. Evaluation is free and non-destructive. Confirm a compliant result with a real *visura camerale*, and that a deliberately empty `business_name` produces violations that render in the UI.
 - [ ] **Step 3 (costs money — owner-triggered only, never in CI):** submit the bundle, wait for approval, then run the tick and confirm exactly one number is purchased and `shop_telephony` has one row. **A number is ~$3/mo and releasing it is manual.**
 - [ ] **Step 4:** Break it on purpose — point `voice_url` at a wrong host in the Twilio console, run the tick, confirm the semaphore goes **red** with `webhook_drift`, then restore and confirm it returns green.
-- [ ] **Step 5:** Record the outcome in `CLAUDE.md`.
+- [ ] **Step 5:** Record the outcome in `AGENTS.md`.
 
 ---
 
 ## Task 14: Documentation
 
-- [ ] **voice-booking:** `docs/knowledge/{architecture,database,providers,api}.md` + a `CLAUDE.md` entry recording that the 2026-07-16 one-bundle-for-all model is **superseded** — Twilio's ISV rules forbid reusing our business info in customer bundles — and that Estonia Mobile is business-only with a commercial-register extract required per salon.
+- [ ] **voice-booking:** `docs/knowledge/{architecture,database,providers,api}.md` + a `AGENTS.md` entry recording that the 2026-07-16 one-bundle-for-all model is **superseded** — Twilio's ISV rules forbid reusing our business info in customer bundles — and that Estonia Mobile is business-only with a commercial-register extract required per salon.
 - [ ] **webapp:** `docs/knowledge/{features,providers,architecture,decisions}.md`, including the first subscription gate and the deleted dead route.
 - [ ] Commit in both repos.
 
@@ -610,7 +610,7 @@ Automated tests fake the provider. This is the run that proves the flow.
 - [ ] real-Twilio regulation check passes
 - [ ] one real bundle evaluated compliant against the live API
 - [ ] semaphore proven to flip red and back on a real webhook change
-- [ ] docs updated in both repos, `CLAUDE.md` entry written
+- [ ] docs updated in both repos, `AGENTS.md` entry written
 
 ## Out of scope
 

@@ -15,7 +15,7 @@ marketing-engine gates on the shop's basket before it calls a provider (402 when
 empty) and settles the *actual* LLM cost against that same basket after a turn
 that ran. Adding a `charge_actual` call on this side would bill the salon twice
 for one turn — once for real, once for a flat number invented here — which is
-exactly the failure CLAUDE.md's 2026-08-12 entry forbids ("Two debit paths for
+exactly the failure AGENTS.md's 2026-08-12 entry forbids ("Two debit paths for
 the same charge would eventually double-charge or drift") and which the
 2026-09-03 entry deleted this repo's own basket arithmetic to prevent. So the
 cost rule this module owns is the one the engine cannot see: a **ceiling on how
@@ -291,7 +291,7 @@ def _services(rows: list[dict]) -> list[dict]:
 
     The agent needs prices to answer "quanto costa", which is an ordinary part
     of booking on this channel — unlike the voice agent, where cost is gated
-    behind an explicit ask (CLAUDE.md 2026-07-21) because a phone agent reciting
+    behind an explicit ask (AGENTS.md 2026-07-21) because a phone agent reciting
     a price list is a worse experience than a written one.
     """
     return [

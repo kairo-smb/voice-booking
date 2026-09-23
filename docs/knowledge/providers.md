@@ -56,9 +56,9 @@ So the durable distinction is the **credential** (control plane = the webapp's a
 
 **Env vars:** `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_DEFAULT_COUNTRY` (`EE`), `TWILIO_BUNDLE_SID`, `TWILIO_ADDRESS_SID`. No new env var was needed for self-service provisioning — each salon's bundle SID is created dynamically and stored on its own `number_requests` row, never configured.
 
-**Why Estonia, not Italy:** Estonia Mobile numbers are ~$3/mo vs. Italy Mobile's $30/mo (the only type Twilio sells there). Full country-by-country comparison in `CLAUDE.md` §2026-07-16.
+**Why Estonia, not Italy:** Estonia Mobile numbers are ~$3/mo vs. Italy Mobile's $30/mo (the only type Twilio sells there). Full country-by-country comparison in `AGENTS.md` §2026-07-16.
 
-**Two regulatory-bundle models coexist, deliberately — read `CLAUDE.md` §2026-08-14 before assuming either is dead:**
+**Two regulatory-bundle models coexist, deliberately — read `AGENTS.md` §2026-08-14 before assuming either is dead:**
 - **Shared bundle (2026-07-16, still live):** `TWILIO_BUNDLE_SID` — one Kairo-entity bundle, reused via `POST /voice/numbers/provision`. Still used for Path 1 (forwarding) and ops-triggered onboarding.
 - **Per-salon bundle (2026-08-14, self-service):** `POST /voice/numbers/request` builds a fresh Regulation→End-User→SupportingDocument→Bundle chain **per shop**, stored on `voice_agent.number_requests`. Twilio's ISV rules forbid reusing Kairo's own business info across customer bundles ("Twilio audits this") — the shared-bundle model above is not a legal substitute for this path, only a narrower carryover for the flows it already served.
 - Estonia Mobile's regulation (`RN26dca8d0e541a6c8fce4abd46e518506`) is **business-only** and asks for exactly one End-User field (`business_name`) and one document (`commercial_registrar_excerpt` — an Italian *visura camerale*): no address, VAT, or personal ID. **Sending fields the regulation doesn't request is a known cause of evaluation failure** — don't add them speculatively. The regulation SID is queried at request time (`get_regulation_sid`), never hardcoded; `tests/live_twilio/test_estonia_regulation.py` asserts it still matches, so a failing test there means Estonia's rules changed, not a code bug.
@@ -71,7 +71,7 @@ So the durable distinction is the **credential** (control plane = the webapp's a
 **Purpose:** marketing SMS sends. Added 2026-08-12, Phase 1 of a larger
 messaging design (`docs/messaging-design.md`; see
 [Architecture → SMS marketing send](architecture.md#sms-marketing-send-phase-1-of-messaging)
-and `CLAUDE.md` §2026-08-12). The shop's own Twilio DID — the same number
+and `AGENTS.md` §2026-08-12). The shop's own Twilio DID — the same number
 that answers voice calls — is also the SMS sender; no second number, no
 shared Kairo sender.
 
@@ -80,7 +80,7 @@ shared Kairo sender.
 **Env vars:** `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` (the Twilio send) plus `WEBAPP_BASE_URL`/`MARKET_INTEL_SECRET` (the post-send charge — `sms_send.py` bills the shop by POSTing to the webapp's charge-actual endpoint via `booking_engine/clients/webapp_credits.py`; the webapp owns the basket deduction). `sms_send.py` calls `twilio.rest.Client.messages.create()` directly; it does not go through `clients/twilio_numbers.py`, which is provisioning-only (search/purchase numbers).
 
 **No in-message opt-out (STOP handling removed).** There is no inbound SMS
-webhook, no STOP-keyword parsing, and no opt-out footer — see `CLAUDE.md`'s
+webhook, no STOP-keyword parsing, and no opt-out footer — see `AGENTS.md`'s
 STOP-removal entry. Suppression is `business_app_core.customers.
 marketing_consent` alone, cleared in-store by a staff member; `sms.opt_outs`
 still exists in the schema but nothing writes to it any more. Provisioned
@@ -89,7 +89,7 @@ and `services/number_health.py::decide_health` checks `voice_url` only.
 
 **Gotcha — segment/encoding is a billing surface, not cosmetic.** GSM-7 fits 160 chars/segment; the moment a body contains one character GSM-7 can't represent (most emoji, curly quotes, em dashes, uppercase accented vowels other than É), the whole message drops to UCS-2 at 70 chars/segment — silently tripling the bill on a stray LLM-written curly quote. `gsm7.py`'s `sanitize()` transliterates that typographic noise back into GSM-7 losslessly; genuinely non-GSM-7 content (emoji) is priced honestly, never silently stripped. Segment counting is duplicated in the webapp (`src/lib/messaging/sms-preview.ts`, a pre-click cost preview) rather than shared — this repo's count is authoritative at send time.
 
-**Billing: 2× Twilio cost via AI credits, a dedicated converter.** `send_credits.py` — deliberately not the webapp's `rawToUserCredits()` (10× LLM margin, floors at 1 credit). Full reasoning: `CLAUDE.md` §2026-08-12.
+**Billing: 2× Twilio cost via AI credits, a dedicated converter.** `send_credits.py` — deliberately not the webapp's `rawToUserCredits()` (10× LLM margin, floors at 1 credit). Full reasoning: `AGENTS.md` §2026-08-12.
 
 ### WhatsApp (Meta Cloud API, Tech Provider)
 
@@ -97,7 +97,7 @@ and `services/number_health.py::decide_health` checks `voice_url` only.
 plus bulk campaigns dripped over days. Added 2026-08-21 on Twilio; **migrated
 off Twilio onto Meta direct 2026-08-24**. See
 [Architecture → WhatsApp marketing](architecture.md#whatsapp-marketing-one-waba-per-salon)
-and `CLAUDE.md` §2026-08-24.
+and `AGENTS.md` §2026-08-24.
 
 > **Twilio is not in this path.** Twilio must attach a WABA to *its own* Meta
 > credit line during registration and Meta only lets a payment method be
@@ -319,9 +319,9 @@ and [Onboard WhatsApp Business app users](https://developers.facebook.com/docume
 
 **Env vars:** `OPENAI_SIP_PROJECT_ID`, `OPENAI_API_KEY`, `OPENAI_REALTIME_MODEL` (`gpt-realtime` — not `gpt-4o-realtime-preview`), `OPENAI_WEBHOOK_SECRET`, `VOICE_AGENT_TOOL_SECRET`, `ENABLE_CALL_SUPERVISOR`, `CALL_SUPERVISOR_VERBOSE_LOGGING`.
 
-**Hard-won gotcha #1 — hosted MCP does not auto-continue.** After a tool call, the model's response ends (`response.done` fires *before* the tool even returns); the tool executes, `response.output_item.done` delivers the result, and then nothing — OpenAI does not open a new response to voice it. This directly contradicts the Responses-API "hosted MCP auto-continues" assumption. Full event-trace evidence and the fix (a server-side control WebSocket sending `response.create`) in `CLAUDE.md` §2026-07-21 (two entries: "Realtime + hosted MCP..." and "SIP call supervisor...").
+**Hard-won gotcha #1 — hosted MCP does not auto-continue.** After a tool call, the model's response ends (`response.done` fires *before* the tool even returns); the tool executes, `response.output_item.done` delivers the result, and then nothing — OpenAI does not open a new response to voice it. This directly contradicts the Responses-API "hosted MCP auto-continues" assumption. Full event-trace evidence and the fix (a server-side control WebSocket sending `response.create`) in `AGENTS.md` §2026-07-21 (two entries: "Realtime + hosted MCP..." and "SIP call supervisor...").
 
-**Hard-won gotcha #2 — `server_url` needs a trailing slash.** `app.mount("/mcp", ...)` makes Starlette 307-redirect bare `/mcp` → `/mcp/`, and OpenAI's Realtime MCP client does **not** follow that redirect for the tool-call POST body — it silently never calls the tool. Always point `server_url` at `/mcp/`. Root-caused via `fly logs`; full story in `CLAUDE.md` §2026-07-21 "MCP server_url must carry a trailing slash".
+**Hard-won gotcha #2 — `server_url` needs a trailing slash.** `app.mount("/mcp", ...)` makes Starlette 307-redirect bare `/mcp` → `/mcp/`, and OpenAI's Realtime MCP client does **not** follow that redirect for the tool-call POST body — it silently never calls the tool. Always point `server_url` at `/mcp/`. Root-caused via `fly logs`; full story in `AGENTS.md` §2026-07-21 "MCP server_url must carry a trailing slash".
 
 **Gotcha #3 — webhook signature is opt-in.** `voice_openai.py`'s `realtime.call.incoming` handler only verifies a signature when `OPENAI_WEBHOOK_SECRET` is set (see the `ponytail:` comment at the top of that file) — currently unwired, so the endpoint accepts unsigned requests.
 
@@ -339,7 +339,7 @@ and [Onboard WhatsApp Business app users](https://developers.facebook.com/docume
 
 **AI spend: 15 credits per voice note, flat, run type `whatsapp_transcribe`.** Derived from real cost at the ceiling of a typical note rather than rounded: 30s = 0.5 min × $0.003/min = $0.0015 raw, × 10 (the house LLM margin — this is LLM spend, not the 2× carrier pass-through `send_credits` applies to Twilio) × 1000 credits/USD = 15. Flat rather than per-second because a duration meter would mean decoding the container to learn something worth a fraction of a credit; a note longer than 30s is therefore transcribed under cost, bounded only by Meta's 16MB media cap.
 
-**Charged *before* the work — the opposite of the SMS path, deliberately.** SMS debits only after Twilio accepts (`CLAUDE.md` §2026-08-12). Here the charge is the gate: a 402 means an empty basket, so nothing is sent to OpenAI at all and the raw message stays in the owner's queue as a vocale. The cost of that ordering is that a provider failure leaves the salon charged for nothing — accepted rather than refunded, because the only refund available would be a negative `charge-actual`, which is basket arithmetic this repo gave up in §2026-09-03 and a contract the webapp does not offer. It is logged at `whatsapp.transcribe_failed` with the credit amount so the exposure is countable.
+**Charged *before* the work — the opposite of the SMS path, deliberately.** SMS debits only after Twilio accepts (`AGENTS.md` §2026-08-12). Here the charge is the gate: a 402 means an empty basket, so nothing is sent to OpenAI at all and the raw message stays in the owner's queue as a vocale. The cost of that ordering is that a provider failure leaves the salon charged for nothing — accepted rather than refunded, because the only refund available would be a negative `charge-actual`, which is basket arithmetic this repo gave up in §2026-09-03 and a contract the webapp does not offer. It is logged at `whatsapp.transcribe_failed` with the credit amount so the exposure is countable.
 
 **Every failure returns `None`, never a partial transcript** — no credit, no key, media gone, provider error, empty result. `None` is stored as a NULL `transcript` ("we do not know"); `""` would claim we transcribed it and it said nothing. It never overwrites `body`. `transcribe()` cannot raise: it is awaited from a fire-and-forget background task where an exception is a silently lost customer message.
 
@@ -351,9 +351,9 @@ and [Onboard WhatsApp Business app users](https://developers.facebook.com/docume
 
 **Env vars:** `DATABASE_URL` (pooler endpoint, port 5432, transaction mode).
 
-**CI usage:** every DB-touching GitHub Actions workflow (`ci.yml`, `deploy-qa.yml`, `deploy-fly-prod.yml`) provisions a throwaway, copy-on-write Neon branch off production, migrates + tests against it, then deletes it — never touches the real QA/production branch until that passes. Full rationale (a real seed-data bug this caught) in `CLAUDE.md` §2026-07-18.
+**CI usage:** every DB-touching GitHub Actions workflow (`ci.yml`, `deploy-qa.yml`, `deploy-fly-prod.yml`) provisions a throwaway, copy-on-write Neon branch off production, migrates + tests against it, then deletes it — never touches the real QA/production branch until that passes. Full rationale (a real seed-data bug this caught) in `AGENTS.md` §2026-07-18.
 
-**Migration ownership:** the ephemeral branch above is the only Neon branch this repo migrates itself. Applying migrations to the real QA/production branches belongs to the `webapp` repo, which orders all three schemas together — see [Operations → Migrations](operations.md#migrations) and `CLAUDE.md` §2026-07-24 "CI: migration ownership moved to the webapp repo".
+**Migration ownership:** the ephemeral branch above is the only Neon branch this repo migrates itself. Applying migrations to the real QA/production branches belongs to the `webapp` repo, which orders all three schemas together — see [Operations → Migrations](operations.md#migrations) and `AGENTS.md` §2026-07-24 "CI: migration ownership moved to the webapp repo".
 
 ## Push notifications (stub, not wired)
 

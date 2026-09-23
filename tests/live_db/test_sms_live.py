@@ -1,12 +1,12 @@
 """Live DB tests — the `sms` schema against real Neon.
 
 Mocked tests never catch a schema mismatch. The 2026-07-21 incident in
-CLAUDE.md was exactly that: code assuming a column no migration had created,
+AGENTS.md was exactly that: code assuming a column no migration had created,
 invisible because the only tests covering it were live-DB ones that had been
 silently skipping. These run the real SQL against the real schema.
 
 Deliberately self-contained: the QA branch has never had `02_seed_data.sql`
-applied (confirmed 2026-08-12, still true — see CLAUDE.md 2026-07-17), so
+applied (confirmed 2026-08-12, still true — see AGENTS.md 2026-07-17), so
 `conftest.SHOP_ID` and friends do not exist there and every FK would blow up.
 These tests discover a real shop at runtime instead, write only into the
 (new, otherwise-empty) `sms.*` tables, and delete what they wrote.

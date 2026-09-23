@@ -11,7 +11,7 @@ name: Messaging cron
 #      forwarding has silently stopped. This endpoint has existed since
 #      before, but its docstring's "triggered by EventBridge nightly" claim
 #      has been false since 2026-07-18, when the AWS Lambda/EventBridge
-#      deploy path was deleted (see CLAUDE.md). Nothing has called it since
+#      deploy path was deleted (see AGENTS.md). Nothing has called it since
 #      — it is wired in here rather than left orphaned, since routing it
 #      through this same schedule costs one extra step.
 #

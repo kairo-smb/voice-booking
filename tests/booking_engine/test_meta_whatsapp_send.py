@@ -1,7 +1,7 @@
 """Graph client: free-form text, reply-button menus, and media download.
 
 These three calls are the ones two-way conversation needs on top of the
-existing template-only client — see CLAUDE.md's WhatsApp entries for why
+existing template-only client — see AGENTS.md's WhatsApp entries for why
 `send_template`/`send_document_template` were the only send paths until now.
 """
 import pytest

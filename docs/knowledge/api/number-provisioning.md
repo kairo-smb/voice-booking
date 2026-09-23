@@ -1,6 +1,6 @@
 # Self-Service Number Provisioning API
 
-Endpoints backing the webapp's "Richiedi numero" panel (Inbox → Configurazione → Canali) and the hourly cron that drives it forward. All require `Authorization: Bearer <CONTROL_PLANE_SECRET>` (`require_control_plane_token`) — same scheme as [Voice Control Plane](voice-control-plane.md), just split into its own page because the flow (Twilio Regulatory Compliance, not a plain DB read/write) is substantial enough to document on its own. See [Architecture](../architecture.md#self-service-number-provisioning-path-2-onboarding) for the end-to-end flow and `CLAUDE.md` §2026-08-14 for why this exists alongside the older shared-bundle `/voice/numbers/provision` route.
+Endpoints backing the webapp's "Richiedi numero" panel (Inbox → Configurazione → Canali) and the hourly cron that drives it forward. All require `Authorization: Bearer <CONTROL_PLANE_SECRET>` (`require_control_plane_token`) — same scheme as [Voice Control Plane](voice-control-plane.md), just split into its own page because the flow (Twilio Regulatory Compliance, not a plain DB read/write) is substantial enough to document on its own. See [Architecture](../architecture.md#self-service-number-provisioning-path-2-onboarding) for the end-to-end flow and `AGENTS.md` §2026-08-14 for why this exists alongside the older shared-bundle `/voice/numbers/provision` route.
 
 > **Maintenance rule:** an endpoint added/removed/changed updates this file in the same change. See [../README](../README.md#maintenance-rule).
 
