@@ -52,8 +52,13 @@ async def test_check_availability_treats_blank_staff_id_as_no_preference():
     Pydantic rejected UUID("") instead of treating it as "no preference"."""
     now = datetime.now(timezone.utc).replace(microsecond=0)
     sid = uuid4()
+    # `can_serve=True` — the shop CAN do this, the fortnight is just full. Since
+    # 2026-09-24 an empty result asks that second question, and this test is about
+    # coercing a blank staff_id, not about what an empty diary means.
     with patch("booking_engine.api.routes.voice_tools_booking.find_availability",
-               new=AsyncMock(return_value=[])) as find_mock:
+               new=AsyncMock(return_value=[])) as find_mock, \
+         patch("booking_engine.api.routes.voice_tools_booking.any_staff_could_ever_serve",
+               new=AsyncMock(return_value=True)):
         transport = ASGITransport(app=_app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
             r = await c.post(
@@ -71,7 +76,9 @@ async def test_check_availability_treats_blank_staff_id_as_no_preference():
 async def test_check_availability_treats_blank_preferred_when_as_none():
     sid = uuid4()
     with patch("booking_engine.api.routes.voice_tools_booking.find_availability",
-               new=AsyncMock(return_value=[])) as find_mock:
+               new=AsyncMock(return_value=[])) as find_mock, \
+         patch("booking_engine.api.routes.voice_tools_booking.any_staff_could_ever_serve",
+               new=AsyncMock(return_value=True)):
         transport = ASGITransport(app=_app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
             r = await c.post(
@@ -83,6 +90,79 @@ async def test_check_availability_treats_blank_preferred_when_as_none():
     assert r.json()["ok"] is True
     _, kwargs = find_mock.call_args
     assert kwargs["preferred_when"] is None
+
+
+# ── An empty diary and an unservable request are not the same answer ────────
+# Before 2026-09-24 both came back `ok: true, data: []`. The agent, told only
+# "no slots", offers the customer another day — so for a service nobody in the
+# shop can perform it offers Tuesday, then Wednesday, then Thursday, forever.
+# Found on the demo shop: four services mapped in staff_services only to a staff
+# member with zero staff_schedules rows.
+
+@pytest.mark.asyncio
+async def test_check_availability_refuses_when_nobody_could_ever_serve():
+    sid = uuid4()
+    with patch("booking_engine.api.routes.voice_tools_booking.find_availability",
+               new=AsyncMock(return_value=[])), \
+         patch("booking_engine.api.routes.voice_tools_booking.any_staff_could_ever_serve",
+               new=AsyncMock(return_value=False)):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/check_availability",
+                headers=AUTH,
+                json={"services": [{"service_id": str(sid)}]},
+            )
+    # A refusal, not an outage: 200 with ok=false is the envelope the
+    # marketing-engine's loop counts against its refusal budget, which is what
+    # escalates the thread to a human instead of proposing a fifth date.
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"] == "no_staff_for_service"
+
+
+@pytest.mark.asyncio
+async def test_check_availability_keeps_an_empty_but_servable_result_a_success():
+    sid = uuid4()
+    with patch("booking_engine.api.routes.voice_tools_booking.find_availability",
+               new=AsyncMock(return_value=[])), \
+         patch("booking_engine.api.routes.voice_tools_booking.any_staff_could_ever_serve",
+               new=AsyncMock(return_value=True)):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/check_availability",
+                headers=AUTH,
+                json={"services": [{"service_id": str(sid)}]},
+            )
+    assert r.json() == {"ok": True, "data": [], "error": None}
+
+
+@pytest.mark.asyncio
+async def test_check_availability_does_not_ask_the_second_question_when_there_are_slots():
+    """The extra query is only for the empty case — the booking path pays nothing."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    slot_start = now + timedelta(days=1, hours=10)
+    sid = uuid4()
+    fake = [{"slot_start": slot_start, "slot_end": slot_start + timedelta(minutes=30),
+             "legs": [{"service_id": sid, "staff_id": uuid4(), "staff_name": "Giulia",
+                       "slot_start": slot_start,
+                       "slot_end": slot_start + timedelta(minutes=30)}]}]
+    can_serve = AsyncMock(return_value=True)
+    with patch("booking_engine.api.routes.voice_tools_booking.find_availability",
+               new=AsyncMock(return_value=fake)), \
+         patch("booking_engine.api.routes.voice_tools_booking.any_staff_could_ever_serve",
+               new=can_serve):
+        transport = ASGITransport(app=_app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post(
+                "/voice/tools/check_availability",
+                headers=AUTH,
+                json={"services": [{"service_id": str(sid)}]},
+            )
+    assert r.json()["ok"] is True
+    can_serve.assert_not_awaited()
 
 
 @pytest.mark.asyncio
