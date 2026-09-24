@@ -88,16 +88,35 @@ def _try_connect() -> bool:
 
 _db_available = _try_connect()
 
+# `pytestmark` does nothing in a conftest — it is only collected from test
+# *modules*. So from the day this was written until 2026-09-24 the skip never
+# applied: the autouse fixture below ran anyway, `_get_db_settings()` returned
+# None, and every one of these 45 tests ended as `AttributeError: 'NoneType'
+# object has no attribute 'database_url'`. Errors, not skips, and enough of them
+# that a 46th — a real one — would have been invisible in the noise.
+#
+# Left in place because it is correct for any test module that imports it, and
+# removing it would read as "these tests are unconditional". The skip that
+# actually fires is in the fixture.
 pytestmark = pytest.mark.skipif(
     not _db_available,
-    reason="Neon PostgreSQL connection unavailable (set DATABASE_URL env var)",
+    reason="Neon PostgreSQL connection unavailable (set TEST_DATABASE_URL to the QA branch)",
 )
 
 
 @pytest.fixture(autouse=True)
 async def db_connection():
-    """Create a fresh connection pool for each test, close after."""
+    """Create a fresh connection pool for each test, close after.
+
+    Skips rather than errors when there is no reachable non-prod database. This
+    is the narrow exception to "fail loud, never skip": these tests are a live
+    integration suite and a developer without QA credentials is not a broken
+    build. What is NOT acceptable is the previous behaviour — the same absence
+    reported as 45 AttributeErrors, which is a skip wearing an outage's clothes.
+    """
     settings = _get_db_settings()
+    if settings is None:
+        pytest.skip("no non-prod database configured — set TEST_DATABASE_URL to the QA branch")
     await connection.init_connection(settings)
     yield connection
     await connection.close_connection()
