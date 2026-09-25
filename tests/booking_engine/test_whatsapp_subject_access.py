@@ -221,6 +221,10 @@ async def test_outbound_rows_still_come_back_tagged_direction_out(shop):
     assert row["campaign_key"] == str(campaign_id)
     assert row["goal"] == "Ritorno clienti"
     assert row["message_id"] is not None
+    # The webapp's status veil reads these: when a queued row will leave, and
+    # what Meta said when one failed.
+    assert row["scheduled_at"] is not None
+    assert row["error_code"] is None
 
 
 async def test_holdout_campaigns_are_still_returned(shop):

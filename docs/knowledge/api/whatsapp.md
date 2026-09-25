@@ -277,7 +277,9 @@ enqueued with a hand-made key (the older Touchpoint tile's `bulk_...`) have no
 
 Each row: `message_id` (null for holdout), `campaign_key`, `goal`,
 `personalization`, `preview` (the rendered message), `delivery_status`,
-`sent_at`, `suppressed_reason`, `arm` (`send`/`holdout`), `created_at`.
+`sent_at`, `suppressed_reason`, `error_code` (Meta's error on a `failed` row),
+`scheduled_at` (when a `queued` row will leave; null on holdout/inbound),
+`arm` (`send`/`holdout`), `created_at`.
 
 ---
 
