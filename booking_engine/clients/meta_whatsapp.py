@@ -122,6 +122,16 @@ async def unsubscribe_app(*, waba_id: str, token: str) -> None:
     await _request("DELETE", f"{waba_id}/subscribed_apps", token=token)
 
 
+async def request_smb_sync(*, phone_number_id: str, token: str, sync_type: str) -> None:
+    """Ask Meta to sync a coexistence number's `smb_app_state_sync` or `history`.
+
+    Mandatory within 24h of onboarding or Meta offboards the number; once only.
+    The data itself arrives later on the webhooks of the same names.
+    """
+    await _request("POST", f"{phone_number_id}/smb_app_data", token=token,
+                   json_body={"messaging_product": "whatsapp", "sync_type": sync_type})
+
+
 async def waba_ids_for_token(*, token: str, app_id: str, app_secret: str) -> list[str]:
     """Which WABAs this business token was actually granted access to.
 

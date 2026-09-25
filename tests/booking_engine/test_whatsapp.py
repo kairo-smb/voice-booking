@@ -1018,6 +1018,30 @@ async def test_disconnect_survives_a_dead_token(monkeypatch):
     assert calls == {"unsub": "WABA1", "deleted": SHOP}
 
 
+@pytest.mark.asyncio
+async def test_coexistence_sync_resumes_after_contacts_and_orders_steps(monkeypatch):
+    """Both syncs are once-only and contacts must precede history, so a retry
+    after contacts went through asks only for history."""
+    sent, saved = [], {}
+
+    async def _sync(*, phone_number_id, token, sync_type):
+        sent.append(sync_type)
+
+    async def _set(shop_id, **fields):
+        saved.update(fields)
+    monkeypatch.setattr(meta, "request_smb_sync", _sync)
+    monkeypatch.setattr(wq, "set_sender_fields", _set)
+
+    fresh = {"shop_id": SHOP, "phone_number_id": "P", "access_token": "t"}
+    assert await wo.sync_coexistence(fresh) is True
+    assert sent == ["smb_app_state_sync", "history"]
+    assert set(saved) == {"contacts_sync_at", "history_sync_at"}
+
+    sent.clear()
+    assert await wo.sync_coexistence({**fresh, "contacts_sync_at": "x"}) is True
+    assert sent == ["history"]
+
+
 def test_is_abandoned_ignores_a_fresh_pending_row():
     sender = {"status": "pending_signup",
               "updated_at": datetime.now(timezone.utc) - timedelta(minutes=2)}

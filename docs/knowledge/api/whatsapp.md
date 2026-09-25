@@ -94,6 +94,10 @@ Server-side, in this order — and the order is load-bearing:
 
 Errors (409): `not_started`, `onboarding_limit_reached`, `code_exchange_failed`, `meta_error`.
 
+### Coexistence sync (mandatory, 24h)
+
+Meta offboards a coexistence number unless the partner calls `POST /{phone_number_id}/smb_app_data` within 24h of onboarding — `sync_type: smb_app_state_sync` (contacts) first, then `history` — even if the data is never used (confirmed by Meta developer support 2026-09-25). Each call works once per onboarding. `complete()` requests both inline when Meta reports `is_on_biz_app`; each success is stamped (`senders.contacts_sync_at`, `history_sync_at`, migration 27) so a retry skips what already went through, and the hourly sweep retries online senders still inside the 24h window. The data arrives on the `history` / `smb_app_state_sync` webhooks, which are acknowledged and logged (`whatsapp.coexistence_sync_payload`, including error 2593109 when the owner declines history sharing) but not stored yet.
+
 ### `DELETE /whatsapp/onboarding/{shop_id}`
 
 The owner closed Meta's popup without finishing (or the code exchange failed on `complete`). `start` persisted a `pending_signup` row to record intent; this is the other end of that contract — it drops the row so the next status read is `not_started` and the panel offers the connect button again instead of a stuck "Meta is verifying" box.
@@ -664,5 +668,4 @@ New `suppressed_reason` values: `recently_contacted`,
 ## Out of scope
 
 - Inbound replies are **persisted** (migration 17), read by campaign measurement, and now readable and answerable by the owner through [Threads](#threads-the-two-way-inbox) — but nothing answers them *automatically*. An agent that replies on the salon's behalf is the next phase; `POST /whatsapp/reply` is the same send path it will use.
-- Contact / chat-history sync (`POST /{phone_number_id}/smb_app_data`). One-shot and irreversible per onboarding, and there is nowhere to put the data yet.
 - The LLM template-picker that would *choose* among the marketing templates (`promo_v1`/`winback_v1`/`rebook_v1`/`promo_manual_v1`) per customer isn't built — the webapp names the `template_key` explicitly today.

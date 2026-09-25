@@ -78,6 +78,7 @@ async def set_sender_fields(shop_id: UUID, **fields) -> None:
         "status", "waba_id", "phone_number_id", "access_token", "platform_type",
         "token_expires_at", "phone_number", "display_name", "quality_rating",
         "messaging_limit", "throughput_level", "offline_reason", "daily_cap",
+        "contacts_sync_at", "history_sync_at",
     }
     fields = {k: v for k, v in fields.items() if k in allowed}
     if "access_token" in fields:
@@ -93,6 +94,20 @@ async def set_sender_fields(shop_id: UUID, **fields) -> None:
         f"WHERE shop_id = $1",
         shop_id, *fields.values(),
     )
+
+
+async def list_senders_needing_sync() -> list[dict]:
+    """Online senders still inside Meta's 24h coexistence-sync window with a
+    step not yet accepted. Past the window retrying is pointless: Meta has
+    already offboarded the number and only a new popup brings it back."""
+    rows = await execute(
+        """
+        SELECT * FROM whatsapp.senders
+        WHERE status = 'online' AND history_sync_at IS NULL
+          AND verified_at > now() - interval '24 hours'
+        """
+    )
+    return _opened_all(rows)
 
 
 async def delete_sender(shop_id: UUID) -> int:

@@ -356,6 +356,11 @@ async def complete(
         offline_reason=None,
     )
 
+    # Inline, not deferred: the 24h clock starts now and a background task
+    # dying silently would cost the salon its connection. The sweep retries.
+    if number.is_on_biz_app:
+        await sync_coexistence(await wq.get_sender(shop_id))
+
     # Templates are deliberately NOT pushed here. They are one Graph round trip
     # per catalogue entry against a WABA that has just been created, which took
     # the whole call past the gateway timeout in front of the webapp — the
@@ -378,6 +383,31 @@ async def abort(*, shop_id: UUID) -> dict:
     """
     await wq.delete_pending_sender(shop_id)
     return {"ok": True}
+
+
+async def sync_coexistence(row: dict) -> bool:
+    """Request Meta's one-shot contacts-then-history sync for a sender.
+
+    Not optional: Meta offboards a coexistence number unless this is called
+    within 24h of onboarding, even if we never read the data (confirmed by
+    Meta developer support, 2026-09-25). Each step is recorded as it succeeds,
+    so a retry skips what already went through — both are once-only. Returns
+    whether both are done; failures are logged and left to the hourly sweep.
+    """
+    shop_id = row["shop_id"]
+    for sync_type, column in (("smb_app_state_sync", "contacts_sync_at"),
+                              ("history", "history_sync_at")):
+        if row.get(column):
+            continue
+        try:
+            await meta.request_smb_sync(phone_number_id=row["phone_number_id"],
+                                        token=row["access_token"], sync_type=sync_type)
+        except meta.MetaError as exc:
+            logger.warning("whatsapp.coexistence_sync_failed shop=%s type=%s err=%s",
+                           shop_id, sync_type, exc)
+            return False
+        await wq.set_sender_fields(shop_id, **{column: datetime.now(timezone.utc)})
+    return True
 
 
 async def disconnect(*, shop_id: UUID) -> dict:
@@ -754,6 +784,14 @@ async def sweep(*, settings) -> dict:
                 logger.exception("whatsapp.late_propagation_failed shop=%s",
                                  row["shop_id"])
                 counts["errors"] += 1
+
+    for row in await wq.list_senders_needing_sync():
+        try:
+            if not await sync_coexistence(row):
+                counts["errors"] += 1
+        except Exception:  # noqa: BLE001 — see above
+            logger.exception("whatsapp.coexistence_sync_sweep_failed shop=%s", row["shop_id"])
+            counts["errors"] += 1
 
     for tpl in await wq.list_unresolved_templates():
         try:

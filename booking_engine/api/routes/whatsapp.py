@@ -866,6 +866,21 @@ async def _handle_change(sender: dict, change: dict) -> None:
             )
         return
 
+    # The payloads of the mandatory coexistence sync (see
+    # onboarding.sync_coexistence). Acknowledged and logged, not stored yet:
+    # Meta requires the request, not that we keep the data. Logged so a
+    # declined history share (error 2593109) is visible rather than silent.
+    # ponytail: log-only — importing history into Inbox threads is the upgrade.
+    if field in ("history", "smb_app_state_sync"):
+        errors = [e for h in (value.get("history") or []) for e in (h.get("errors") or [])]
+        logger.info(
+            "whatsapp.coexistence_sync_payload shop=%s field=%s contacts=%s "
+            "history_chunks=%s errors=%s",
+            sender["shop_id"], field, len(value.get("state_sync") or []),
+            len(value.get("history") or []), [e.get("code") for e in errors],
+        )
+        return
+
     if field != "messages":
         return
 
