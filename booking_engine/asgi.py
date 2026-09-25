@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from booking_engine import observability
+
 from booking_engine.api.app import create_app
 from booking_engine.config import Settings
 from booking_engine.db.connection import close_connection, init_connection
@@ -29,5 +31,6 @@ async def _lifespan(app: FastAPI):
     await close_connection()
 
 
+observability.init()  # before create_app, so the FastAPI integration hooks it
 app = create_app()
 app.router.lifespan_context = _lifespan

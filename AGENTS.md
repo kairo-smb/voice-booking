@@ -6,6 +6,31 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-25 — Error tracking: GlitchTip via sentry-sdk
+
+`booking_engine/observability.py`, called first thing in `asgi.py` (tests use
+`create_app()` and never init). Reports to the self-hosted GlitchTip at
+`errors.kairoaidesk.com`, project `voice-booking` — the stack lives in the
+webapp repo, `infra/glitchtip/`, with the full rationale in its
+`docs/knowledge/providers.md#glitchtip-error-tracking`.
+
+- Every `logger.error` becomes an event (default LoggingIntegration) — no call
+  site changed. Unhandled FastAPI exceptions too.
+- **Full data collection, by owner decision (2026-09-25):** `send_default_pii`,
+  whole request bodies, every frame's local variables, log messages verbatim —
+  transcripts and caller numbers included.
+- **Except credentials.** sentry-sdk scrubs by *key name*, but frame locals hold
+  the raw ASGI scope, headers as byte pairs, so a `Bearer` token went out by
+  value (seen in a test before the fix). `redact_credentials` in `before_send`
+  masks `Bearer`/`Basic` values and Meta `EAA…` tokens anywhere in the event.
+  A secret in some other shape (a Twilio auth token in a local) is not caught —
+  keep such values out of long-lived locals in request paths.
+- `traces_sample_rate=0`: no performance data, but the webapp's trace id is
+  continued and passed on (to `WEBAPP_BASE_URL`/`MARKET_INTEL_API_URL` only), so
+  one request's errors share a `trace_id` across the three projects.
+- Config: `SENTRY_DSN` (fly secret, both apps), `SENTRY_ENVIRONMENT` (`fly.toml`
+  = `production`, `fly.qa.toml` = `qa`). No DSN = disabled.
+
 ## 2026-09-23 — `purchase_receipt_1` propagates proactively: the receipt rides the sweep
 
 **The receipt was the one template propagation waited for a receipt send to

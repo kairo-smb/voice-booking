@@ -4,6 +4,9 @@ primary_region = 'fra'
 [build]
   dockerfile = 'booking_engine/Dockerfile.fly'
 
+[env]
+  SENTRY_ENVIRONMENT = 'production' # GlitchTip; SENTRY_DSN is a fly secret
+
 [http_service]
   internal_port = 8080
   force_https = true

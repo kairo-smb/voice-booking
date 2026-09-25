@@ -11,6 +11,8 @@ fastapi==0.141.1
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.9
 httpx>=0.27.0
+# Error tracking → GlitchTip (booking_engine/observability.py)
+sentry-sdk[fastapi]>=2.70,<3
 phonenumbers>=8.13
 twilio>=9.0
 mcp>=1.26.0,<2.0.0
