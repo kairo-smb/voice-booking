@@ -5,8 +5,10 @@ primary_region = 'fra'
   dockerfile = 'booking_engine/Dockerfile.fly'
 
 [env]
-  # Drain the WhatsApp queue every 2 minutes in-process (see config.py).
-  WHATSAPP_SEND_LOOP_SECONDS = '120'
+  # In-process scheduler (services/scheduler.py), fleet-wide cadences.
+  WHATSAPP_SEND_LOOP_SECONDS = '60'
+  MESSAGING_TICK_SECONDS = '3600'
+  FORWARDING_HEARTBEAT_SECONDS = '86400'
 
 [http_service]
   internal_port = 8080

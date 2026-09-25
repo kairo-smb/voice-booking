@@ -27,7 +27,6 @@ sms_send.py's re-check.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -371,18 +370,3 @@ async def send_due(
         counts["sent"] += 1
 
     return counts
-
-
-async def send_loop(*, settings) -> None:
-    """Drain the queue every `whatsapp_send_loop_seconds`, for as long as the
-    process lives. A failed run is logged, never fatal: the next one retries,
-    and claim_due's SKIP LOCKED keeps it safe beside the tick or a second
-    machine."""
-    while True:
-        await asyncio.sleep(settings.whatsapp_send_loop_seconds)
-        try:
-            counts = await send_due(settings=settings)
-            if counts.get("sent") or counts.get("failed"):
-                logger.info("whatsapp.send_loop %s", counts)
-        except Exception:  # noqa: BLE001
-            logger.exception("whatsapp.send_loop failed")

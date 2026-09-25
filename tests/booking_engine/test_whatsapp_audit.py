@@ -105,7 +105,7 @@ async def test_campaign_enqueue_hook_records_actor(monkeypatch):
 @pytest.mark.parametrize("source,sends_now", [("offer", True), ("touchpoint", False)])
 async def test_single_offer_is_sent_at_enqueue_bulk_waits_for_tick(monkeypatch, source, sends_now):
     """The win-back modal is one click for one customer; waiting for the tick
-    (every few hours on GitHub's cron) read as "nothing happened". Bulk keeps
+    (the next scheduled drain) read as "nothing happened". Bulk keeps
     its drip."""
     from booking_engine.api.routes import whatsapp as wa_routes
     from booking_engine.api.routes.whatsapp import CampaignRequest
@@ -124,7 +124,7 @@ async def test_single_offer_is_sent_at_enqueue_bulk_waits_for_tick(monkeypatch, 
         pass
 
     monkeypatch.setattr(wa_routes, "enqueue_campaign", fake_enqueue)
-    monkeypatch.setattr(wa_routes, "send_due", fake_send_due)
+    monkeypatch.setattr(wa_routes, "locked_send_due", fake_send_due)
     monkeypatch.setattr(wa_routes.waq, "record_audit_event", fake_audit)
 
     shop = uuid4()

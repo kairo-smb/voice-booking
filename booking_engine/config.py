@@ -68,11 +68,12 @@ class Settings(BaseSettings):
     # batch as fast as the loop runs. Clamped by meta_limits.safe_sends_per_minute
     # so no configuration can drive a number past its Meta throughput.
     whatsapp_sends_per_minute: int = 60
-    # Seconds between in-process send_due runs; 0 = off, the tick alone
-    # drains the queue. QA sets it (fly.qa.toml) because GitHub's cron runs
-    # every few hours in practice; prod scales to zero, where a loop in the
-    # process would stop with the machine, so prod stays on the cron.
-    whatsapp_send_loop_seconds: int = 0
+    # In-process scheduler (services/scheduler.py); 0 = job off. Each job is
+    # a cluster-wide singleton, so these are cadences for the whole fleet,
+    # not per machine. Needs at least one machine always up.
+    whatsapp_send_loop_seconds: int = 0      # WhatsApp queue drain
+    messaging_tick_seconds: int = 0          # bundles, health, sweeps, automations
+    forwarding_heartbeat_seconds: int = 0    # silent-forwarding push alerts
     # Our own guard against Meta's per-user, cross-brand marketing cap (error
     # 131049): never send the same customer two marketing messages inside this
     # window. Seven days both keeps us well under Meta's undisclosed ceiling

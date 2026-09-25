@@ -39,6 +39,18 @@ async def test_request_number_requires_auth():
         assert r.status_code in (401, 403, 503)
 
 
+
+@pytest.fixture(autouse=True)
+def _tick_lock_always_free(monkeypatch):
+    """The tick's advisory lock needs a real pool; these tests have none."""
+    from contextlib import asynccontextmanager
+    from booking_engine.api.routes import messaging_tick
+
+    @asynccontextmanager
+    async def _free(key):
+        yield True
+    monkeypatch.setattr(messaging_tick, "singleton", _free)
+
 @pytest.mark.asyncio
 async def test_tick_requires_auth():
     app = create_app()

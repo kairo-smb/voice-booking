@@ -93,8 +93,19 @@ python -m venv /tmp/ci && /tmp/ci/bin/pip install -r booking_engine/requirements
 
 The remaining gap is deliberate: CI also runs `tests/live_db/` against an ephemeral Neon branch, which a local run skips unless `TEST_DATABASE_URL` is set. A green local run therefore says nothing about those.
 
-## WhatsApp send cadence (QA vs production)
+## Scheduled jobs (in-process scheduler)
 
-- **Production:** `.github/workflows/messaging-cron-prod.yml` hits `/api/v1/messaging/tick` hourly — every few hours in practice, since GitHub throttles schedules. Needs the `PROD_CONTROL_PLANE_SECRET` repo secret (the prod app's `CONTROL_PLANE_SECRET`). Slow is acceptable: bulk drips are meant to be spread, and single win-backs (`source: offer`) are sent at enqueue time.
-- **QA:** `messaging-cron.yml` still runs the full tick, and on top of it `WHATSAPP_SEND_LOOP_SECONDS=120` (`fly.qa.toml`) drains the WhatsApp queue in-process every 2 minutes. GitHub cannot schedule below 5 minutes. The loop only works because QA keeps `min_machines_running = 1`; prod scales to zero, where it would stop with the machine.
+There is no external cron. `services/scheduler.py` runs inside every machine, started from the `asgi.py` lifespan; the cadences are fleet-wide and set per app in the Fly config (`0`/unset = job off):
 
+| Job | Env | QA (`fly.qa.toml`) |
+|---|---|---|
+| WhatsApp queue drain (`send_due`) | `WHATSAPP_SEND_LOOP_SECONDS` | 60 |
+| Messaging tick (`run_tick`: bundles, health, release sweep, WA onboarding sweep, automations, nudges, retention) | `MESSAGING_TICK_SECONDS` | 3600 |
+| Forwarding heartbeat (push per silent shop, no dedupe — hence daily) | `FORWARDING_HEARTBEAT_SECONDS` | 86400 |
+
+- **Production runs none of these yet** (still in testing): `fly.toml` sets no cadence and keeps `min_machines_running = 0`. To turn it on: the three env vars (planned drain 600s) **and** `min_machines_running = 1` — at 0 Fly stops the machine and the jobs stop with it. Nothing has ever run the tick on prod, so the first run does all pending work at once (provisioning, release sweep, automations, queued sends): check the backlog first.
+- **Needs a machine up.** QA keeps `min_machines_running = 1`.
+- **Safe at N machines.** Each job runs under a Postgres advisory lock, so one machine works and the rest skip that round. Jobs are aligned to the wall clock (the hourly one fires at :00), so every machine tries in the same instant, not N times per interval. `send_due` has **one lock for every caller** (drain job, tick, the inline win-back send): two concurrent drains would each read the daily cap and the per-customer cooldown before the other wrote, and each pace at full rate against Meta's app-level limit.
+- **The lock is transaction-level on purpose.** `DATABASE_URL` goes through Neon's pgbouncer (transaction mode); a session-level `pg_try_advisory_lock` there excluded nothing when tested. `pg_try_advisory_xact_lock` inside an open transaction pins one server connection and dies with it. That transaction sets `idle_in_transaction_session_timeout = 0` locally: it idles for the whole job, and Neon's 5-minute default would otherwise kill the lock mid-drain. A QA restore-from-prod drops every connection — the running job fails, is logged, and the next slot retries.
+- **Deploys:** a stopped machine rolls back its lock transaction; rows it left in `sending` are recovered by `requeue_stuck` on the next drain.
+- `POST /api/v1/messaging/tick` still exists for manual runs and takes the same lock (`{"skipped": "busy"}` if the scheduler is mid-run).

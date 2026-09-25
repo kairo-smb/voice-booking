@@ -239,7 +239,7 @@ Returns immediately with the schedule; nothing is sent inline:
 - `suppressed` — a row written with a `suppressed_reason` (`no_consent`, `no_phone`, `customer_not_found`). Refusals are recorded, never silent.
 - `already_sent` — this `campaign_key` already reached that customer; the unique index made the retry a no-op. That guard earns its keep here, where "invia a 400 clienti" is exactly the button someone double-clicks.
 
-**Exception: `source: "offer"`** (the webapp's single win-back modal) is sent at enqueue time — `send_due` scoped to that shop + `campaign_key`, same consent/cooldown/cap checks — and the response carries `sent_now`. One click for one customer can't wait for the tick, which GitHub's scheduler runs every few hours rather than hourly. Out of opening hours `spread` has already put the row on tomorrow's first slot, so it still waits.
+**Exception: `source: "offer"`** (the webapp's single win-back modal) is sent at enqueue time — `send_due` scoped to that shop + `campaign_key`, same consent/cooldown/cap checks — and the response carries `sent_now`. One click for one customer shouldn't wait for the next scheduled drain. It shares the drain lock: if a drain is running, the row stays queued for the next one and `sent_now` is 0. Out of opening hours `spread` has already put the row on tomorrow's first slot, so it still waits.
 
 `spread()` lays the campaign across the salon's opening hours (`WHATSAPP_SEND_START_HOUR`–`WHATSAPP_SEND_END_HOUR`, Europe/Rome), rolling onto **following days** once a day's `daily_cap` is used. A 400-recipient campaign against a 50/day sender is eight days of drip, and the owner is told so at enqueue time.
 

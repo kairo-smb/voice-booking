@@ -38,7 +38,7 @@ Four distinct auth schemes across the surface — see [API overview](api/README.
 A second, independent flow alongside the SIP call path above — no caller involved, just the webapp and Twilio's Regulatory Compliance API:
 
 1. Webapp's "Richiedi numero" panel (Inbox → Configurazione → Canali) POSTs `business_name`/`contact_email`/a commercial-register document to `POST /api/v1/voice/numbers/request` (`voice_telephony.py`, control-plane bearer). `services/number_provisioning.py::submit_request` builds **that salon's own** Twilio regulatory bundle — regulation lookup → End-User → document upload → Bundle → 2× ItemAssignment → synchronous Evaluate → submit-if-compliant — persisting each Twilio SID to `voice_agent.number_requests` as soon as it exists, not batched at the end.
-2. `POST /api/v1/messaging/tick` (`messaging_tick.py`), hit hourly by `.github/workflows/messaging-cron.yml`, polls every `pending_review` request's bundle status, calls `services/number_provisioning.py::provision_approved` to purchase the number once Twilio approves, refreshes the green/red health semaphore (`services/number_health.py`) for every already-provisioned number, then — last, and wrapped in its own try/except so its failure can't suppress the health refresh above it — runs `services/number_release.py::sweep`, the grace-period release of numbers whose shop's plan has lapsed (schedule → clear-if-plan-returns → release-past-deadline; see `api/number-provisioning.md` and `AGENTS.md` §2026-08-15).
+2. `POST /api/v1/messaging/tick` (`messaging_tick.py`), run hourly by the in-process scheduler (`services/scheduler.py`, see operations.md), polls every `pending_review` request's bundle status, calls `services/number_provisioning.py::provision_approved` to purchase the number once Twilio approves, refreshes the green/red health semaphore (`services/number_health.py`) for every already-provisioned number, then — last, and wrapped in its own try/except so its failure can't suppress the health refresh above it — runs `services/number_release.py::sweep`, the grace-period release of numbers whose shop's plan has lapsed (schedule → clear-if-plan-returns → release-past-deadline; see `api/number-provisioning.md` and `AGENTS.md` §2026-08-15).
 3. `GET /api/v1/voice/numbers/request/{shop_id}` is the webapp's poll target — returns the request row and the telephony row (if any) so the UI can pick which state to render.
 4. `POST /api/v1/voice/numbers/release` (`voice_telephony.py`) is the owner-initiated counterpart to the sweep above — a salon deliberately giving up its number, bypassing the grace period on purpose. Calls the same `release_for_shop` the sweep uses.
 
@@ -154,7 +154,7 @@ webapp (LLM writes the per-customer offer line, i.e. the template's {{3}})
         sender online? template approved? recipients ≤ daily_cap?
         → per recipient: consent gate → one row in whatsapp.outbound_messages,
           scheduled_at spread evenly across 09:00–20:00 Europe/Rome
-  → POST /api/v1/messaging/tick              (hourly cron)
+  → POST /api/v1/messaging/tick              (hourly, in-process scheduler)
       whatsapp_send.py::send_due
         claim due rows atomically → RE-check consent → balance check
         → Meta Cloud API send (paced) → mark sent
