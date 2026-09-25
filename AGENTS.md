@@ -6,6 +6,372 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-25 — Error tracking: GlitchTip via sentry-sdk
+
+`booking_engine/observability.py`, called first thing in `asgi.py` (tests use
+`create_app()` and never init). Reports to the self-hosted GlitchTip at
+`errors.kairoaidesk.com`, project `voice-booking` — the stack lives in the
+webapp repo, `infra/glitchtip/`, with the full rationale in its
+`docs/knowledge/providers.md#glitchtip-error-tracking`.
+
+- Every `logger.error` becomes an event (default LoggingIntegration) — no call
+  site changed. Unhandled FastAPI exceptions too.
+- **Full data collection, by owner decision (2026-09-25):** `send_default_pii`,
+  whole request bodies, every frame's local variables, log messages verbatim —
+  transcripts and caller numbers included.
+- **Except credentials.** sentry-sdk scrubs by *key name*, but frame locals hold
+  the raw ASGI scope, headers as byte pairs, so a `Bearer` token went out by
+  value (seen in a test before the fix). `redact_credentials` in `before_send`
+  masks `Bearer`/`Basic` values and Meta `EAA…` tokens anywhere in the event.
+  A secret in some other shape (a Twilio auth token in a local) is not caught —
+  keep such values out of long-lived locals in request paths.
+- `traces_sample_rate=0`: no performance data, but the webapp's trace id is
+  continued and passed on (to `WEBAPP_BASE_URL`/`MARKET_INTEL_API_URL` only), so
+  one request's errors share a `trace_id` across the three projects.
+- Config: `SENTRY_DSN` (fly secret, both apps), `SENTRY_ENVIRONMENT` (`fly.toml`
+  = `production`, `fly.qa.toml` = `qa`). No DSN = disabled.
+
+## 2026-09-23 — `purchase_receipt_1` propagates proactively: the receipt rides the sweep
+
+**The receipt was the one template propagation waited for a receipt send to
+need.** It was created on a customer WABA lazily, inside
+`ensure_receipt_template`, the first time the webapp asked to send one — so
+the first receipt after onboarding either waited on that synchronous send or
+failed it, and the hourly sweep never went back for the template it was
+already reconciling everything else with. Since Kairo's own copy is approved
+with a body matching `RECEIPT_TEMPLATE_BODY` (Meta id 1112279824574521) and
+`META_RECEIPT_SAMPLE_URL` is set, nothing blocked it but the loop it wasn't
+in.
+
+**Now the sweep pushes it like any catalogue entry.** `DOCUMENT_TEMPLATES` has
+its own loop in `ensure_templates` with the identical gate/skip/adopt rules —
+the gate (`approved_on_kairo_waba`) fetches the receipt by its verbatim preset
+name (never `{locale}_{key}`) and requires approved **plus** a body match; a
+missing row is created via `create_document_template` with
+`META_RECEIPT_SAMPLE_URL` (missing URL is reported as `not_ready`, never a
+guaranteed-rejection create, and never aborts the catalogue results); a stale
+body is edited body-only; a create refusal adopts Meta's copy by name. The
+worklist is now keyed on `propagation_fingerprints()` = catalogue +
+document fingerprints, which **reverses the 2026-09-02 "padding" semantics on
+purpose**: a shop holding only the receipt no longer *pads* a count — a shop
+holding the whole catalogue but missing the receipt now comes back on the
+worklist, and one whose receipt hash matches doesn't. (The original padding
+bug stays dead: the count is matched against `key|hash` pairs, never rows.)
+
+**`ensure_receipt_template` is unchanged and stays.** The lazy send-time path
+is now a self-heal for a shop the sweep missed rather than the only way the
+template exists. The "one manual step" narrative in the 2026-09-02 entry
+below still holds — the operator step it described (`push-templates` for
+Kairo's own WABA + the sample URL) is the same gate the sweep reads; after
+this change nothing per-salon is manual for the receipt either.
+
+**Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **830 passed, 24 skipped, 0 failed** (up from
+820/24: ten new tests — gate includes/excludes/pends the receipt, document
+create/edit/pending/not-ready/missing-sample-url loop, verbatim-name fetch,
+worklist SQL shape pin). No lint/typecheck is configured in this repo; no Meta
+call made. No SQL or migration touched — `list_senders_needing_templates` was
+already fingerprint-array-driven and needed no change.
+
+- **The body-only edit preserving the DOCUMENT header is asserted, never
+  tested.** That a body-only `POST /{message_template_id}` edit keeps the
+  header component intact is Meta-side Graph semantics, claimed in three
+  places (`whatsapp_onboarding.py`, `scripts/kairo_waba.py`,
+  `docs/knowledge/api/whatsapp.md`) and pinned by no test. Operational rule:
+  the first real change to `RECEIPT_TEMPLATE_BODY` must be verified live —
+  run `scripts/kairo_waba.py push-templates`, confirm on Kairo's WABA (via
+  `templates` / Graph GET) that the header component survived the edit —
+  **before** letting the sweep fan the new body out to customer WABAs.
+- **There is no retire path for document templates.** `retire_template`
+  refuses any key not in `CATALOGUE`, so `purchase_receipt_1` cannot be
+  retired through the scripted fan-out. Removing it from `DOCUMENT_TEMPLATES`
+  stops future propagation only; deleting it from customer WABAs (Meta's
+  30-day name lock) stays manual.
+
+## 2026-09-23 — This file is now AGENTS.md
+
+Renamed from CLAUDE.md so the same tool-agnostic developer guide name works
+across every Kairo repo (webapp, voice-booking, marketing-engine). No content
+changed; the append-only history below is untouched. The stale untracked
+AGENTS.md copy mentioned in the 2026-09-22 entry is superseded by this file.
+References across this repo and the webapp now point at AGENTS.md.
+
+## 2026-09-22 — `OPENAI_TOOL_SECRET` was never an OpenAI credential, and both CI failures were local-vs-CI drift
+
+**The rename, and the two names it must not be confused with.** `openai_tool_secret`
+→ `voice_agent_tool_secret` (env `OPENAI_TOOL_SECRET` → `VOICE_AGENT_TOOL_SECRET`),
+everywhere it is read: `config.py`, `api/deps.py::require_tool_token`,
+`mcp_server.py`, `voice_openai.py`, both `scripts/`, the test suite, and
+`docs/knowledge/`. The old name read as *a credential for authenticating to
+OpenAI* and it is the exact opposite: it is the token two callers present **to
+us** — OpenAI's Realtime on every tool call (it is configured into the session at
+`voice_openai.py:81` and echoed back), and the marketing-engine booking agent
+reaching the same routes over HTTP. Neither party holds a stored copy; OpenAI
+receives it per session, so the value never leaves our own secret stores.
+
+**Two names, not one, because two formats — and that is the whole point.** The
+marketing-engine now reads `VOICE_AGENT_TOOLS_URL` + `VOICE_AGENT_TOOL_SECRET`,
+deliberately **not** the webapp's `VOICE_AGENT_API_URL`. Same service, different
+required value: the webapp's pair always ends in `/api/v1` (its docs call
+repeating that prefix "the single most repeated mistake against this service"),
+while `/voice/tools/*` is root-mounted — `app.py` includes those routers with
+**no** prefix — so the tools URL must not carry it. One variable name demanding
+two shapes is how the wrong one gets copied; two names is how the value stays
+honest. Verified against the deployed service rather than assumed: `POST
+/voice/tools/get_services` on `kairo-booking-engine-qa` answers **401 without a
+bearer and 200 `{"ok":true,"data":[]}` with it**.
+
+**Not collapsed into `CONTROL_PLANE_SECRET`, deliberately.** The webapp's
+`VOICE_AGENT_SECRET` *is* `control_plane_secret`, and its docs say "never add a
+second base-URL or secret env var for voice-booking — there is one service and
+one token." That rule is about the webapp's own `/api/v1` calls and is right for
+them; it is not a claim about how many credentials the service defines. Merging
+the two would mean a leaked agent token can also reach `/api/v1/voice/numbers/*`
+and buy a phone number. A sentence was added to the webapp's `providers.md`
+naming the exception and the escalation, so the next reader does not "fix" it.
+
+**Deploy order, which is the only sharp edge in a pure rename.** The new secret
+was set on both QA apps with the *existing* value — proven by digest rather than
+by trust: `VOICE_AGENT_TOOL_SECRET` and `OPENAI_TOOL_SECRET` both read back
+`0de449382af8070e`, so there is no rotation and no window where the two sides
+disagree. The old name stays until the renamed code is deployed, since the
+running image still reads it; removing it before then takes the tool surface
+down. **Prod was not touched**: `kairo-booking-engine` holds nine *staged*
+secrets (the `META_*` set and `WHATSAPP_TOKEN_KEY`), and any `fly secrets set`
+there deploys all of them as a side effect — that is a deliberate step, not
+something to trigger incidentally while renaming a variable.
+
+**Both red PRs were the same failure with two faces: the local check is not the
+CI gate.** *voice-booking*: `fastapi>=0.115.0` is unpinned, CI resolves 0.141.1,
+and 0.141 stopped flattening `include_router` into `app.routes` — an included
+router is now an `_IncludedRouter` with neither `.path` nor `.routes`, so
+`{r.path for r in client.app.routes}` raised `AttributeError` in CI while
+passing on the local 0.124.4. Reproduced locally in a scratch venv pinned to
+CI's versions. Skipping the objects that lack `.path` was rejected as the
+repair: the entire whatsapp surface is what gets skipped, so the test would have
+gone on passing while asserting nothing. It now reads the OpenAPI schema, which
+is stable public API and lists nested paths on both versions. *webapp*: the gate
+is `next build`, which runs ESLint, and `@typescript-eslint/no-require-imports`
+is an **error** there — three new thread-proxy tests used inline
+`require('next/server')`. `tsc --noEmit` and vitest do not run that rule, which
+is exactly why the previous verification came back green. Fixing it exposed a
+second, hidden fault: the static import replaced `any` with real types, and
+`function req(url, init?: RequestInit)` was typed with the **DOM** `RequestInit`,
+incompatible with `NextRequest`'s (its `signal` is not nullable). No call site
+passed `init`, so the parameter was deleted rather than cast.
+
+**A stale entry, recorded rather than rewritten.** The 2026-09-04 entry says the
+email alert for an expiring token is "the agreed next step and is not built" and
+that `expires_in` is unconfirmed against a real response. Both were superseded on
+**2026-09-20**, which has no entry here at all: `23_whatsapp_token_reminder.sql`
+exists, the nudge runs in the hourly sweep (`whatsapp_onboarding.py`, window 7
+days matching the webapp's `RENEW_WINDOW_DAYS`, cooldown 72h, recording the
+*attempt* in `token_reminder_sent_at`), the webapp has the template and the
+banner, and that migration's own comment records the first real onboarding
+returning `token_expires_at` exactly 60 days out. The gap is noted here because
+the 09-04 entry now reads as current when it is not.
+
+**Also in this pass:** `whatsapp_triage` and `whatsapp_agent` added to the
+webapp's `RUN_TYPES`. Nothing was ever unbilled — the engine settles both through
+`/chat/credits`, which reads `isRunType` and falls back to `run_kind='chat'` for a
+surface it does not know — but every triage call and agent turn arrived in
+`ai_run_ledger` indistinguishable from any other chat turn, which is what the cost
+audit reads. Neither is a `MarketingRunType`: both are single-phase and need no
+`FALLBACK_ESTIMATE_USD` entry.
+
+**Three cross-repo repairs, each closing the hole the CI failure came through
+rather than the failure itself.** (1) `fastapi` pinned to `==0.141.1` in **both**
+`requirements.txt` files — the shipped one and the dev one, since a disagreement
+between them is the same class of bug. Deliberately pinned to what CI and
+`kairo-booking-engine-qa` were **already** running (checked over `fly ssh`, not
+assumed) rather than to the newest release: this freezes the status quo instead
+of moving prod onto a version nobody has exercised. (2) `npm run verify` in the
+webapp — lint → typecheck → test, cheapest first, because the gate that bit us is
+the first step and the two habitual commands are the last two. (3) The
+cross-service env contract written down once, in `docs/knowledge/providers.md`:
+ten variables, which service holds each, its value format, and who presents it.
+Four Fly apps and the webapp's host are configured by hand from three repos'
+prose today, and the `/api/v1` format rule has already caused a wrong turn once.
+
+**A correction the env map forced, worth knowing on its own: the URL prefix is
+not a proxy for the credential.** `api/app.py` mounts **seven** routers at the
+root, and they do not share an auth scheme — `/voice/tools/*` and
+`/voice/events/*` want `require_tool_token`, but `/voice/memos/*` wants
+`require_control_plane_token`, which is why the webapp's memos proxy strips
+`/api/v1` off `VOICE_AGENT_API_URL` to reach it with the *control-plane* secret.
+The webapp's own comment called `voice_memos` "the one router mounted without
+prefix", which has not been true for months; corrected. So the durable
+distinction is the credential, not the shape of the path.
+
+**Verification.** voice-booking **820 passed, 24 skipped** locally and **815/24**
+on a venv built from `booking_engine/requirements.txt` — i.e. resolving the new
+pin — (the difference is files CI does not collect; CI's own run was 807 passed +
+1 failed + 31 skipped before the fix, and that one failure is now 25 passed).
+marketing-engine **1170 passed, 3 skipped**, `tsc --noEmit` exit 0. webapp
+`npm run verify` **exit 0, 237 files, 1720 tests passed** — the new gate, run as
+one command. `VOICE_AGENT_TOOLS_URL` and `VOICE_AGENT_TOOL_SECRET` set on
+`marketing-engine-qa`; `VOICE_AGENT_TOOL_SECRET` set on `kairo-booking-engine-qa`;
+the tool surface curl-verified as above. **No Meta call was made** — consistent
+with every WhatsApp entry here.
+
+**Two things found and left alone.** `AGENTS.md` in this repo is an untracked,
+stale copy of this file (dated 2026-09-04, so it has none of the WhatsApp
+history) — it is not edited here because it is not this file's to maintain, but
+whatever writes it is now feeding a second reader decisions from two months ago.
+And `kairo-booking-engine` has its machines stopped and **nine secrets staged**
+(the `META_*` set and `WHATSAPP_TOKEN_KEY`); any `fly secrets set` on that app
+deploys all nine as a side effect, which is why nothing in this pass touched prod.
+
+## 2026-09-22 — WhatsApp becomes a conversation, and an agent books through it
+
+**Two increments on one branch, in this order, because the second needed every
+piece of the first.** A — the substrate the owner works in: threads, the 24h
+service window, echoes from the owner's own phone, voice-note transcripts,
+free-form replies, and an intent classifier. B — the agent: a turn loop over the
+booking tools that already existed, gated by an intent allowlist and suspended
+the moment a human writes.
+
+**The finding that made B small: `voice_agent.calls` was never a telephony
+table.** `shop_id`, `caller_number`, `customer_id`, `customer_match`, `outcome`,
+`summary`, `appointment_id` describe a *session*; `twilio_call_sid` is UNIQUE but
+nullable, and `duration_seconds` is the only genuinely voice-specific column. So
+a WhatsApp booking conversation is a row there with `channel = 'whatsapp'`
+(migration 24), a minted call token, and the twelve tools the voice agent has
+run for months. Nothing about booking, authz or constraints was rebuilt.
+`authorize_booking_change` works untouched — and on WhatsApp `caller_number` is
+a number **Meta has verified**, which is strictly stronger evidence of identity
+than a voice call's caller ID.
+
+**What the 24h window actually forbids, stated correctly because the first
+version of this design got it wrong.** Meta allows free-form messages within 24h
+of the customer's **last** message, and that window **resets every time they
+write**. Our own sends never extend it. So a customer returning after two days
+reopens it themselves and can always be answered; the only thing genuinely
+forbidden is **us speaking first** after 24h of their silence. That needs an
+approved template. The cheap mitigation shipped instead: one nudge at 20h,
+inside the window, inviting them to write back — free, and their reply is what
+reopens it. Service conversations are free (Meta, 2024-11-01) and the Tech
+Provider model has no credit line to share, so `send_credits` stays out of the
+reply path entirely; only AI work is metered.
+
+**Coexistence is why echo handling is load-bearing rather than a nicety.** Every
+sender is `source='coexistence'`: the number is still live in the WhatsApp
+Business App and the owner answers from their phone out of habit. Meta reports
+those on a separate webhook field — **`smb_message_echoes`**, not the
+`message_echoes` this design first assumed; Meta's own page is JS-rendered and
+unreadable, two BSP mirrors agree on the other name, and the handler accepts
+both because accepting a name Meta never sends costs nothing while missing the
+one it does send costs every echo, silently. An echo writes an
+`outbound_messages` row with `origin='phone'`, **does not extend the window**,
+clears the unread state, and in B **suspends the agent on that thread**. Without
+it the agent talks over the owner on day one.
+
+**Naming a request is a phase, not a property of every message.** A session is
+the run since the last gap over 24h — the same boundary as the service window,
+bound as a parameter from `wa_routing.SESSION_GAP` rather than written as
+`interval '24 hours'` so SQL and Python cannot disagree about what one
+conversation is. `routed` is **derived**, not stored: the latest non-NULL intent
+inside the current session. The classifier (`typesafe/jev-1.13`) runs on the
+opening turns and then leaves for good; `MAX_ROUTING_TURNS = 2`, because when it
+is not confident the reply carries a three-button menu and the model gets one
+more try rather than a second blind guess. A tap routes with **no model call at
+all** and cannot be hallucinated — the id is one we defined, and it is still
+checked against the allowlist rather than trusted.
+
+**The menu turned out to be a labelling machine nobody designed as one.** A
+low-confidence verdict followed by a tap is *a case the model got wrong plus the
+correct label, supplied by the person who wrote the message*. `whatsapp.routing_corrections`
+(migration 26) is that eval set, and it has been accruing since the menu shipped
+with no annotation budget and no bias toward the failures we happened to notice.
+Beside it, `whatsapp.interaction_history` answers "was the router right?" as a
+join rather than a pipeline — a view cannot drift from the truth, which a summary
+table would the first time a backfill was skipped. Retention is 183 days, swept
+hourly, deleting both directions together (half a conversation is still personal
+data and no longer readable as one) and leaving `calls` alone, since that row is
+the business record of an appointment and outlives the chat. It is also the first
+retention policy this feature has ever had.
+
+**The ZDR waiver, recorded in full because it is the one guarantee we gave up.**
+`client.ts` has set `zdr: true` on every request since 2026-09-16. The routing
+classifier's only provider endpoint is not marked zero-data-retention, and the
+owner waived it **for that call and nothing else** on 2026-09-21. It is a named
+per-call argument, not a config value: default false everywhere, `grep -rn
+allowNonZdr src` finds every use, and a test pins the set of callers to exactly
+one file. `data_collection: 'deny'` is **not** waived. What crosses is the
+customer's opening message and nothing else — no record, no phone, no history,
+no catalogue — which is the same rule that keeps the prompt cheap at $42/M
+input, so the two constraints hold each other up. The **agent** prompt carries
+all of that customer data and therefore runs ZDR-routed on a flash model; a grep
+fence over all four agent modules fails if the waived flag is even named in a
+comment there.
+
+**Who is allowed to speak is the whole of B's safety.** Three writers share a
+thread and we control one. `may_speak` is a pure function returning a *reason*
+for every silence — `not_opted_in`, `intent_not_whitelisted`, `escalated`,
+`human_took_over` — and the webapp renders a distinct sentence for each, because
+an owner who cannot tell why the assistant is quiet assumes it is broken and
+switches it off. Opt-in defaults to off at the column. Messages are **debounced
+2s and batched**, not locked: people send one thought as three messages, and
+answering each is three replies and three billed turns. Ceilings everywhere —
+`MAX_AGENT_TOOL_CALLS = 8`, `MAX_SESSION_TURNS = 12`, and an empty basket stands
+the agent down silently so a customer never gets half an answer.
+
+**Two bugs found during implementation that would have made the feature inert,
+neither visible to the tests as specified.** (1) `record_reply` wrote
+`origin='kairo'`, which is *also* the owner's webapp reply — so the agent would
+have read its own last message as the owner arriving and silenced itself after
+one turn. Fixed by widening the CHECK to `('kairo','phone','agent')`: a new legal
+value, not a new column, since the rows already carried the fact and simply could
+not spell it. (2) The inbound worker returned early on an already-routed session,
+so the agent would only ever have seen the *first* message of a conversation — a
+customer answering "sabato alle 10" would have met silence. The classifier is
+what must not run twice; the handler is what must.
+
+**Five corrections the plan took from contact with real code**, each worth more
+than the plan's own text: migration 23 was already taken (token reminders), so
+this is 24–26; `ON CONFLICT` against a **partial** unique index must repeat the
+predicate or fail outright, the same inference bug recorded on 2026-07-18 and
+2026-07-21; `providerConfig` without `allow_fallbacks` is a provider hard-pin,
+i.e. the 2026-09-03 outage; `charge_actual` already existed and a second generic
+`charge` would have been two names for one function; and the engine already
+gates and charges each agent turn, so a `charge_actual` on this side would have
+billed the salon twice for it.
+
+**The `/whatsapp/messages` subject-access artifact now covers both directions.**
+It showed only what we sent, which for a GDPR "what do you hold about me" answer
+was never complete once customers write back. A voice note appears as
+`coalesce(transcript, body)` — the transcript is what we actually hold, and an
+empty row would answer "nothing" about a message we have the words of. The
+webapp's Anagrafiche tab needed a matching branch: without one an inbound message
+fell through to the campaign renderer and displayed as **«Campagna — Non
+inviato»**, the customer's own words labelled as a failed send.
+
+**Verification.** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **820 passed, 24 skipped, 0 failed**, against a
+baseline of **554/24 measured on this branch**, not quoted from the previous
+entry (which said 535; nineteen tests had landed in the WhatsApp commits since).
+marketing-engine **1170 passed**, webapp **1720 passed**, both `tsc --noEmit`
+exit 0. Migrations 24/25/26 applied **twice** in the full 03→26 chain against a
+scratch Postgres, exit 0 both passes. Every non-trivial statement was executed
+against real rows rather than assumed — which is how three server-only bugs
+surfaced that no unit test could see: an `AmbiguousParameterError` from an
+untyped `$5`, a `DataError` from binding an interval as a string, and a
+`thread_list` join that would have missed **every** outbound row because Meta
+sends `from` bare while `to_phone` carries the `+`. **No live Meta call was
+made**, as with every WhatsApp entry here.
+
+**Still needed before this can be switched on** — none of it automatable from
+this repo: subscribe **`smb_message_echoes`** in the Meta App Dashboard (the
+largest unverified assumption in the feature — verify the payload shape on the
+first real onboarding); confirm `typesafe/jev-1.13`'s ZDR status in the
+OpenRouter dashboard; add `whatsapp_triage`/`whatsapp_agent` to the webapp's
+`RUN_TYPES` so ledger rows attribute properly instead of landing as `chat`; set
+`MARKET_INTEL_API_URL` and `OPENAI_TOOL_SECRET` where the engine needs them; and
+check whether the salon's WhatsApp Business App has its own welcome/away message,
+which would arrive beside ours and read as our bug.
+
+---
+
 ## 2026-09-04 — The salon's business token expires after 60 days, and migration 15 said it couldn't
 
 **Found by auditing the Meta app's permissions, which turned out to be the one

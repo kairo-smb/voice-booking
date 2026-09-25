@@ -4,16 +4,20 @@ This is the one place in the product where a message goes out with nobody
 looking at it, so the rails live in the same place as the send:
 
 1. Sender online?  Not online -> the shop is skipped entirely.
-2. Quality gate.   YELLOW/RED pauses automated MARKETING; the two rules that
-   ship here are UTILITY and continue regardless. The gate is written now so
-   Plan 3's automated win-back (MARKETING) lands beside it without having to
-   remember to add the pause.
+2. Quality gate.   YELLOW/RED pauses automated MARKETING, so the feedback rule
+   (a review request Meta classifies as MARKETING) is held while the reminder
+   rule continues. The gate was written before the reclassification; it now has
+   a rule to act on rather than waiting for Plan 3's win-back.
 3. Enqueue, then record. A crash between the two re-sends once (recoverable);
    recording first would silently drop a message forever.
 
-Both templates are UTILITY: nothing is generated, every variable is a database
-fact, so no marketing consent is needed and the 7-day recipient cooldown does
-not apply. The send path agrees — see whatsapp_send's category branch.
+The two rules differ by category. `feedback_v2` is MARKETING — Meta reads the
+review ask as promotion — so it is consent-gated, cooldown-suppressed and
+paused under YELLOW/RED quality with any other marketing. `reminder_v6` stays
+UTILITY: an appointment reminder is transactional and must never be
+consent-gated or cooldown-suppressed. Neither generates anything — every
+variable is a database fact. The send path agrees — see whatsapp_send's
+category branch.
 
 Per-rule params the owner configures on the webapp tile:
   feedback:  hours_after (default 24), platform (google/facebook/instagram/
@@ -53,10 +57,11 @@ _IT_DAYS = [
     "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica",
 ]
 
-# Both rules are UTILITY — see whatsapp_templates.CATALOGUE. feedback_v2 is
-# the review request (platform + link); feedback_v1 was the same message without
-# the ask, and is gone from the catalogue entirely (2026-09-01) — Meta locks an
-# approved body, so new copy is a new key, never an edit.
+# feedback_v2 is MARKETING (Meta reclassified the review ask) and reminder_v6
+# is UTILITY — see whatsapp_templates.CATALOGUE. feedback_v2 is the review
+# request (platform + link); feedback_v1 was the same message without the ask,
+# and is gone from the catalogue entirely (2026-09-01) — Meta locks an approved
+# body, so new copy is a new key, never an edit.
 _RULE_TEMPLATE = {"feedback": "feedback_v2", "reminder": "reminder_v6"}
 
 _PLATFORM_LABELS = {
@@ -83,10 +88,11 @@ def render_variables(
     template_key: str, row: dict,
     *, platform: str = "general", link: str = "",
 ) -> dict[str, str]:
-    """The variables the UTILITY templates need, from the due-work row.
+    """The variables the templates need, from the due-work row.
 
     Nothing is generated: each value is a database fact, formatted for the
-    approved frame. That is what keeps these templates UTILITY.
+    approved frame. That is what keeps `reminder_v6` UTILITY and what lets the
+    MARKETING `feedback_v2` carry a slot exemption instead of a generated one.
 
         feedback_v2: {{1}} name, {{2}} visit date, {{3}} where to review
         reminder_v6: {{1}} name, {{2}} appointment date and time, {{3}} salon
@@ -115,9 +121,10 @@ def render_variables(
 def _quality_blocks_marketing(sender: dict) -> bool:
     """YELLOW/RED quality rating pauses automated MARKETING.
 
-    Both rules this plan ships are UTILITY, so this never fires today — it
-    exists so Plan 3's automated win-back (MARKETING) can land beside this
-    code without having to remember to add the pause.
+    The feedback rule is MARKETING (a review request), so this fires for it
+    today; the reminder rule is UTILITY and continues regardless. The split is
+    the point: consent, cooldown and the quality pause all key off the same
+    category, so a rule's category is its compliance posture.
     """
     return (sender.get("quality_rating") or "GREEN") in ("YELLOW", "RED")
 
@@ -145,9 +152,10 @@ async def run_automations(*, settings) -> dict:
                 continue
 
             if _quality_blocks_marketing(sender) and template.get("category") == "MARKETING":
-                # YELLOW/RED pauses automated MARKETING. Both rules here are
-                # UTILITY, so both continue regardless; the gate stays so Plan
-                # 3's win-back lands beside it without remembering to add it.
+                # YELLOW/RED pauses automated MARKETING. The feedback rule is
+                # MARKETING, so it is held here; the reminder rule is UTILITY
+                # and continues. The gate reads the row's category, which is
+                # Meta's verdict adopted at ensure time — not our guess.
                 continue
 
             if rule_key == "feedback":

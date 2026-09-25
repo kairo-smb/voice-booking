@@ -103,4 +103,4 @@ $0 idle: Fly.io free tier (auto-stop machines) + Neon free tier. Usage-based cos
 
 ## Documentation
 
-`docs/knowledge/` is a [Docsify](https://docsify.js.org/) site covering architecture, the database ownership contract, voice-agent domain logic, providers, operations, and the full API reference — `npx --yes serve docs/knowledge` to browse it. `CLAUDE.md` is the running log of architectural decisions, incidents, and what's still open — read it before making non-trivial changes.
+`docs/knowledge/` is a [Docsify](https://docsify.js.org/) site covering architecture, the database ownership contract, voice-agent domain logic, providers, operations, and the full API reference — `npx --yes serve docs/knowledge` to browse it. `AGENTS.md` is the running log of architectural decisions, incidents, and what's still open — read it before making non-trivial changes.

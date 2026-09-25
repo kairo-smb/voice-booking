@@ -48,6 +48,19 @@ def resolve_language(language: str | None) -> str:
     return language if language in SUPPORTED_LANGUAGES else DEFAULT_LANGUAGE
 
 
+# The one named exemption from "MARKETING generates a slot" — see the field
+# comments below. Meta reclassified feedback_v2 (the review request) to
+# MARKETING: asking a customer to publish a public review is promotion by
+# Meta's definition, whatever anchor to their visit it carries. It still has no
+# generated slot, because every variable is a fact (`render_variables` formats
+# name + visit date + platform) and there is nothing for a model to write. The
+# invariant it bends exists for the three LLM marketing templates, where a
+# missing slot means a prompt with no frame to write into — so the exemption is
+# named per key rather than inferred from `filled_by`, and badges like this
+# cannot quietly spread to a template the model is supposed to fill.
+MARKETING_WITHOUT_GENERATED_SLOT: frozenset[str] = frozenset({"feedback_v2"})
+
+
 @dataclass(frozen=True)
 class Template:
     body: str
@@ -55,16 +68,20 @@ class Template:
     sample: dict[str, str]
     category: str = "MARKETING"
     language: str = "it"
-    # Which {{n}} the LLM writes. None means nothing is generated — the mark of
-    # a UTILITY template, and the reason it stays UTILITY. Every other variable
-    # is a fact the webapp already holds, which is both cheaper and unable to
-    # hallucinate a service the customer never had.
+    # Which {{n}} the model writes. None means no generated slot: every
+    # variable is a database fact. For a UTILITY template that is the mark of
+    # the category; a MARKETING template with no slot is legal only under a
+    # named exemption (`MARKETING_WITHOUT_GENERATED_SLOT`), which `feedback_v2`
+    # carries. Every variable that is not the slot is likewise a fact the
+    # webapp already holds, which is both cheaper and unable to hallucinate a
+    # service the customer never had.
     generated_slot: int | None = None
     # Who writes the generated slot. 'llm' for templates whose variable is
     # composed by the model; 'owner' when the shop types it verbatim (the
-    # Campagna Promo tile); None when there is no such slot at all, which is
-    # what makes a template UTILITY. `generated_slot` says WHICH variable is
-    # filled; this says BY WHOM, and the two are no longer the same question.
+    # Campagna Promo tile); None when there is no slot at all — a UTILITY
+    # template, or the MARKETING template named in
+    # `MARKETING_WITHOUT_GENERATED_SLOT`. `generated_slot` says WHICH variable
+    # is filled; this says BY WHOM, and the two are no longer the same question.
     filled_by: str | None = None
     max_chars: int = 90
     # Passed to the model as-is. Never sent to Meta, so both can be retuned
@@ -183,28 +200,35 @@ CATALOGUE: dict[str, Template] = {
         guidance="",
     ),
 
-    # ── UTILITY ──────────────────────────────────────────────────────────────
-    # NOTHING GENERATED AND NOTHING PERSUASIVE. That is the whole reason these
-    # cost €0.0341 instead of €0.0691, need no marketing consent and are exempt
-    # from the recipient cooldown. Adding so much as "e approfitta del 10%"
-    # makes Meta recategorise the template as MARKETING — not a rejection, a
-    # silent doubling of the economics of the highest-volume messages we send.
-    # Enforced by test_utility_templates_stay_utility.
-    # The review request: the owner picks where to ask ({{5}}) and may attach
-    # a link ({{6}}). Still facts only — a platform name and a URL are facts,
-    # so the UTILITY economics hold.
+    # ── MARKETING, but not generated ─────────────────────────────────────────
+    # Meta reclassified only the review request: asking a customer to publish a
+    # public review is promotion by Meta's definition, whatever anchor to their
+    # visit it carries. So `feedback_v2` is MARKETING while `reminder_v6` below
+    # stays UTILITY — and the split is deliberate, not an oversight:
+    #
+    #   * feedback_v2 is consent-gated, cooldown-suppressed and paused on
+    #     YELLOW/RED quality, because the send path and the automation tick read
+    #     the category. The tick's marketing gate that "never fired today" now
+    #     fires for the feedback rule.
+    #   * reminder_v6 must never be any of those. An appointment reminder is
+    #     transactional; delaying or suppressing it behind last week's offer
+    #     would be a product defect, not a compliance win.
+    #
+    # It generates nothing, and that is the one named exemption from the
+    # "MARKETING generates a slot" invariant (`MARKETING_WITHOUT_GENERATED_SLOT`
+    # above): every variable is a fact — name, visit date, review platform — so
+    # there is nothing for a model to write and nothing that could hallucinate.
+    # The invariant is unchanged for the three LLM templates.
     #
     # `feedback_v1` (same body, no review ask) was dropped from the catalogue
     # on 2026-09-01 rather than edited: Meta locks an approved body, so new copy
     # is always a new key. It was safe to delete outright because no sender had
     # ever received it — nothing to retire downstream, and the catalogue is the
     # push list, not a history of what we once sent.
-    # The salon's name and the service list came out on 2026-09-01. Coexistence
-    # means this arrives from the salon's own number under the salon's own
-    # display name — naming it again in the body is what made a two-line message
-    # read like a mailshot. The visit date stays: it is the anchor to the
-    # customer's own transaction, and that anchor is what keeps Meta reading
-    # these as UTILITY rather than recategorising them.
+    # The service list came out on 2026-09-01 and the salon's name went with it:
+    # this already arrives from the salon's own number under its display name,
+    # so naming it again read like a mailshot. The visit date stays — it is the
+    # anchor to the customer's own transaction.
     "feedback_v2": Template(
         body=(
             "Ciao {{1}}, grazie per la tua visita del {{2}}! Se ti va, "
@@ -216,9 +240,20 @@ CATALOGUE: dict[str, Template] = {
             "2": "12 marzo",
             "3": "Google",
         },
-        category="UTILITY",
+        category="MARKETING",
         generated_slot=None,
     ),
+
+    # ── UTILITY ──────────────────────────────────────────────────────────────
+    # NOTHING GENERATED AND NOTHING PERSUASIVE. That is the whole reason these
+    # cost €0.0341 instead of €0.0691, need no marketing consent and are exempt
+    # from the recipient cooldown. Adding so much as "e approfitta del 10%"
+    # makes Meta recategorise the template as MARKETING — not a rejection, a
+    # silent doubling of the economics of the highest-volume messages we send.
+    # Enforced by test_utility_templates_stay_utility. The one persuasion-shaped
+    # message that does NOT live here is the review request above, which is
+    # MARKETING on Meta's reading and consent-gated with it.
+    #
     # `_v6` because that is the copy submitted and approved on Kairo's WABA —
     # the key tracks Meta's name, never the other way round. Meta locks an
     # approved body, so the version in this dict has to be the version Meta
@@ -291,14 +326,36 @@ def body_hash(body: str) -> str:
 
 
 def catalogue_fingerprints() -> list[str]:
-    """`key|hash` per catalogue entry — the worklist key for the hourly sweep.
+    """`key|hash` per catalogue entry — the body-with-variables half of the worklist.
 
     One array covers both questions the sweep has to ask ("is a template
-    missing?" and "is one stale?") in a single count, and being keyed on the
-    catalogue is also what stops non-catalogue rows (the receipt) from padding
-    that count until a shop missing a real template looks complete.
+    missing?" and "is one stale?") in a single count. The catalogue alone is
+    not the push list any more: the document templates join it in
+    `propagation_fingerprints()`, which is what the sweep actually passes on.
     """
     return [f"{key}|{body_hash(tpl.body)}" for key, tpl in CATALOGUE.items()]
+
+
+def document_fingerprints() -> list[str]:
+    """`key|hash` per DOCUMENT_TEMPLATES entry — the receipt's half of the worklist.
+
+    Same `key|body_hash` shape as the catalogue's, built generically from the
+    dict so a second document template joins the push list without a new
+    function. The receipt's body is the compared payload: the document header
+    is opaque (`header_handle`), only the BODY text is reviewable.
+    """
+    return [f"{key}|{body_hash(tpl.body)}" for key, tpl in DOCUMENT_TEMPLATES.items()]
+
+
+def propagation_fingerprints() -> list[str]:
+    """Catalogue + document templates — what the hourly sweep actually pushes.
+
+    The catalogue is the push list and so are the document templates
+    (`purchase_receipt_1`), so a shop missing the receipt — or holding a
+    stale one — comes back on the worklist exactly like one missing a
+    marketing template. `catalogue_fingerprints()` alone would undercount.
+    """
+    return catalogue_fingerprints() + document_fingerprints()
 
 
 def clean_variable(value: str) -> str:

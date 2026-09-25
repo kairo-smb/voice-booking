@@ -109,7 +109,7 @@ async def evaluate(*, bundle_sid: str, account_sid: str,
     """Synchronous. Returns (compliant, violations) with Twilio's own wording.
 
     `results[]` entries are a flat list (confirmed against a live noncompliant
-    evaluation, see CLAUDE.md 2026-08-14 entry) but the message field is
+    evaluation, see AGENTS.md 2026-08-14 entry) but the message field is
     `failure_reason`, not `description` — Twilio's evaluation objects have no
     `description` key at all. Getting this wrong doesn't produce an empty
     violation list (friendly_name still resolves), but it silently drops the

@@ -1,6 +1,7 @@
 """POST /messaging/tick — the single scheduled entry point.
 
-One hourly cron hits this. It polls regulatory bundles that are under review,
+The in-process scheduler runs this hourly (services/scheduler.py); the
+route is the manual trigger. It polls regulatory bundles that are under review,
 provisions numbers whose bundles were approved, refreshes the health
 semaphore for every shop that has a number, runs the number-release sweep
 (grace-period release of lapsed-plan shops' Twilio numbers), then polls
@@ -20,9 +21,12 @@ from booking_engine.db.number_request_queries import list_pending_review, set_st
 from booking_engine.services.number_health import check_all
 from booking_engine.services.number_provisioning import provision_approved
 from booking_engine.services.number_release import sweep as release_sweep
+from booking_engine.services.messaging.wa_nudge import sweep as whatsapp_nudge_sweep
+from booking_engine.services.messaging.wa_retention import sweep as whatsapp_retention_sweep
 from booking_engine.services.messaging.whatsapp_automations import run_automations as whatsapp_run_automations
 from booking_engine.services.messaging.whatsapp_onboarding import sweep as whatsapp_sweep
-from booking_engine.services.messaging.whatsapp_send import send_due as whatsapp_send_due
+from booking_engine.services.scheduler import TICK_LOCK, singleton
+from booking_engine.services.scheduler import locked_send_due as whatsapp_send_due
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,15 @@ async def tick(
     settings: Annotated[Settings, Depends(get_settings)],
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict:
+    """Manual trigger. The in-process scheduler runs the same thing hourly;
+    the lock keeps the two from overlapping."""
+    async with singleton(TICK_LOCK) as got:
+        if not got:
+            return {"data": {"skipped": "busy"}}
+        return {"data": await run_tick(settings)}
+
+
+async def run_tick(settings: Settings) -> dict:
     reviewed = 0
     provisioned = 0
     rejected = 0
@@ -110,7 +123,29 @@ async def tick(
         whatsapp_automations = {"errors": 1}
         errors += 1
 
-    return {"data": {
+    # The 20h nudge: one last free message inside Meta's service window,
+    # inviting a silent customer to write back. Runs after the automations so
+    # a reminder queued this tick is never the thing a nudge talks over, and
+    # under the same isolation as every stage above it.
+    try:
+        whatsapp_nudges = await whatsapp_nudge_sweep()
+    except Exception:  # noqa: BLE001 — see comment above
+        logger.exception("messaging_tick.whatsapp_nudge_failed")
+        whatsapp_nudges = {"errors": 1}
+        errors += 1
+
+    # Six-month retention. Last of the WhatsApp stages on purpose: it is the
+    # only destructive one, and nothing above it should ever be skipped because
+    # a delete had a bad minute. It counts its own errors rather than raising —
+    # see `wa_retention.sweep` — so the wrapper here is belt and braces.
+    try:
+        whatsapp_retention = await whatsapp_retention_sweep()
+    except Exception:  # noqa: BLE001 — see comment above
+        logger.exception("messaging_tick.whatsapp_retention_failed")
+        whatsapp_retention = {"errors": 1}
+    errors += int(whatsapp_retention.get("errors") or 0)
+
+    return {
         "reviewed": reviewed,
         "provisioned": provisioned,
         "rejected": rejected,
@@ -120,4 +155,6 @@ async def tick(
         "whatsapp": whatsapp_onboarding_counts,
         "whatsapp_sends": whatsapp_sends,
         "whatsapp_automations": whatsapp_automations,
-    }}
+        "whatsapp_nudges": whatsapp_nudges,
+        "whatsapp_retention": whatsapp_retention,
+    }

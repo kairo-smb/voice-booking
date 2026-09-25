@@ -9,23 +9,32 @@ why migration 15 dropped the per-subaccount token column.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request,
+)
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token, _get_settings
+from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.config import Settings
 from booking_engine.db import whatsapp_audit_queries as waq
 from booking_engine.db import whatsapp_automation_queries as aq
 from booking_engine.db import whatsapp_queries as wq
+from booking_engine.db import wa_session_queries as wsq
+from booking_engine.db import whatsapp_thread_queries as tq
 from booking_engine.services.messaging import meta_limits
+from booking_engine.services.messaging import wa_agent
+from booking_engine.services.messaging import wa_inbound
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
 from booking_engine.services.messaging.whatsapp_pricing import price_list
 from booking_engine.services.messaging import whatsapp_receipt
 from booking_engine.services.messaging.whatsapp_send import enqueue_campaign
+from booking_engine.services.scheduler import locked_send_due
 from booking_engine.services.messaging.whatsapp_onboarding import template_name
 from booking_engine.services.messaging.whatsapp_templates import (
     CATALOGUE, DEFAULT_LANGUAGE, RECEIPT_TEMPLATE_NAME, resolve_language,
@@ -96,13 +105,29 @@ class StartRequest(BaseModel):
 
 
 class CompleteRequest(BaseModel):
-    """Everything Meta's Embedded Signup popup hands back to the browser."""
+    """What Meta's Embedded Signup popup hands back to the browser.
+
+    Only `code` is required. The ids ride on a `WA_EMBEDDED_SIGNUP`
+    postMessage that Meta sends solely through its JS SDK, which this flow no
+    longer uses, so in practice the browser has nothing else to send — the
+    service reads both back from the exchanged token instead. Kept accepted,
+    not removed: they are still correct when present, and refusing them would
+    break any caller that does go through the SDK.
+    """
 
     shop_id: UUID
     requested_by: UUID | None = None
-    code: str = Field(min_length=1, max_length=512)
-    waba_id: str = Field(min_length=1, max_length=64)
-    phone_number_id: str = Field(min_length=1, max_length=64)
+    # Absent on the second call, which answers a `waba_ambiguous` by naming the
+    # WABA. The code is single-use and already spent by then; the service
+    # resumes from the token it persisted rather than asking for another popup.
+    code: str | None = Field(default=None, max_length=512)
+    waba_id: str | None = Field(default=None, max_length=64)
+    phone_number_id: str | None = Field(default=None, max_length=64)
+    # The origin the dialog was opened with. Meta binds the code to it and
+    # refuses an exchange that does not repeat it verbatim, so it comes from
+    # the browser that built the URL rather than from config here — the webapp
+    # is served on several origins and this service knows none of them.
+    redirect_uri: str | None = Field(default=None, max_length=512)
     reconnect: bool = False
 
 
@@ -150,6 +175,22 @@ class ReceiptRequest(BaseModel):
     source: str | None = None
 
 
+class ReplyRequest(BaseModel):
+    """A free-form answer typed by the owner in the Inbox.
+
+    `phone` is whatever spelling the caller holds — with or without the leading
+    '+'. Nothing here normalises it: the thread SQL matches on
+    `ltrim(phone,'+')` on both sides, and a second normalisation on this side
+    would be a second rule to keep in agreement with that one.
+    """
+
+    shop_id: UUID
+    phone: str = Field(min_length=1, max_length=32)
+    # Meta's own text ceiling is 4096 characters; a longer body is rejected by
+    # Graph, so it is refused here where the owner can see why.
+    body: str = Field(max_length=4096)
+
+
 # ------------------------------------------------------------------ onboarding
 
 @router.post("/onboarding/start")
@@ -183,6 +224,7 @@ async def start(
 @router.post("/onboarding/complete")
 async def complete(
     payload: CompleteRequest,
+    background: BackgroundTasks,
     settings: Annotated[Settings, Depends(_get_settings)],
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict:
@@ -194,7 +236,7 @@ async def complete(
     result = await onboarding.complete(
         shop_id=payload.shop_id, code=payload.code, waba_id=payload.waba_id,
         phone_number_id=payload.phone_number_id, settings=settings,
-        reconnect=payload.reconnect,
+        redirect_uri=payload.redirect_uri, reconnect=payload.reconnect,
     )
     # The single-use `code` never reaches the audit — only the identity-bearing
     # ids that say which WABA the salon connected.
@@ -208,7 +250,19 @@ async def complete(
         error_message=result.get("error") if not result.get("ok") else None,
     )
     if not result.get("ok"):
+        # An ambiguity is a question, not just a refusal: the caller needs the
+        # candidates in order to ask the owner, so this one carries the whole
+        # result instead of the bare slug every other refusal flattens to.
+        if result.get("wabas"):
+            raise HTTPException(status_code=409, detail=result)
         raise HTTPException(status_code=409, detail=result.get("error"))
+    # After the response, not inside it: one Graph round trip per catalogue
+    # entry is enough to blow the gateway timeout in front of the webapp, and
+    # the owner would see a 504 for a sender that is already online. A failure
+    # here is picked up by the hourly sweep, which revisits any sender missing
+    # templates — so this is a head start, not the only path.
+    background.add_task(onboarding.ensure_templates,
+                        shop_id=payload.shop_id, settings=settings)
     return {"data": result}
 
 
@@ -222,6 +276,21 @@ async def abort_onboarding(
     result = await onboarding.abort(shop_id=shop_id)
     await waq.record_audit_event(
         shop_id=shop_id, event="onboarding.abort", actor_id=requested_by,
+        status="success",
+    )
+    return {"data": result}
+
+
+@router.delete("/sender/{shop_id}")
+async def disconnect_sender(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+    requested_by: UUID | None = Query(default=None),
+) -> dict:
+    """Owner disconnects their WABA: unsubscribe, cancel the queue, forget it."""
+    result = await onboarding.disconnect(shop_id=shop_id)
+    await waq.record_audit_event(
+        shop_id=shop_id, event="sender.disconnect", actor_id=requested_by,
         status="success",
     )
     return {"data": result}
@@ -355,7 +424,24 @@ async def campaign(
     )
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
+    # A single win-back is one owner, one customer, one click: waiting for the
+    # next scheduled drain reads as "nothing happened". Send what is due now; `spread` already put
+    # an out-of-hours send on tomorrow's opening, so that one still waits.
+    if payload.source == "offer" and result.get("queued"):
+        result["sent_now"] = (await locked_send_due(
+            settings=settings, shop_id=payload.shop_id,
+            campaign_key=payload.campaign_key,
+        ))["sent"]
     return {"data": result}
+
+
+@router.get("/campaigns/{shop_id}")
+async def campaigns_pending(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Campaigns with messages still queued — the bulk tile's persistent view."""
+    return {"data": await wq.pending_campaigns(shop_id=shop_id)}
 
 
 @router.get("/campaigns/{shop_id}/{campaign_key}")
@@ -477,6 +563,141 @@ async def cancel_campaign(
     return {"data": {"cancelled": cancelled}}
 
 
+# --------------------------------------------------------------------- threads
+
+@router.get("/threads/{shop_id}")
+async def threads(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """The Inbox's first screen: one row per phone, newest first.
+
+    One query, not one per thread — the session's routed intent is derived in
+    the list SQL precisely so this endpoint stays O(1) round trips. The two
+    derived fields are computed here rather than in SQL because they are pure
+    rules (`window_open`, `needs_attention`) with their own unit tests, and a
+    second copy of either in a query is a second place to get the 24h boundary
+    wrong.
+    """
+    rows = await tq.thread_list(shop_id)
+    now = datetime.now(timezone.utc)
+    out = []
+    for row in rows:
+        # Who is holding this thread, in the agent's own words. An owner who
+        # cannot tell why the agent is quiet assumes it is broken and turns it
+        # off, so every silence comes back named rather than as a bare false.
+        active, reason = wa_agent.agent_status(row)
+        out.append({
+            **row,
+            "window_open": tq.window_open(last_inbound=row.get("last_inbound"), now=now),
+            "needs_attention": tq.needs_attention(row),
+            "agent_active": active,
+            "agent_reason": reason,
+        })
+    return {"data": out}
+
+
+@router.post("/threads/{shop_id}/{phone}/takeover")
+async def takeover(
+    shop_id: UUID,
+    phone: str,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """"Rispondo io": the owner takes this conversation off the agent.
+
+    Written on the session row, because that is where the handover rules
+    already read from — there is no per-thread state table and this is not the
+    place to invent one. `open_session` first, since the owner may take over a
+    thread the agent has not spoken on yet (a message that just arrived, or one
+    it is still debouncing); with no row there would be nothing to mark, and
+    the next inbound message would find a clean slate and answer anyway.
+
+    `customer_id` is not passed: it only matters when this call *creates* the
+    session, which is the case where no turn will ever run on it. Looking it up
+    to write `customer_match = 'existing'` on a row that exists solely to say
+    "a person has this" would be a query for a field nothing reads.
+
+    **One direction only — there is no endpoint to hand it back.** See the
+    module note on `wa_agent.TAKEOVER_REASON`: the agent resumes by itself on
+    the customer's next conversation, and un-escalating this one would put it
+    back into a thread a person is in the middle of.
+    """
+    call_id = await wsq.open_session(shop_id=shop_id, phone=phone, customer_id=None)
+    await wsq.mark_escalated(call_id=call_id, reason=wa_agent.TAKEOVER_REASON)
+    return {"data": {"taken_over": True}}
+
+
+@router.get("/threads/{shop_id}/{phone}")
+async def thread(
+    shop_id: UUID,
+    phone: str,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """One conversation, both directions, oldest first — and it marks it read.
+
+    Reading the thread *is* what marks it read: the two are the same act, and a
+    separate endpoint would be one more call the webapp can forget to make,
+    after which the unread badge lies forever. `mark_read` is idempotent
+    (`read_at IS NULL`), so there is nothing to branch on for an empty thread —
+    an unknown phone returns an empty timeline rather than a 404, because "this
+    customer has never written" is an answer, not an error.
+    """
+    messages = await tq.thread_timeline(shop_id, phone)
+    await tq.mark_read(shop_id, phone)
+    return {"data": {"messages": messages}}
+
+
+@router.post("/reply")
+async def reply(
+    payload: ReplyRequest,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Free-form reply from the owner, inside Meta's 24h service window.
+
+    **No credit debit, deliberately.** Meta does not charge for a service
+    conversation (one the customer opened) and, as a Tech Provider, Kairo has
+    no credit line to share — the salon's own card is on the salon's own WABA.
+    A debit here would bill the salon for something nobody charges us for, so
+    this path matches every other WhatsApp send in this repo and takes none.
+    """
+    if not payload.body.strip():
+        # Graph rejects an empty text body. Refusing locally names the problem;
+        # relaying Meta's error would not.
+        return {"ok": False, "error": "empty_body"}
+
+    sender = await wq.get_sender(payload.shop_id)
+    if not sender or sender["status"] != "online":
+        return {"ok": False, "error": "sender_offline"}
+
+    # Before Graph, never after. Outside the window Meta answers 131047, which
+    # reaches the owner as an opaque provider error they cannot act on — and
+    # costs a Graph round trip to learn something we already knew.
+    last_inbound = await tq.last_inbound_at(payload.shop_id, payload.phone)
+    if not tq.window_open(last_inbound=last_inbound,
+                          now=datetime.now(timezone.utc)):
+        return {"ok": False, "error": "session_window_closed"}
+
+    sid = await meta.send_text(
+        phone_number_id=sender["phone_number_id"], to=payload.phone,
+        body=payload.body, token=sender["access_token"],
+    )
+    try:
+        await tq.record_reply(shop_id=payload.shop_id, to_phone=payload.phone,
+                              body=payload.body, provider_sid=sid)
+    except Exception:  # noqa: BLE001
+        # Meta has already delivered it; the customer's phone has the message.
+        # Reporting failure would have the owner send it a second time, which
+        # is the worse of the two wrongs, so the send is reported as what it
+        # is — sent, and missing from the thread. `recorded: False` is the
+        # webapp's cue to say so, and the log is how it gets repaired.
+        logger.exception(
+            "whatsapp.reply_not_recorded shop=%s to=%s sid=%s",
+            payload.shop_id, payload.phone, sid,
+        )
+        return {"data": {"sent": True, "provider_sid": sid, "recorded": False}}
+    return {"data": {"sent": True, "provider_sid": sid}}
+
+
 # --------------------------------------------------------------------- webhook
 
 @router.get("/messages/{shop_id}")
@@ -546,6 +767,50 @@ async def webhook(
     return Response(status_code=200)
 
 
+def _interactive_or_text(message: dict) -> tuple[str | None, str]:
+    """(button_id, display_text). `button_id` is None for anything typed.
+
+    A tap on a menu we sent comes back as `type: "interactive"` carrying the id
+    we defined. Storing the *title* as the body is what makes the thread view
+    show the customer what they saw themselves tap, rather than a slug.
+
+    Every read is a `.get()` chain that degrades to empty: a shape Meta changes
+    or a type we have never seen must record a blank message, not raise inside
+    the webhook. Same reason the text branch tolerates a bare string.
+    """
+    if message.get("type") == "interactive":
+        inter = message.get("interactive")
+        if not isinstance(inter, dict):
+            return None, ""
+        reply = inter.get("button_reply") or inter.get("list_reply")
+        if not isinstance(reply, dict):
+            return None, ""
+        return (str(reply.get("id") or "") or None, str(reply.get("title") or ""))
+    text = message.get("text")
+    if isinstance(text, dict):
+        return None, str(text.get("body") or "")
+    return None, str(text or "")
+
+
+def _media_id(message: dict) -> str | None:
+    """The attachment id of a voice note, which exists only on this payload.
+
+    Meta nests it under a key named after the type (`audio.id`) and it is not
+    a column on `inbound_messages` — the download URL it resolves to expires
+    within minutes, so there would be nothing durable to store. It rides on
+    the dict handed to the worker instead.
+
+    Audio only: nothing else is transcribed, and fetching an image we cannot
+    read would spend the salon's token on bytes with nowhere to go.
+    """
+    if message.get("type") != "audio":
+        return None
+    audio = message.get("audio")
+    if not isinstance(audio, dict):
+        return None
+    return str(audio.get("id") or "") or None
+
+
 async def _handle_change(sender: dict, change: dict) -> None:
     field = change.get("field")
     value = change.get("value") or {}
@@ -553,13 +818,66 @@ async def _handle_change(sender: dict, change: dict) -> None:
     if field == "message_template_status_update":
         # Minutes instead of the next hourly tick. The tick's poll survives as
         # a reconciler for the webhook Meta doesn't deliver.
-        await wq.set_template_status(
+        name = value.get("message_template_name", "")
+        matched = await wq.set_template_status(
             shop_id=sender["shop_id"],
-            name=value.get("message_template_name", ""),
+            name=name,
             status=onboarding.TEMPLATE_STATUS.get(
                 (value.get("event") or "").lower(), "pending"
             ),
             rejection_reason=value.get("reason") or None,
+        )
+        # Meta ruling on a template we hold no row for: it exists on that WABA
+        # and we don't know it. Silent until 2026-09-20, when six of them did
+        # exactly this. The sweep's adoption path is what repairs it — this
+        # only makes the gap audible in the meantime.
+        if not matched:
+            logger.warning(
+                "whatsapp.template_verdict_unmatched shop=%s name=%s event=%s",
+                sender["shop_id"], name, value.get("event"),
+            )
+        return
+
+    # Meta named the coexistence field `smb_message_echoes`; the array inside
+    # it is `message_echoes`. Both names are accepted because the field name is
+    # the one thing here confirmed only from a BSP's mirror of Meta's docs, and
+    # accepting a name we never receive costs nothing.
+    if field in ("smb_message_echoes", "message_echoes"):
+        # The owner answers from the WhatsApp Business App and Meta reports it
+        # here. Recorded so the thread is not a half-conversation and the owner
+        # is not asked to answer something they already answered.
+        #
+        # Deliberately does NOT touch the 24h window: that is driven by
+        # customer inbound alone, and an echo that extended it would let us
+        # send into a conversation Meta considers closed.
+        for echo in value.get("message_echoes") or []:
+            await wq.record_echo(
+                shop_id=sender["shop_id"],
+                to_phone=str(echo.get("to") or ""),
+                # Meta reports the business number as the echo's sender; the
+                # row on file is the fallback for a payload that omits it.
+                from_number=str(echo.get("from") or sender.get("phone_number") or ""),
+                body=_interactive_or_text(echo)[1],
+                wa_message_id=str(echo.get("id") or "") or None,
+            )
+            logger.info(
+                "whatsapp.echo shop=%s to=%s type=%s",
+                sender["shop_id"], echo.get("to"), echo.get("type"),
+            )
+        return
+
+    # The payloads of the mandatory coexistence sync (see
+    # onboarding.sync_coexistence). Acknowledged and logged, not stored yet:
+    # Meta requires the request, not that we keep the data. Logged so a
+    # declined history share (error 2593109) is visible rather than silent.
+    # ponytail: log-only — importing history into Inbox threads is the upgrade.
+    if field in ("history", "smb_app_state_sync"):
+        errors = [e for h in (value.get("history") or []) for e in (h.get("errors") or [])]
+        logger.info(
+            "whatsapp.coexistence_sync_payload shop=%s field=%s contacts=%s "
+            "history_chunks=%s errors=%s",
+            sender["shop_id"], field, len(value.get("state_sync") or []),
+            len(value.get("history") or []), [e.get("code") for e in errors],
         )
         return
 
@@ -592,13 +910,32 @@ async def _handle_change(sender: dict, change: dict) -> None:
         # because campaign measurement needs "did this recipient reply within
         # 72h" as a queryable signal; a reply is matched back to the message it
         # answers by phone number.
-        await wq.record_inbound(
+        button_id, text = _interactive_or_text(message)
+        row = await wq.record_inbound(
             shop_id=sender["shop_id"],
             from_phone=str(message.get("from") or ""),
-            body=str(message.get("text", {}).get("body") if isinstance(message.get("text"), dict) else (message.get("text") or "")),
+            body=text,
             message_type=str(message.get("type") or "text"),
+            wa_message_id=str(message.get("id") or "") or None,
+            # A tap is already named: the id is one we defined, so it *is* the
+            # intent and there is nothing for a model to rule on.
+            intent=button_id,
+            confidence=1.0 if button_id else None,
         )
+        if row is None:
+            # Meta replayed a webhook we have already recorded. Skipping here
+            # is what keeps a retry from costing a second AI classification.
+            logger.info(
+                "whatsapp.inbound_replay shop=%s wamid=%s",
+                sender["shop_id"], message.get("id"),
+            )
+            continue
         logger.info(
-            "whatsapp.inbound shop=%s from=%s type=%s",
-            sender["shop_id"], message.get("from"), message.get("type"),
+            "whatsapp.inbound shop=%s from=%s type=%s intent=%s",
+            sender["shop_id"], message.get("from"), message.get("type"), button_id,
         )
+        # Everything slow — media, transcription, the classifier — happens
+        # after this handler has returned and Meta has its 200. Only a fresh
+        # row gets one: scheduling on a replay would hand back the exact cost
+        # the dedup above exists to avoid.
+        wa_inbound.schedule(sender, {**row, "media_id": _media_id(message)})

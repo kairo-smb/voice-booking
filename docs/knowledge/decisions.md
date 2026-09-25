@@ -1,13 +1,14 @@
 # Decisions
 
-A short index into `CLAUDE.md`'s full history log — enough to find the relevant entry without reading the whole file. `CLAUDE.md` is the source of truth; this page is a lookup aid, not a duplicate, and is kept in sync by hand when `CLAUDE.md` gains a new entry worth indexing.
+A short index into `AGENTS.md`'s full history log — enough to find the relevant entry without reading the whole file. `AGENTS.md` is the source of truth; this page is a lookup aid, not a duplicate, and is kept in sync by hand when `AGENTS.md` gains a new entry worth indexing.
 
-> **Maintenance rule:** a new `CLAUDE.md` entry that a future reader would plausibly search for gets a one-line pointer added here in the same change. See [README](README.md#maintenance-rule).
+> **Maintenance rule:** a new `AGENTS.md` entry that a future reader would plausibly search for gets a one-line pointer added here in the same change. See [README](README.md#maintenance-rule).
 
 ---
 
-| Date | Decision | CLAUDE.md section |
+| Date | Decision | AGENTS.md section |
 |---|---|---|
+| 2026-09-22 | WhatsApp becomes two-way and an agent books through it: `voice_agent.calls` was already a session table, so the booking tools were reused untouched; session-scoped routing with a button menu to disambiguate; echoes from the owner's phone suspend the agent; the ZDR waiver, scoped to the classifier alone | §"WhatsApp becomes a conversation, and an agent books through it" |
 | 2026-08-24 | Meta's platform limits become a floor nothing may cross (`meta_limits.py`): `min(Meta, ours)`, rolling-24h tier window, per-recipient cooldown, clamped send rate, onboarding cap | §"Meta's limits become a floor nothing may cross..." |
 | 2026-08-24 | WhatsApp leaves Twilio for Meta Cloud API direct (Tech Provider): BYO WABA + coexistence, templates injected into the salon's own WABA, no credit debit, multi-day bulk drip with a paced scheduler | §"WhatsApp leaves Twilio: Meta Cloud API direct..." |
 | 2026-08-22 | WhatsApp monthly allowance lives on the subscription plan row; free-form messages are not free (Twilio's fee applies to every category) | §"WhatsApp sends are capped by the subscription plan..." |

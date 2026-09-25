@@ -44,7 +44,7 @@ def _slot(offset_days: int, hour: int = 11) -> datetime:
 
 
 def _token(shop_id, call_id, settings) -> str:
-    return mint_call_token(shop_id=shop_id, call_id=call_id, secret=settings.openai_tool_secret)
+    return mint_call_token(shop_id=shop_id, call_id=call_id, secret=settings.voice_agent_tool_secret)
 
 
 async def test_create_customer_from_call_persists_row(
@@ -59,7 +59,7 @@ async def test_create_customer_from_call_persists_row(
         "create_customer_from_call",
         {"phone": "+39 333 9990001", "first_name": "Dispatch", "last_name": "Test",
          "phone_source": "caller_id"},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True
@@ -92,7 +92,7 @@ async def test_update_customer_from_call_persists_change(
         "update_customer_from_call",
         {"customer_id": str(customer["id"]), "field": "email",
          "value": "dispatch-test@example.com"},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True
@@ -119,7 +119,7 @@ async def test_create_booking_persists_appointment(
         {"customer_id": str(customer["id"]),
          "legs": [{"service_id": str(SVC_TAGLIO_UOMO), "staff_id": str(STAFF_MIRCO),
                    "slot_start": start.isoformat()}]},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True
@@ -154,7 +154,7 @@ async def test_modify_booking_authorized_changes_slot(
     resp = await execute_tool(
         "modify_booking",
         {"appointment_id": str(appt["id"]), "new_slot_start": new_start.isoformat()},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True
@@ -182,7 +182,7 @@ async def test_cancel_booking_authorized_cancels(
 
     resp = await execute_tool(
         "cancel_booking", {"appointment_id": str(appt["id"])},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True
@@ -202,7 +202,7 @@ async def test_mark_outcome_persists_on_call_row(
     resp = await execute_tool(
         "mark_outcome",
         {"outcome": "info", "summary": "Dispatch test summary"},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True
@@ -225,7 +225,7 @@ async def test_escalate_to_merchant_creates_memo(
         "escalate_to_merchant",
         {"reason": "vuole parlare con il salone",
          "customer_message": "Richiamatemi per favore"},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True

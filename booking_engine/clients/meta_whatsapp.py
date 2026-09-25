@@ -1,6 +1,6 @@
 """Meta WhatsApp Cloud API — Graph client.
 
-Replaced the Twilio BSP client on 2026-08-24; see CLAUDE.md for why Twilio
+Replaced the Twilio BSP client on 2026-08-24; see AGENTS.md for why Twilio
 could not hold a salon's own WABA at all.
 
 Every call into a salon's WABA is authenticated with **that salon's** business
@@ -57,9 +57,13 @@ async def _request(
             response.raise_for_status()
         except HTTPStatusError as exc:
             err = body.get("error") or {}
+            # `message` is Graph's generic label — "Invalid parameter" for a
+            # whole family of unrelated refusals. `error_user_msg` is the one
+            # that names the actual cause, and dropping it cost an afternoon of
+            # blind template failures (2026-09-20), so it leads when present.
             raise MetaError(
                 code=err.get("code"),
-                message=err.get("message") or str(exc),
+                message=err.get("error_user_msg") or err.get("message") or str(exc),
                 subcode=err.get("error_subcode"),
             ) from exc
         return body
@@ -68,12 +72,19 @@ async def _request(
 # ------------------------------------------------------------------ onboarding
 
 async def exchange_code(
-    *, code: str, app_id: str, app_secret: str
+    *, code: str, app_id: str, app_secret: str, redirect_uri: str | None = None
 ) -> tuple[str, int | None]:
     """Turn Embedded Signup's one-time code into the salon's business token.
 
     This is the only call that uses Kairo's own app credentials rather than a
     customer token — it is how a customer token comes into existence.
+
+    `redirect_uri` must be **byte-identical** to the one the OAuth dialog was
+    opened with, because that is how Meta binds a code to the client that
+    asked for it. Optional only because Meta's JS SDK opens the dialog without
+    one and its codes are then exchanged without one; we do not use the SDK
+    (it routes FB.login through FedCM and drops `config_id`), so in practice
+    the browser always sends its origin and omitting it fails the exchange.
 
     Returns the token and its `expires_in` (seconds) when Meta reports one.
     Whether it does is a property of the *Embedded Signup configuration*, not
@@ -82,15 +93,11 @@ async def exchange_code(
     way rather than assumed, because the failure mode of guessing wrong is
     every connected salon going silent on the same day with no signal.
     """
+    params = {"client_id": app_id, "client_secret": app_secret, "code": code}
+    if redirect_uri:
+        params["redirect_uri"] = redirect_uri
     async with AsyncClient(timeout=_TIMEOUT) as client:
-        response = await client.get(
-            f"{GRAPH}/oauth/access_token",
-            params={
-                "client_id": app_id,
-                "client_secret": app_secret,
-                "code": code,
-            },
-        )
+        response = await client.get(f"{GRAPH}/oauth/access_token", params=params)
         body = response.json() if response.content else {}
         if response.status_code >= 400 or not body.get("access_token"):
             err = (body.get("error") or {})
@@ -108,6 +115,96 @@ async def subscribe_app(*, waba_id: str, token: str) -> None:
     in onboarding.
     """
     await _request("POST", f"{waba_id}/subscribed_apps", token=token)
+
+
+async def unsubscribe_app(*, waba_id: str, token: str) -> None:
+    """Undo `subscribe_app` when the owner disconnects: stop their webhooks."""
+    await _request("DELETE", f"{waba_id}/subscribed_apps", token=token)
+
+
+async def request_smb_sync(*, phone_number_id: str, token: str, sync_type: str) -> None:
+    """Ask Meta to sync a coexistence number's `smb_app_state_sync` or `history`.
+
+    Mandatory within 24h of onboarding or Meta offboards the number; once only.
+    The data itself arrives later on the webhooks of the same names.
+    """
+    await _request("POST", f"{phone_number_id}/smb_app_data", token=token,
+                   json_body={"messaging_product": "whatsapp", "sync_type": sync_type})
+
+
+async def waba_ids_for_token(*, token: str, app_id: str, app_secret: str) -> list[str]:
+    """Which WABAs this business token was actually granted access to.
+
+    The Embedded Signup popup tells the *browser* the waba_id, over a
+    `WA_EMBEDDED_SIGNUP` postMessage — but only when the flow runs through
+    Meta's JS SDK. Ours does not (the SDK drops `config_id` into a FedCM login;
+    see the webapp's WhatsAppPanel), so that message never arrives and the id
+    has to come from the token itself. Which is the better source anyway: this
+    is Meta reporting what it granted, not the browser relaying what it was
+    shown.
+
+    Read through `debug_token`, which needs an *app* token rather than the
+    business one — the call inspects a credential, so it is authenticated as
+    the app that issued it.
+    """
+    body = await _request(
+        "GET", "debug_token",
+        token=f"{app_id}|{app_secret}",
+        params={"input_token": token},
+    )
+    scopes = (body.get("data") or {}).get("granular_scopes") or []
+    ids: list[str] = []
+    for scope in scopes:
+        # Both WhatsApp permissions carry the same WABA as their target; taking
+        # the union and de-duplicating avoids depending on which one Meta lists
+        # first, or on both being present.
+        if scope.get("scope") in ("whatsapp_business_management",
+                                  "whatsapp_business_messaging"):
+            for target in scope.get("target_ids") or []:
+                if target not in ids:
+                    ids.append(target)
+    return ids
+
+
+async def list_phone_number_ids(*, waba_id: str, token: str) -> list[str]:
+    """Every business phone number on this WABA, as ids.
+
+    The other half the popup would have told the browser. A coexistence WABA
+    holds exactly one number (Meta's own constraint), so in practice this
+    returns a single id — but it is returned as a list so the caller can refuse
+    an ambiguous WABA instead of silently picking one.
+    """
+    body = await _request(
+        "GET", f"{waba_id}/phone_numbers", token=token, params={"fields": "id"},
+    )
+    return [n["id"] for n in body.get("data") or [] if n.get("id")]
+
+
+async def list_phone_numbers(*, waba_id: str, token: str) -> list[str]:
+    """The numbers on this WABA, as an owner would recognise them.
+
+    Used to label a choice between several WABAs: a salon owner knows their
+    own phone number, where a name may be a company registration they have
+    never read.
+    """
+    body = await _request(
+        "GET", f"{waba_id}/phone_numbers", token=token,
+        params={"fields": "display_phone_number"},
+    )
+    return [n["display_phone_number"] for n in body.get("data") or []
+            if n.get("display_phone_number")]
+
+
+async def get_waba_name(*, waba_id: str, token: str) -> str:
+    """This WABA's name, for an owner who has to choose between several.
+
+    A bare id is not something a hairdresser can pick from, and picking wrong
+    attaches the salon's sender to the wrong WhatsApp account. Best effort: a
+    failure here must not block an onboarding, so the caller falls back to the
+    id rather than refusing.
+    """
+    body = await _request("GET", waba_id, token=token, params={"fields": "name"})
+    return body.get("name") or waba_id
 
 
 @dataclass(frozen=True)
@@ -196,6 +293,13 @@ class TemplateStatus:
     # against the catalogue: "approved" alone answers a question about a *name*,
     # and a name says nothing about which version of the copy was approved.
     body: str = ""
+    # Meta's own id and category for this template. Both are needed to adopt a
+    # template that already exists on a WABA we have no row for — and the
+    # category has to be *Meta's*, not ours: Meta re-categorises on review
+    # (a UTILITY body it reads as promotional comes back MARKETING), and
+    # resubmitting our own guess is refused for as long as the name lives.
+    id: str = ""
+    category: str = ""
 
 
 async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStatus | None:
@@ -210,7 +314,8 @@ async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStat
     body = await _request(
         "GET", f"{waba_id}/message_templates", token=token,
         params={"name": name,
-                "fields": "name,status,rejected_reason,components", "limit": 5},
+                "fields": "id,name,status,category,rejected_reason,components",
+                "limit": 5},
     )
     for row in body.get("data", []):
         if row.get("name") == name:
@@ -223,6 +328,8 @@ async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStat
                 status=(row.get("status") or "pending").lower(),
                 rejection_reason=row.get("rejected_reason") or None,
                 body=text,
+                id=row.get("id") or "",
+                category=row.get("category") or "",
             )
     return None
 
@@ -276,6 +383,91 @@ async def delete_template(*, waba_id: str, name: str, token: str) -> None:
 
 
 # ---------------------------------------------------------------------- send
+
+async def send_text(*, phone_number_id: str, to: str, body: str, token: str) -> str:
+    """Free-form text. Returns Meta's `wamid`.
+
+    Legal only inside the 24h customer-initiated service window — the caller
+    checks that, not this function. This is also the conversational agent's
+    send path (a reply, not a template), so a second check in here would just
+    be a second place for that rule to get out of sync with the first.
+    """
+    body_resp = await _request(
+        "POST", f"{phone_number_id}/messages", token=token,
+        json_body={
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "text",
+            "text": {"body": body},
+        },
+    )
+    messages = body_resp.get("messages") or [{}]
+    return messages[0].get("id", "")
+
+
+# Meta's own ceiling on a reply-button message. A fourth button is silently
+# dropped by Graph rather than rejected, which is worse than refusing here —
+# the menu would be missing an option and nobody would notice why.
+MAX_REPLY_BUTTONS = 3
+MAX_BUTTON_TITLE = 20
+
+
+async def send_interactive(
+    *, phone_number_id: str, to: str, body: str,
+    buttons: list[tuple[str, str]], token: str,
+) -> str:
+    """A reply-button menu. Returns Meta's `wamid`.
+
+    `buttons` is `[(id, title)]` — the id is opaque to Meta and comes back
+    unchanged on the webhook as `interactive.button_reply.id`, which is what
+    the inbound handler routes on. A title over Meta's 20-character limit is
+    truncated rather than rejected, since the caller's copy is fixed English/
+    Italian strings, not user input — silent truncation of our own copy is a
+    safer failure than refusing to send the menu at all.
+    """
+    if len(buttons) > MAX_REPLY_BUTTONS:
+        raise ValueError(f"at most {MAX_REPLY_BUTTONS} reply buttons, got {len(buttons)}")
+    body_resp = await _request(
+        "POST", f"{phone_number_id}/messages", token=token,
+        json_body={
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body},
+                "action": {
+                    "buttons": [
+                        {"type": "reply",
+                         "reply": {"id": bid, "title": title[:MAX_BUTTON_TITLE]}}
+                        for bid, title in buttons
+                    ],
+                },
+            },
+        },
+    )
+    messages = body_resp.get("messages") or [{}]
+    return messages[0].get("id", "")
+
+
+async def get_media(*, media_id: str, token: str) -> bytes:
+    """Download an inbound media attachment. Two Graph hops, both required.
+
+    The first resolves the media id to a short-lived download URL; the second
+    fetches the bytes from that URL, carrying the same bearer token Graph
+    requires on the download itself. The URL is never persisted — it expires
+    within minutes, so a caller that stores it instead of the bytes would work
+    once and then fail silently later.
+    """
+    meta_info = await _request("GET", media_id, token=token)
+    url = meta_info.get("url") or ""
+    if not url:
+        raise MetaError(None, "media_url_missing")
+    async with AsyncClient(timeout=_TIMEOUT) as client:
+        response = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+        response.raise_for_status()
+        return response.content
+
 
 async def send_template(
     *, phone_number_id: str, token: str, to: str,

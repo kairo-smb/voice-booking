@@ -50,7 +50,7 @@ def _has_active_consent(customer: dict) -> bool:
 
     The only suppression rule: opt-out is handled in-store (a staff member
     clears marketing consent in the app), not via an in-message STOP reply —
-    see CLAUDE.md's STOP-removal entry.
+    see AGENTS.md's STOP-removal entry.
     """
     return (
         bool(customer.get("marketing_consent"))

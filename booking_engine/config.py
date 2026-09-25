@@ -14,12 +14,17 @@ class Settings(BaseSettings):
     # refused and logged loudly, never silently dropped.
     webapp_base_url: str = ""
     market_intel_secret: str = ""
+    # marketing-engine — the LLM gateway that classifies an inbound WhatsApp
+    # message (booking/cancel/complaint/...). Same shared secret as above.
+    # Empty means "not configured": classify() fails closed to None rather
+    # than guessing an intent.
+    market_intel_api_url: str = ""
     # Twilio
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_default_country: str = "EE"
     # One-time regulatory Bundle (KYC) for the shared Kairo entity, reused
-    # across every provisioned DID — see CLAUDE.md, "Telephony provider:
+    # across every provisioned DID — see AGENTS.md, "Telephony provider:
     # Telnyx -> Twilio"
     twilio_bundle_sid: str = ""
     twilio_address_sid: str = ""
@@ -34,6 +39,13 @@ class Settings(BaseSettings):
     # the shared string Meta echoes back when it first registers the webhook.
     meta_app_secret: str = ""
     meta_verify_token: str = ""
+    # Fernet key encrypting `whatsapp.senders.access_token` at rest — a
+    # credential with full authority over one salon's WhatsApp and no shared
+    # parent behind it to revoke. Empty keeps the pre-2026-09-20 behaviour
+    # (plaintext, logged loudly at every write): refusing would take WhatsApp
+    # offline to fix a threat that is about a database dump. Generate with
+    # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+    whatsapp_token_key: str = ""
     # Kairo's own WABA (scripts/kairo_waba.py sets it up) — templates are
     # created here by hand and reviewed by Meta before ensure_templates will
     # push them into any customer's WABA. Empty means "not configured yet",
@@ -56,6 +68,12 @@ class Settings(BaseSettings):
     # batch as fast as the loop runs. Clamped by meta_limits.safe_sends_per_minute
     # so no configuration can drive a number past its Meta throughput.
     whatsapp_sends_per_minute: int = 60
+    # In-process scheduler (services/scheduler.py); 0 = job off. Each job is
+    # a cluster-wide singleton, so these are cadences for the whole fleet,
+    # not per machine. Needs at least one machine always up.
+    whatsapp_send_loop_seconds: int = 0      # WhatsApp queue drain
+    messaging_tick_seconds: int = 0          # bundles, health, sweeps, automations
+    forwarding_heartbeat_seconds: int = 0    # silent-forwarding push alerts
     # Our own guard against Meta's per-user, cross-brand marketing cap (error
     # 131049): never send the same customer two marketing messages inside this
     # window. Seven days both keeps us well under Meta's undisclosed ceiling
@@ -70,8 +88,16 @@ class Settings(BaseSettings):
     openai_realtime_model: str = "gpt-realtime"
     # OpenAI webhook signing secret (verify realtime.call.incoming when set)
     openai_webhook_secret: str = ""
-    # Voice agent — OpenAI tool + event webhook bearer token
-    openai_tool_secret: str = ""
+    # Bearer for this repo's agent-facing surface — `/voice/tools/*`,
+    # `/voice/events/*` and the `/mcp` mount (`require_tool_token`). Two callers
+    # present it: OpenAI's Realtime, which sends it back on every tool call, and
+    # the marketing-engine booking agent, which reaches the same routes over
+    # HTTP. Named for neither — it was `OPENAI_TOOL_SECRET` until 2026-09-22,
+    # which read as "a credential for authenticating *to* OpenAI" when it is
+    # the opposite: a token OpenAI and the engine use to call *us*. Deliberately
+    # not `CONTROL_PLANE_SECRET` (the webapp's `/api/v1` token): that one can buy
+    # phone numbers and send SMS, and a leaked agent token must not escalate.
+    voice_agent_tool_secret: str = ""
     # Token meter
     voice_kairo_tokens_per_second: int = 18
     voice_min_session_reserve_tokens: int = 1500
@@ -91,7 +117,16 @@ class Settings(BaseSettings):
     # are still rejected as unroutable; only set this on QA for manual testing.
     sip_test_fallback_shop_id: str = ""
 
-    model_config = {"env_prefix": ""}
+    # `env_file` added 2026-09-24. Without it the README's own run command —
+    # `uvicorn booking_engine.api.app:create_app --factory` — started against an
+    # empty `database_url`, which asyncpg reads as "the database named after the
+    # current user", so startup died on `database "<you>" does not exist`. The
+    # only way in was `set -a && . ./.env && set +a` first, written down nowhere.
+    #
+    # No effect on Fly: there is no .env in the image, and pydantic-settings
+    # ignores a missing file. Real environment variables keep priority over the
+    # file either way, so `fly secrets` still win and so does an explicit export.
+    model_config = {"env_prefix": "", "env_file": ".env", "extra": "ignore"}
 
 
 def get_settings() -> Settings:

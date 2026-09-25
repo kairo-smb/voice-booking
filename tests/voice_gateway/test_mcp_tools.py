@@ -18,7 +18,7 @@ SECRET = "tool-secret"
 
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
-    monkeypatch.setenv("OPENAI_TOOL_SECRET", SECRET)
+    monkeypatch.setenv("VOICE_AGENT_TOOL_SECRET", SECRET)
 
 
 def test_tool_defs_expose_the_twelve_tools():

@@ -33,7 +33,7 @@ def _next_weekday() -> date:
 
 
 def _token(shop_id, call_id, settings) -> str:
-    return mint_call_token(shop_id=shop_id, call_id=call_id, secret=settings.openai_tool_secret)
+    return mint_call_token(shop_id=shop_id, call_id=call_id, secret=settings.voice_agent_tool_secret)
 
 
 async def test_lookup_customer_returns_seeded_customer(
@@ -47,7 +47,7 @@ async def test_lookup_customer_returns_seeded_customer(
 
     resp = await execute_tool(
         "lookup_customer", {"phone": PHONE_MARIA},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True
@@ -62,7 +62,7 @@ async def test_get_services_returns_seeded_service(
     token = _token(SHOP_ID, call_id, settings)
 
     resp = await execute_tool(
-        "get_services", {}, token=token, secret=settings.openai_tool_secret, app=tool_app,
+        "get_services", {}, token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True
@@ -78,7 +78,7 @@ async def test_get_staff_for_service_returns_seeded_staff(
 
     resp = await execute_tool(
         "get_staff_for_service", {"service_id": str(SVC_TAGLIO_UOMO)},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True
@@ -97,7 +97,7 @@ async def test_check_availability_returns_chain(
         "check_availability",
         {"services": [{"service_id": str(SVC_TAGLIO_UOMO), "staff_id": str(STAFF_MIRCO)}],
          "preferred_when": preferred.isoformat()},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True
@@ -125,7 +125,7 @@ async def test_get_booking_returns_customers_next_appointment(
 
     resp = await execute_tool(
         "get_booking", {"customer_id": str(customer["id"])},
-        token=token, secret=settings.openai_tool_secret, app=tool_app,
+        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
     )
 
     assert resp["ok"] is True

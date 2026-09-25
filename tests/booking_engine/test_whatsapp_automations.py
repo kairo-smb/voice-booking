@@ -131,8 +131,8 @@ async def _insert_appointment_service(appointment_id, service_id):
     await connection.execute_void(
         """
         INSERT INTO business_app_core.appointment_services
-            (appointment_id, service_id, duration_minutes, price_eur)
-        VALUES ($1, $2, 30, 25.00)
+            (appointment_id, service_id, duration_minutes)
+        VALUES ($1, $2, 30)
         """,
         appointment_id, service_id,
     )
@@ -415,6 +415,11 @@ class TestAutomationQueriesIntegration:
         nothing and no row on the shared QA branch is claimed.
         """
         assert await wq.claim_due(0) == []
+        assert await wq.claim_due(0, shop_id=shop, campaign_key="x") == []
+
+    async def test_pending_campaigns_sql_is_valid(self, shop):
+        """Parses and plans against the real schema; a fresh shop has none."""
+        assert await wq.pending_campaigns(shop_id=shop) == []
 
 
 # ------------------------------------------------------- the tick (unit)
@@ -442,8 +447,10 @@ def _online_sender(**over):
 
 
 def _approved_template(**over):
+    # The feedback rule's template: Meta reclassified feedback_v2 as MARKETING,
+    # so that is the default. Reminder tests override both name and category.
     row = {"status": "approved", "name": "kairo_feedback_v2", "language": "it",
-           "category": "UTILITY"}
+           "category": "MARKETING"}
     row.update(over)
     return row
 
@@ -523,22 +530,29 @@ async def test_sends_every_due_row_with_no_cap(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_red_quality_skips_marketing_rules_and_lets_utility_through(monkeypatch):
-    # A MARKETING rule (Plan 3's win-back) pauses under RED quality...
+    # The feedback rule is MARKETING (Meta reclassified the review ask), so
+    # RED quality pauses it...
     marketing = _patch_automations(
         monkeypatch, sender=_online_sender(quality_rating="RED"),
+        rules=[_enabled_rule(rule_key="feedback")],
         template=_approved_template(category="MARKETING"), due=[_due_row()],
     )
     counts = await wa.run_automations(settings=FakeSettings())
     assert counts["feedback"] == 0
     assert marketing["enqueued"] == []
 
-    # ...but the UTILITY rules this plan ships continue regardless.
+    # ...while the reminder rule is UTILITY and continues regardless.
     utility = _patch_automations(
         monkeypatch, sender=_online_sender(quality_rating="RED"),
-        template=_approved_template(category="UTILITY"), due=[_due_row()],
+        rules=[_enabled_rule(rule_key="reminder",
+                             params={"min_no_shows": 0})],
+        template=_approved_template(
+            name="it_reminder_v6", category="UTILITY",
+        ),
+        due=[_due_row()],
     )
     counts = await wa.run_automations(settings=FakeSettings())
-    assert counts["feedback"] == 1
+    assert counts["reminder"] == 1
     assert len(utility["enqueued"]) == 1
 
 
@@ -570,7 +584,7 @@ async def test_one_shop_raising_does_not_abort_the_others(monkeypatch):
             raise RuntimeError("boom")
         return _online_sender(shop_id=shop_id)
     async def _template(shop_id, key):
-        return _approved_template(name="it_reminder_v6")
+        return _approved_template(name="it_reminder_v6", category="UTILITY")
     async def _due_feedback(shop_id, hours_after):
         return []
     async def _due_reminders(shop_id, min_no_shows):
@@ -689,13 +703,14 @@ async def test_utility_send_to_a_consentless_customer_is_enqueued_but_marketing_
         return uuid4()
     monkeypatch.setattr(wq, "enqueue", _enqueue)
 
-    # UTILITY first: same consent-less customer, queued.
+    # UTILITY first: same consent-less customer, queued. reminder_v6 is the
+    # UTILITY rule; feedback_v2 is now MARKETING and would be refused below.
     await _patch_enqueue(monkeypatch, template={
-        "status": "approved", "name": "kairo_feedback_v2", "language": "it",
+        "status": "approved", "name": "kairo_reminder_v6", "language": "it",
         "category": "UTILITY",
     })
     result = await ws.enqueue_campaign(
-        shop_id=SHOP, campaign_key="c1", template_key="feedback_v2",
+        shop_id=SHOP, campaign_key="c1", template_key="reminder_v6",
         recipients=[{"customer_id": uuid4(), "variables": {"1": "Giulia"}}],
         settings=FakeSettings(),
     )
@@ -725,11 +740,11 @@ async def test_send_due_does_not_suppress_a_utility_message_for_no_consent(monke
     message = {
         "id": uuid4(), "shop_id": SHOP, "customer_id": uuid4(),
         "to_phone": "+393331112222", "from_number": "+393331110000",
-        "template_name": "kairo_feedback_v2", "template_language": "it",
+        "template_name": "kairo_reminder_v6", "template_language": "it",
         "variables": {"1": "Giulia"}, "category": "UTILITY",
     }
 
-    async def _claim(limit):
+    async def _claim(limit, **kw):
         return [message]
     async def _requeue_stuck(*a, **kw):
         return 0

@@ -94,7 +94,7 @@ async def test_evaluate_returns_compliant_true_and_no_violations():
 async def test_evaluate_maps_only_failed_entries_when_noncompliant():
     """Fixture shape verified against a real live noncompliant evaluation
     (Estonia mobile, End-User assigned with no supporting document) on
-    2026-08-14 — see CLAUDE.md. Twilio's `results[]` entries have no
+    2026-08-14 — see AGENTS.md. Twilio's `results[]` entries have no
     `description` key; the violation message lives in `failure_reason`.
     """
     respx.post(f"{_BASE}/Bundles/BU1/Evaluations").mock(

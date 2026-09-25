@@ -33,6 +33,11 @@ _TIMEOUT_SECONDS = 10.0
 # not LLM spend, so they have no market_intel.usage_events sibling).
 VOICE_CALL = "voice_call"
 SMS_SEND = "sms_send"
+# Transcribing an inbound WhatsApp voice note. Unlike the two above this *is*
+# LLM spend (OpenAI), so its credit amount carries the house 10× LLM margin
+# rather than the 2× pass-through `send_credits` applies to Twilio cost — see
+# `services/messaging/wa_transcribe.py` for the derivation.
+WHATSAPP_TRANSCRIBE = "whatsapp_transcribe"
 
 
 async def charge_actual(

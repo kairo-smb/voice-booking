@@ -75,9 +75,18 @@ async def create_customer(
     shop_id: UUID, full_name: str, phone_number: str | None = None,
 ) -> dict:
     cid = uuid4()
+    # source/verified are not decoration: nothing reaches this function except
+    # through the booking engine, so the row is by definition something the
+    # assistant made rather than something the owner typed. The webapp's
+    # anagrafiche badge is driven by `verified = false` ALONE — a row created
+    # here without it is indistinguishable from a hand-typed one and no human
+    # will ever be prompted to look at it. insert_customer_from_call() has set
+    # both since it was written; this path was left on the column defaults
+    # (`manual` / `true`) and quietly wasn't.
     await execute_void(
-        "INSERT INTO business_app_core.customers (id, shop_id, full_name, created_at) "
-        "VALUES ($1, $2, $3, NOW())",
+        "INSERT INTO business_app_core.customers "
+        "(id, shop_id, full_name, source, verified, created_at) "
+        "VALUES ($1, $2, $3, 'voice_agent', false, NOW())",
         cid, shop_id, full_name,
     )
     customer = await execute_one("SELECT * FROM business_app_core.customers WHERE id = $1", cid)
@@ -415,7 +424,7 @@ async def create_appointment(
     notes: str | None = None,
 ) -> dict:
     svc_rows = await execute(
-        "SELECT id, duration_minutes, price_eur FROM business_app_core.services "
+        "SELECT id, duration_minutes FROM business_app_core.services "
         "WHERE id = ANY($1::uuid[]) AND is_active = true",
         service_ids,
     )
@@ -440,11 +449,12 @@ async def create_appointment(
     )
 
     for svc in svc_rows:
+        # No price column here: services.price_eur is the single source of a
+        # service's price (webapp migration 71). Readers join for it.
         await execute_void(
-            "INSERT INTO business_app_core.appointment_services (appointment_id, service_id, duration_minutes, price_eur) "
-            "VALUES ($1, $2, $3, $4)",
+            "INSERT INTO business_app_core.appointment_services (appointment_id, service_id, duration_minutes) "
+            "VALUES ($1, $2, $3)",
             appt_id, svc["id"], svc["duration_minutes"],
-            float(svc["price_eur"]) if svc["price_eur"] else None,
         )
 
     return await execute_one("SELECT * FROM business_app_core.appointments WHERE id = $1", appt_id)
@@ -465,12 +475,11 @@ async def create_appointment_chain(
     """
     svc_ids = [leg["service_id"] for leg in legs]
     svc_rows = await execute(
-        "SELECT id, duration_minutes, price_eur FROM business_app_core.services "
+        "SELECT id, duration_minutes FROM business_app_core.services "
         "WHERE id = ANY($1::uuid[]) AND is_active = true",
         svc_ids,
     )
     duration_by_id = {r["id"]: r["duration_minutes"] for r in svc_rows}
-    price_by_id = {r["id"]: r["price_eur"] for r in svc_rows}
     if len(duration_by_id) != len(set(svc_ids)):
         raise RuntimeError("invalid_service")
 
@@ -481,7 +490,6 @@ async def create_appointment_chain(
             **leg,
             "slot_end": leg["slot_start"] + timedelta(minutes=duration),
             "duration_minutes": duration,
-            "price_eur": price_by_id[leg["service_id"]],
         })
 
     for leg in resolved:
@@ -504,12 +512,13 @@ async def create_appointment_chain(
         first["slot_start"], last["slot_end"], notes,
     )
     for leg in resolved:
+        # See the single-staff booking path above: no price column here.
         await execute_void(
             "INSERT INTO business_app_core.appointment_services "
-            "(appointment_id, service_id, staff_id, start_time, duration_minutes, price_eur) "
-            "VALUES ($1, $2, $3, $4, $5, $6)",
+            "(appointment_id, service_id, staff_id, start_time, duration_minutes) "
+            "VALUES ($1, $2, $3, $4, $5)",
             appt_id, leg["service_id"], leg["staff_id"], leg["slot_start"],
-            leg["duration_minutes"], float(leg["price_eur"]) if leg["price_eur"] else None,
+            leg["duration_minutes"],
         )
 
     return await execute_one(
@@ -545,7 +554,7 @@ async def list_appointments(
 
     for row in rows:
         svcs = await execute(
-            "SELECT aps.service_id, s.service_name, aps.duration_minutes, aps.price_eur "
+            "SELECT aps.service_id, s.service_name, aps.duration_minutes, s.price_eur "
             "FROM business_app_core.appointment_services aps JOIN business_app_core.services s ON aps.service_id = s.id "
             "WHERE aps.appointment_id = $1",
             row["id"],
@@ -605,15 +614,14 @@ async def reschedule_appointment(
 
     # Copy services
     old_svcs = await execute(
-        "SELECT service_id, duration_minutes, price_eur FROM business_app_core.appointment_services WHERE appointment_id = $1",
+        "SELECT service_id, duration_minutes FROM business_app_core.appointment_services WHERE appointment_id = $1",
         appointment_id,
     )
     for svc in old_svcs:
         await execute_void(
-            "INSERT INTO business_app_core.appointment_services (appointment_id, service_id, duration_minutes, price_eur) "
-            "VALUES ($1, $2, $3, $4)",
+            "INSERT INTO business_app_core.appointment_services (appointment_id, service_id, duration_minutes) "
+            "VALUES ($1, $2, $3)",
             new_id, svc["service_id"], svc["duration_minutes"],
-            float(svc["price_eur"]) if svc["price_eur"] else None,
         )
 
     return await execute_one("SELECT * FROM business_app_core.appointments WHERE id = $1", new_id)

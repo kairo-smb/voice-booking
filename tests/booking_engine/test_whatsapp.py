@@ -2,8 +2,11 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
+import respx
 
+from booking_engine.api.routes import whatsapp as whatsapp_routes
 from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.db import sms_queries
 from booking_engine.db import whatsapp_queries as wq
@@ -32,6 +35,7 @@ class FakeSettings:
     meta_verify_token = "verify"
     meta_kairo_waba_id = "KAIRO_WABA"
     meta_kairo_token = "kairo-token"
+    meta_receipt_sample_url = "https://example.test/sample.pdf"
 
 
 def _consenting(**over):
@@ -349,7 +353,7 @@ def _patch_send_due(
     spy = {"sent": [], "suppressed": [], "failed": [], "deferred": [],
            "consent_withdrawn": []}
 
-    async def _claim(limit):
+    async def _claim(limit, **kw):
         return claimed
     async def _requeue_stuck(*a, **kw):
         return 0
@@ -618,7 +622,9 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
         calls.setdefault("fields", []).append(fields)
         sender.update(fields)
     async def _get_template(shop_id, key):
-        return None
+        # `calls["template"]` lets a test give every key the same existing row —
+        # enough to exercise the drift/edit and under-review paths.
+        return calls.get("template")
     async def _upsert_template(**kw):
         calls.setdefault("templates", []).append(kw)
         return kw
@@ -634,6 +640,15 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
     monkeypatch.setattr(wq, "get_template", _get_template)
     monkeypatch.setattr(wq, "upsert_template", _upsert_template)
     monkeypatch.setattr(wq, "onboarded_last_7_days", _onboarded)
+    # The sweep's last stage. Stubbed here rather than in each sweep test:
+    # left live it reaches for a real pool, which is a confusing way for an
+    # unrelated test to fail.
+    async def _due_for_reminder(**kw):
+        return calls.get("token_reminders", [])
+    async def _mark_reminded(shop_id):
+        calls.setdefault("reminded", []).append(shop_id)
+    monkeypatch.setattr(wq, "list_senders_needing_token_reminder", _due_for_reminder)
+    monkeypatch.setattr(wq, "mark_token_reminder_sent", _mark_reminded)
 
     async def _exchange(**kw):
         calls.setdefault("exchange", []).append(kw)
@@ -652,19 +667,44 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
     async def _create_template(**kw):
         calls.setdefault("create_template", []).append(kw)
         return "TPL1", "pending"
+    async def _create_document_template(**kw):
+        calls.setdefault("create_document_template", []).append(kw)
+        return "TPLDOC", "pending"
     async def _fetch_template(**kw):
         calls.setdefault("fetch_template", []).append(kw)
         # Kairo's WABA holds the catalogue's *current* body — the gate compares
-        # text, not just status, so the fake has to carry it.
+        # text, not just status, so the fake has to carry it. The receipt is
+        # fetched by Meta's preset name verbatim, not `{locale}_{key}`.
+        if kw["name"] == wt.RECEIPT_TEMPLATE_NAME:
+            return meta.TemplateStatus(
+                status="approved", rejection_reason=None,
+                body=wt.RECEIPT_TEMPLATE_BODY,
+            )
         tpl = wt.CATALOGUE.get(kw["name"].split("_", 1)[1])
         return meta.TemplateStatus(
             status="approved", rejection_reason=None,
             body=tpl.body if tpl else "",
         )
+    # The two lookups that replace what the popup used to tell the browser.
+    # `calls["waba_ids"]` / `calls["phone_number_ids"]` let a test make the
+    # answer empty or ambiguous.
+    async def _waba_ids(**kw):
+        calls.setdefault("waba_lookup", []).append(kw)
+        return calls.get("waba_ids", ["W-from-token"])
+    async def _phone_ids(**kw):
+        calls.setdefault("phone_lookup", []).append(kw)
+        return calls.get("phone_number_ids", ["P-from-waba"])
+    monkeypatch.setattr(meta, "waba_ids_for_token", _waba_ids)
+    monkeypatch.setattr(meta, "list_phone_number_ids", _phone_ids)
     monkeypatch.setattr(meta, "exchange_code", _exchange)
     monkeypatch.setattr(meta, "subscribe_app", _subscribe)
     monkeypatch.setattr(meta, "get_phone_number", _number)
+    async def _edit_template(**kw):
+        calls.setdefault("edit_template", []).append(kw)
+        return "pending"
     monkeypatch.setattr(meta, "create_template", _create_template)
+    monkeypatch.setattr(meta, "create_document_template", _create_document_template)
+    monkeypatch.setattr(meta, "edit_template", _edit_template)
     monkeypatch.setattr(meta, "fetch_template", _fetch_template)
     return calls
 
@@ -856,6 +896,11 @@ async def test_complete_injects_the_catalogue_into_the_salons_waba(monkeypatch):
 
     await wo.complete(shop_id=SHOP, code="c0de", waba_id="WABA1",
                       phone_number_id="PN1", settings=FakeSettings())
+    # Pushed after the response, not inside it — one Graph round trip per
+    # entry is enough to blow the gateway timeout in front of the webapp.
+    assert "create_template" not in calls, \
+        "a template push inside complete() is what made onboarding 504"
+    await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
 
     created = calls["create_template"]
     assert {c["name"] for c in created} == {
@@ -882,7 +927,9 @@ async def test_ensure_templates_survives_one_rejected_template(monkeypatch):
     result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
 
     assert result["ok"] is True
-    assert result["created"] == 0
+    # Every catalogue entry failed; only the receipt (a separate create call)
+    # went through.
+    assert result["created"] == len(wt.DOCUMENT_TEMPLATES)
     assert set(result["failed"]) == set(wt.CATALOGUE)
     del calls
 
@@ -904,8 +951,9 @@ async def test_ensure_templates_skips_a_template_not_yet_approved_on_kairo_waba(
     result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
 
     assert result["created"] == 0
-    assert set(result["not_ready"]) == set(wt.CATALOGUE)
+    assert set(result["not_ready"]) == set(wt.CATALOGUE) | set(wt.DOCUMENT_TEMPLATES)
     assert "create_template" not in calls
+    assert "create_document_template" not in calls
 
 
 @pytest.mark.asyncio
@@ -925,8 +973,9 @@ async def test_ensure_templates_fails_closed_without_kairo_waba_configured(monke
     result = await wo.ensure_templates(shop_id=SHOP, settings=NoKairoWaba())
 
     assert result["created"] == 0
-    assert set(result["not_ready"]) == set(wt.CATALOGUE)
+    assert set(result["not_ready"]) == set(wt.CATALOGUE) | set(wt.DOCUMENT_TEMPLATES)
     assert "create_template" not in calls
+    assert "create_document_template" not in calls
     assert "fetch_template" not in calls
 
 
@@ -943,6 +992,54 @@ async def test_abort_drops_the_pending_row(monkeypatch):
 
     assert result == {"ok": True}
     assert calls["shop_id"] == SHOP
+
+
+@pytest.mark.asyncio
+async def test_disconnect_survives_a_dead_token(monkeypatch):
+    """A revoked token is a reason to disconnect, so Meta refusing the
+    unsubscribe must not stop the sender from being forgotten."""
+    calls = {}
+
+    async def _get(shop_id):
+        return {"waba_id": "WABA1", "access_token": "tok"}
+
+    async def _unsub(*, waba_id, token):
+        calls["unsub"] = waba_id
+        raise meta.MetaError(190, "token expired")
+
+    async def _delete(shop_id):
+        calls["deleted"] = shop_id
+        return 3
+    monkeypatch.setattr(wq, "get_sender", _get)
+    monkeypatch.setattr(meta, "unsubscribe_app", _unsub)
+    monkeypatch.setattr(wq, "delete_sender", _delete)
+
+    assert await wo.disconnect(shop_id=SHOP) == {"ok": True, "cancelled": 3}
+    assert calls == {"unsub": "WABA1", "deleted": SHOP}
+
+
+@pytest.mark.asyncio
+async def test_coexistence_sync_resumes_after_contacts_and_orders_steps(monkeypatch):
+    """Both syncs are once-only and contacts must precede history, so a retry
+    after contacts went through asks only for history."""
+    sent, saved = [], {}
+
+    async def _sync(*, phone_number_id, token, sync_type):
+        sent.append(sync_type)
+
+    async def _set(shop_id, **fields):
+        saved.update(fields)
+    monkeypatch.setattr(meta, "request_smb_sync", _sync)
+    monkeypatch.setattr(wq, "set_sender_fields", _set)
+
+    fresh = {"shop_id": SHOP, "phone_number_id": "P", "access_token": "t"}
+    assert await wo.sync_coexistence(fresh) is True
+    assert sent == ["smb_app_state_sync", "history"]
+    assert set(saved) == {"contacts_sync_at", "history_sync_at"}
+
+    sent.clear()
+    assert await wo.sync_coexistence({**fresh, "contacts_sync_at": "x"}) is True
+    assert sent == ["history"]
 
 
 def test_is_abandoned_ignores_a_fresh_pending_row():
@@ -989,9 +1086,11 @@ async def test_sweep_propagates_to_an_online_shop_once_kairo_gets_approved(monke
 
     counts = await wo.sweep(settings=FakeSettings())
 
-    assert counts["propagated"] == len(wt.CATALOGUE)
-    assert calls["missing_query"] == [wt.catalogue_fingerprints()]
+    assert counts["propagated"] == len(wt.CATALOGUE) + len(wt.DOCUMENT_TEMPLATES)
+    assert calls["missing_query"] == [wt.propagation_fingerprints()]
     assert [c["waba_id"] for c in calls["create_template"]] == ["WABA1"] * len(wt.CATALOGUE)
+    # The receipt rides the same worklist, created as a document template.
+    assert [c["waba_id"] for c in calls["create_document_template"]] == ["WABA1"]
 
 
 @pytest.mark.asyncio
@@ -1011,8 +1110,10 @@ async def test_sweep_asks_kairos_waba_once_not_once_per_shop(monkeypatch):
 
     await wo.sweep(settings=FakeSettings())
 
-    assert len(calls["fetch_template"]) == len(wt.CATALOGUE)
+    # One fetch per catalogue entry per locale plus one for the receipt.
+    assert len(calls["fetch_template"]) == len(wt.CATALOGUE) + len(wt.DOCUMENT_TEMPLATES)
     assert len(calls["create_template"]) == 3 * len(wt.CATALOGUE)
+    assert len(calls["create_document_template"]) == 3 * len(wt.DOCUMENT_TEMPLATES)
 
 
 @pytest.mark.asyncio
@@ -1289,7 +1390,8 @@ async def test_ensure_templates_edits_a_template_whose_body_changed(monkeypatch)
     result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
 
     assert result["edited"] == 1
-    assert result["created"] == len(wt.CATALOGUE) - 1
+    # The other catalogue keys are created, plus the receipt (its own create).
+    assert result["created"] == len(wt.CATALOGUE) - 1 + len(wt.DOCUMENT_TEMPLATES)
     edit = calls["edit_template"][0]
     # Edited in place, on the template it belongs to: delete-and-recreate would
     # take the salon off the air for Meta's 30-day name lock.
@@ -1314,7 +1416,8 @@ async def test_ensure_templates_leaves_a_current_body_alone(monkeypatch):
     )
 
     async def _get_template(shop_id, template_key):
-        tpl = wt.CATALOGUE[template_key]
+        tpl = (wt.CATALOGUE.get(template_key)
+               or wt.DOCUMENT_TEMPLATES.get(template_key))
         return {"template_key": template_key, "meta_template_id": f"id_{template_key}",
                 "status": "approved", "body_hash": wt.body_hash(tpl.body)}
     monkeypatch.setattr(wq, "get_template", _get_template)
@@ -1328,6 +1431,7 @@ async def test_ensure_templates_leaves_a_current_body_alone(monkeypatch):
     assert result == {"ok": True, "created": 0, "edited": 0,
                       "failed": [], "not_ready": []}
     assert "create_template" not in calls
+    assert "create_document_template" not in calls
 
 
 @pytest.mark.asyncio
@@ -1362,24 +1466,38 @@ async def test_ensure_templates_does_not_push_new_copy_kairo_has_not_approved(mo
     result = await wo.ensure_templates(shop_id=SHOP, settings=FakeSettings())
 
     assert result["edited"] == 0
-    assert set(result["not_ready"]) == set(wt.CATALOGUE)
+    assert set(result["not_ready"]) == set(wt.CATALOGUE) | set(wt.DOCUMENT_TEMPLATES)
     del calls
 
 
-def test_catalogue_fingerprints_move_with_the_copy():
-    """The sweep's worklist key: one entry per catalogue key, hash of its body.
+def test_propagation_fingerprints_cover_the_receipt_the_worklist_must_visit():
+    """The sweep's worklist key: one entry per pushed template, hash of its body.
 
-    Counting rows was both blind to a changed body and inflated by templates
-    outside the catalogue — a shop holding `purchase_receipt_1` and missing a
-    real template counted as complete and was never revisited.
+    Catalogue + document templates are the push list. Before 2026-09-23 the
+    worklist was catalogue-only, and the rationale ran the other way: a
+    `purchase_receipt_1` row was treated as *padding* that could make a shop
+    look complete while it missed a real template. With the receipt now
+    propagated proactively by the sweep, the reversal is the point — a shop
+    holding every catalogue entry but no receipt row must come back, and a
+    shop whose receipt hash matches must not. (The padding bug is still dead:
+    the count is matched against `key|hash` pairs, never rows.)
     """
-    fingerprints = wt.catalogue_fingerprints()
-    assert len(fingerprints) == len(wt.CATALOGUE)
-    assert all("|" in f for f in fingerprints)
-    assert wt.RECEIPT_TEMPLATE_KEY not in [f.split("|")[0] for f in fingerprints]
+    catalogue = wt.catalogue_fingerprints()
+    assert len(catalogue) == len(wt.CATALOGUE)
+    assert all("|" in f for f in catalogue)
     key, tpl = next(iter(wt.CATALOGUE.items()))
-    assert f"{key}|{wt.body_hash(tpl.body)}" in fingerprints
+    assert f"{key}|{wt.body_hash(tpl.body)}" in catalogue
     assert wt.body_hash(tpl.body) != wt.body_hash(tpl.body + " ")
+
+    doc = wt.DOCUMENT_TEMPLATES[wt.RECEIPT_TEMPLATE_KEY]
+    assert wt.document_fingerprints() == [
+        f"{wt.RECEIPT_TEMPLATE_KEY}|{wt.body_hash(doc.body)}"
+    ]
+    # The receipt is one of the pushed, so it is one of the counted: a shop
+    # missing it shows up on the worklist, a shop holding the current copy
+    # does not.
+    assert wt.propagation_fingerprints() == catalogue + wt.document_fingerprints()
+    assert f"{wt.RECEIPT_TEMPLATE_KEY}|{wt.body_hash(doc.body)}" in wt.propagation_fingerprints()
 
 
 def test_signup_config_asks_meta_for_the_coexistence_branch():
@@ -1433,11 +1551,15 @@ async def test_ensure_templates_names_the_shops_own_locale(monkeypatch):
         f"it_{key}" for key in wt.CATALOGUE
     }
     assert {c["language"] for c in created} == {"it"}
+    # The receipt is fetched and created by its verbatim preset name, never
+    # locale-prefixed.
+    assert calls["create_document_template"][0]["name"] == wt.RECEIPT_TEMPLATE_NAME
+    assert calls["create_document_template"][0]["language"] == wt.RECEIPT_TEMPLATE_LANGUAGE
     # The gate was asked about the same locale it then created, or a shop can
     # be told a template is ready and be given one that is not.
     assert {f["name"] for f in calls["fetch_template"]} == {
         f"it_{key}" for key in wt.CATALOGUE
-    }
+    } | {wt.RECEIPT_TEMPLATE_NAME}
 
 
 def test_unknown_meta_template_status_is_never_treated_as_approved():
@@ -1758,7 +1880,13 @@ async def test_webhook_persists_inbound_replies(monkeypatch):
     captured = {}
     async def _fake_record_inbound(**kw):
         captured.update(kw)
+        # A row, not None: None means "Meta replayed this", and the route
+        # would then skip the worker the assertions below are meant to cover.
+        return {"id": uuid4(), **kw}
     monkeypatch.setattr(wa_routes.wq, "record_inbound", _fake_record_inbound)
+    scheduled = []
+    monkeypatch.setattr(wa_routes.wa_inbound, "schedule",
+                        lambda sender, row: scheduled.append(row))
 
     await wa_routes._handle_change(
         sender={"shop_id": SHOP},
@@ -1778,6 +1906,8 @@ async def test_webhook_persists_inbound_replies(monkeypatch):
     assert captured["from_phone"] == "+393331112222"
     assert captured["body"] == "Certo, prenoto per giovedì!"
     assert captured["message_type"] == "text"
+    # The reply is also handed to the inbound worker, which names it.
+    assert len(scheduled) == 1
 
 
 def test_template_descriptor_carries_what_the_generator_needs():
@@ -1814,7 +1944,19 @@ def test_descriptor_keeps_the_field_name_its_consumers_read():
 def test_utility_descriptor_reports_no_generated_slot():
     from booking_engine.api.routes.whatsapp import _template_descriptor
 
-    assert _template_descriptor("feedback_v2")["generated_slot"] is None
+    assert _template_descriptor("reminder_v6")["generated_slot"] is None
+
+
+def test_the_feedback_descriptor_is_marketing_with_no_generated_slot():
+    """feedback_v2 is the category split's one exception: MARKETING, but every
+    variable is still a fact, so the webapp must be told there is no slot and
+    not offer a generate button for it."""
+    from booking_engine.api.routes.whatsapp import _template_descriptor
+
+    d = _template_descriptor("feedback_v2")
+    assert d["category"] == "MARKETING"
+    assert d["generated_slot"] is None
+    assert d["filled_by"] is None
 
 
 def test_descriptor_reports_who_fills_the_slot():
@@ -1824,4 +1966,652 @@ def test_descriptor_reports_who_fills_the_slot():
 
     assert _template_descriptor("promo_v1")["filled_by"] == "llm"
     assert _template_descriptor("promo_manual_v1")["filled_by"] == "owner"
-    assert _template_descriptor("feedback_v2")["filled_by"] is None
+    assert _template_descriptor("reminder_v6")["filled_by"] is None
+
+
+@pytest.mark.asyncio
+async def test_complete_reads_the_ids_back_from_the_token(monkeypatch):
+    """The browser has only the code, so the ids come from Meta, not the popup.
+
+    `WA_EMBEDDED_SIGNUP` — the message carrying waba_id and phone_number_id —
+    is only posted when the flow runs through Meta's JS SDK, and ours cannot
+    (the SDK routes FB.login through FedCM and drops `config_id`). Observed on
+    a real signup: the code arrived, that message never did.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    result = await wo.complete(shop_id=SHOP, code="c0de", settings=FakeSettings())
+
+    assert result["ok"] is True
+    written = [f for f in calls["fields"] if "waba_id" in f]
+    assert written[0]["waba_id"] == "W-from-token"
+    assert written[0]["phone_number_id"] == "P-from-waba"
+    # The phone lookup must ask the WABA we just derived, not some default.
+    assert calls["phone_lookup"][0]["waba_id"] == "W-from-token"
+
+
+@pytest.mark.asyncio
+async def test_complete_refuses_an_ambiguous_waba_instead_of_guessing(monkeypatch):
+    """Two granted WABAs cannot be resolved by picking one.
+
+    Guessing wrong attaches the salon's sender to someone else's WhatsApp
+    account — unrecoverable without noticing, and nothing downstream would
+    disagree. A named error is the only honest outcome.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={"waba_ids": ["W1", "W2"]},
+    )
+
+    result = await wo.complete(shop_id=SHOP, code="c0de", settings=FakeSettings())
+
+    assert result["ok"] is False
+    assert result["error"] == "waba_ambiguous"
+    assert not any("waba_id" in f for f in calls.get("fields", [])), \
+        "no sender written on an unresolved WABA"
+
+
+@pytest.mark.asyncio
+async def test_complete_still_accepts_ids_supplied_by_the_caller(monkeypatch):
+    """An SDK-based caller that does have them keeps working, and skips the lookup."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={},
+    )
+
+    result = await wo.complete(shop_id=SHOP, code="c0de", waba_id="W-explicit",
+                               phone_number_id="P-explicit", settings=FakeSettings())
+
+    assert result["ok"] is True
+    written = [f for f in calls["fields"] if "waba_id" in f]
+    assert written[0]["waba_id"] == "W-explicit"
+    assert "waba_lookup" not in calls, "no lookup when the caller already knows"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_exchange_code_repeats_the_dialog_redirect_uri():
+    """Meta binds the code to the redirect_uri; omitting it fails the exchange.
+
+    This is not defensive: the hand-built OAuth dialog always opens with one,
+    so every real signup goes through this branch.
+    """
+    route = respx.get(f"{meta.GRAPH}/oauth/access_token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 100}),
+    )
+
+    token, expires_in = await meta.exchange_code(
+        code="c0de", app_id="A", app_secret="S",
+        redirect_uri="https://qa.example.test/",
+    )
+
+    assert (token, expires_in) == ("t", 100)
+    assert route.calls.last.request.url.params["redirect_uri"] == "https://qa.example.test/"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_exchange_code_omits_redirect_uri_when_there_is_none():
+    """Meta's own SDK flow has no redirect, and sending an empty one is refused."""
+    route = respx.get(f"{meta.GRAPH}/oauth/access_token").mock(
+        return_value=httpx.Response(200, json={"access_token": "t"}),
+    )
+
+    await meta.exchange_code(code="c0de", app_id="A", app_secret="S")
+
+    assert "redirect_uri" not in route.calls.last.request.url.params
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_waba_keeps_the_token_and_names_the_candidates(monkeypatch):
+    """The question has to be answerable: the code is spent once it is asked."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X"},
+        calls={"waba_ids": ["W1", "W2"]},
+    )
+    async def _name(*, waba_id, token):
+        return {"W1": "Salone X", "W2": "Altra azienda"}[waba_id]
+    async def _numbers(*, waba_id, token):
+        return {"W1": ["+39 02 1234567"], "W2": []}[waba_id]
+    monkeypatch.setattr(meta, "get_waba_name", _name)
+    monkeypatch.setattr(meta, "list_phone_numbers", _numbers)
+
+    result = await wo.complete(shop_id=SHOP, code="c0de", settings=FakeSettings())
+
+    assert result["error"] == "waba_ambiguous"
+    # The number is what the owner recognises; the name is often a company
+    # registration they have never read.
+    assert result["wabas"] == [
+        {"id": "W1", "name": "Salone X", "phone_numbers": ["+39 02 1234567"]},
+        {"id": "W2", "name": "Altra azienda", "phone_numbers": []},
+    ]
+    written = [f for f in calls["fields"] if "access_token" in f]
+    assert written and written[0]["access_token"] == "customer-token", \
+        "token persisted before the question, or the answer needs a second popup"
+
+
+@pytest.mark.asyncio
+async def test_naming_the_waba_resumes_without_re_exchanging_the_code(monkeypatch):
+    """Second call, no code: it reads the token back off the row."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X",
+                             "access_token": "customer-token"},
+        calls={},
+    )
+
+    result = await wo.complete(shop_id=SHOP, waba_id="W1", settings=FakeSettings())
+
+    assert result["ok"] is True and result["status"] == "online"
+    assert not calls.get("exchange"), "a spent code must not be exchanged again"
+    assert calls["subscribe"][0]["token"] == "customer-token"
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_clear_the_recorded_expiry(monkeypatch):
+    """The second call knows no expires_in; it must not overwrite the date."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "pending_signup", "display_name": "Salone X",
+                             "access_token": "customer-token"},
+        calls={},
+    )
+
+    await wo.complete(shop_id=SHOP, waba_id="W1", settings=FakeSettings())
+
+    assert not any("token_expires_at" in f for f in calls["fields"]), \
+        "resuming would silently make an expiring token look non-expiring"
+
+
+@pytest.mark.asyncio
+async def test_a_template_meta_already_holds_is_adopted_not_refused(monkeypatch):
+    """Meta re-categorises on review, which refuses every later create.
+
+    The first real onboarding (2026-09-20) created all six on the WABA, then
+    every re-push failed forever — Meta had moved a UTILITY body to MARKETING,
+    and we kept resubmitting our own category. Nothing was recorded, so the
+    sweep retried the identical create hourly while the panel said the feature
+    was waiting for Meta.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "customer-token"},
+        calls={},
+    )
+    async def _refuse(**kw):
+        raise meta.MetaError(100, "The category UTILITY doesn't match", 2388026)
+    async def _found(*, waba_id, name, token):
+        return meta.TemplateStatus(
+            status="pending", rejection_reason=None,
+            body="corpo che Meta tiene", id="META-1", category="MARKETING",
+        )
+    monkeypatch.setattr(meta, "create_template", _refuse)
+    monkeypatch.setattr(meta, "fetch_template", _found)
+
+    # The gate is answered here so the fake `fetch_template` above only ever
+    # serves adoption — `approved_on_kairo_waba` uses the same call.
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(),
+        approved={("it", k) for k in wt.CATALOGUE},
+    )
+
+    assert result["failed"] == [], "an existing template is not a failure"
+    written = calls["templates"]
+    assert written, "adopting must record the row, or the sweep retries forever"
+    row = written[0]
+    assert row["meta_template_id"] == "META-1"
+    # Meta's category, not ours: storing our guess is what makes the next
+    # create repeat the same refusal.
+    assert row["category"] == "MARKETING"
+    # Meta's body, so stale copy reads as drift and the edit path fixes it.
+    assert row["body_hash"] == wo.body_hash("corpo che Meta tiene")
+
+
+@pytest.mark.asyncio
+async def test_a_template_meta_does_not_have_is_still_a_failure(monkeypatch):
+    """Adoption must not turn a genuine rejection into a silent success."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "customer-token"},
+        calls={},
+    )
+    async def _refuse(**kw):
+        raise meta.MetaError(100, "Invalid parameter", None)
+    async def _absent(**kw):
+        return None
+    monkeypatch.setattr(meta, "create_template", _refuse)
+    monkeypatch.setattr(meta, "fetch_template", _absent)
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(),
+        approved={("it", k) for k in wt.CATALOGUE},
+    )
+
+    assert set(result["failed"]) == set(wt.CATALOGUE)
+    assert not calls.get("templates")
+
+
+# ---------------------------------------------------- receipt rides the sweep
+
+def _patch_kairo_gate(monkeypatch, *, receipt_verdict):
+    """The gate's fetch fake: catalogue bodies from the catalogue, the receipt
+    by its verbatim preset name with the verdict the test chooses."""
+    calls = []
+    async def _fetch(*, waba_id, name, token):
+        calls.append({"waba_id": waba_id, "name": name, "token": token})
+        if name == wt.RECEIPT_TEMPLATE_NAME:
+            return receipt_verdict
+        tpl = wt.CATALOGUE.get(name.split("_", 1)[1])
+        return meta.TemplateStatus(status="approved", rejection_reason=None,
+                                   body=tpl.body if tpl else "")
+    monkeypatch.setattr(meta, "fetch_template", _fetch)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_approved_on_kairo_waba_includes_the_receipt_once_kairo_holds_it(monkeypatch):
+    """The receipt is in the gate's answer, fetched by its verbatim name.
+
+    That pair is what unblocks the sweep's document loop, exactly like a
+    catalogue pair unblocks `create_template`.
+    """
+    calls = _patch_kairo_gate(monkeypatch, receipt_verdict=meta.TemplateStatus(
+        status="approved", rejection_reason=None, body=wt.RECEIPT_TEMPLATE_BODY))
+
+    approved = await wo.approved_on_kairo_waba(FakeSettings())
+
+    assert approved == ({("it", k) for k in wt.CATALOGUE}
+                        | {(wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY)})
+    assert wt.RECEIPT_TEMPLATE_NAME in [c["name"] for c in calls]
+    assert f"it_{wt.RECEIPT_TEMPLATE_KEY}" not in [c["name"] for c in calls]
+
+
+@pytest.mark.asyncio
+async def test_approved_on_kairo_waba_excludes_a_receipt_whose_body_drifted(monkeypatch):
+    """Same rule as the catalogue: approved *name* with different copy is not
+    approved — pushing it would hand unreviewed text to every salon."""
+    _patch_kairo_gate(monkeypatch, receipt_verdict=meta.TemplateStatus(
+        status="approved", rejection_reason=None, body="il testo che Meta ha già"))
+
+    approved = await wo.approved_on_kairo_waba(FakeSettings())
+
+    assert approved == {("it", k) for k in wt.CATALOGUE}
+
+
+@pytest.mark.asyncio
+async def test_approved_on_kairo_waba_excludes_a_receipt_not_yet_ruled_on(monkeypatch):
+    """Pending is not approved — the gate fails closed on a missing verdict."""
+    _patch_kairo_gate(monkeypatch, receipt_verdict=meta.TemplateStatus(
+        status="pending", rejection_reason=None, body=wt.RECEIPT_TEMPLATE_BODY))
+
+    approved = await wo.approved_on_kairo_waba(FakeSettings())
+
+    assert (wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY) not in approved
+
+
+@pytest.mark.asyncio
+async def test_approved_on_kairo_waba_fails_closed_when_unconfigured():
+    class NoKairoWaba(FakeSettings):
+        meta_kairo_waba_id = ""
+        meta_kairo_token = ""
+
+    assert await wo.approved_on_kairo_waba(NoKairoWaba()) == set()
+
+
+def _current_rows_or(monkeypatch, receipt_row):
+    """get_template: current-hash rows for the catalogue, `receipt_row` for the
+    receipt — so catalogue noise stays out of the receipt-loop assertions."""
+    async def _get_template(shop_id, template_key):
+        if template_key == wt.RECEIPT_TEMPLATE_KEY:
+            return receipt_row
+        tpl = wt.CATALOGUE[template_key]
+        return {"template_key": template_key,
+                "meta_template_id": f"id_{template_key}",
+                "status": "approved", "body_hash": wt.body_hash(tpl.body)}
+    monkeypatch.setattr(wq, "get_template", _get_template)
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_creates_the_receipt_as_a_document_template(monkeypatch):
+    """Proactive propagation: same gate, a document create, a verbatim name."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    _current_rows_or(monkeypatch, receipt_row=None)
+    approved = ({("it", k) for k in wt.CATALOGUE}
+                | {(wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY)})
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(), approved=approved,
+    )
+
+    created = calls["create_document_template"]
+    assert len(created) == len(wt.DOCUMENT_TEMPLATES)
+    doc = created[0]
+    assert doc["waba_id"] == "WABA1" and doc["token"] == "tok"
+    assert doc["name"] == wt.RECEIPT_TEMPLATE_NAME
+    assert doc["language"] == wt.RECEIPT_TEMPLATE_LANGUAGE
+    assert doc["category"] == "UTILITY"
+    assert doc["body_text"] == wt.RECEIPT_TEMPLATE_BODY
+    assert doc["example_url"] == FakeSettings.meta_receipt_sample_url
+    row = next(t for t in calls["templates"]
+               if t["template_key"] == wt.RECEIPT_TEMPLATE_KEY)
+    assert row["name"] == wt.RECEIPT_TEMPLATE_NAME
+    assert row["variable_count"] == 0
+    assert row["body_hash"] == wt.body_hash(wt.RECEIPT_TEMPLATE_BODY)
+    # The catalogue rows are already current in this fixture: only the receipt
+    # is pushed, and it lands through the document create, not `create_template`.
+    assert result["created"] == len(wt.DOCUMENT_TEMPLATES)
+    assert "create_template" not in calls
+    assert wt.RECEIPT_TEMPLATE_KEY not in result["failed"]
+    assert wt.RECEIPT_TEMPLATE_KEY not in result["not_ready"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_edits_a_stale_receipt_body_only(monkeypatch):
+    """An approved receipt whose hash no longer matches is edited in place —
+    body only, never the header (Meta never hands the handle back, so a
+    header resubmit would need the sample URL again for no gain)."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    _current_rows_or(monkeypatch, receipt_row={
+        "template_key": wt.RECEIPT_TEMPLATE_KEY,
+        "meta_template_id": "RECEIPT-ID", "status": "approved",
+        "body_hash": "il-corpo-che-meta-ha"})
+    approved = ({("it", k) for k in wt.CATALOGUE}
+                | {(wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY)})
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(), approved=approved,
+    )
+
+    assert "create_document_template" not in calls
+    # The catalogue rows are already current here: the one edit is the receipt.
+    edits = calls["edit_template"]
+    assert len(edits) == len(wt.DOCUMENT_TEMPLATES)
+    receipt_edit = edits[0]
+    assert receipt_edit["template_id"] == "RECEIPT-ID"
+    assert receipt_edit["body_text"] == wt.RECEIPT_TEMPLATE_BODY
+    assert receipt_edit["sample_variables"] == {}
+    assert result["edited"] == len(wt.DOCUMENT_TEMPLATES)
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_leaves_a_receipt_meta_is_still_reviewing_alone(monkeypatch):
+    """Meta refuses to edit a template under review — the same skip as the
+    catalogue, and the row is revisited on the first sweep after the verdict."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    _current_rows_or(monkeypatch, receipt_row={
+        "template_key": wt.RECEIPT_TEMPLATE_KEY,
+        "meta_template_id": "RECEIPT-ID", "status": "pending",
+        "body_hash": "il-corpo-che-meta-ha"})
+    approved = ({("it", k) for k in wt.CATALOGUE}
+                | {(wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY)})
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(), approved=approved,
+    )
+
+    assert result["created"] == 0 and result["edited"] == 0
+    assert not calls.get("edit_template")
+    assert "create_document_template" not in calls
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_reports_the_receipt_not_ready_when_the_gate_has_it_pending(monkeypatch):
+    """Kairo's copy not approved means the receipt waits with the catalogue."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    _current_rows_or(monkeypatch, receipt_row=None)
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(),
+        approved={("it", k) for k in wt.CATALOGUE},
+    )
+
+    assert result["created"] == 0
+    assert wt.RECEIPT_TEMPLATE_KEY in result["not_ready"]
+    assert "create_document_template" not in calls
+
+
+@pytest.mark.asyncio
+async def test_ensure_templates_fails_soft_on_the_receipt_without_a_sample_url(monkeypatch):
+    """A missing `META_RECEIPT_SAMPLE_URL` is reported as not_ready, never a
+    guaranteed-rejection create — and the catalogue loop above is untouched."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={},
+    )
+    _current_rows_or(monkeypatch, receipt_row=None)
+
+    class NoSample(FakeSettings):
+        meta_receipt_sample_url = ""
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=NoSample(),
+        approved={("it", k) for k in wt.CATALOGUE}
+        | {(wt.RECEIPT_TEMPLATE_LANGUAGE, wt.RECEIPT_TEMPLATE_KEY)},
+    )
+
+    assert result["ok"] is True
+    assert wt.RECEIPT_TEMPLATE_KEY in result["not_ready"]
+    assert "create_document_template" not in calls
+
+
+def test_worklist_counts_fingerprint_pairs_not_rows():
+    """A shop with every catalogue fingerprint but no receipt row must appear;
+    one whose receipt hash matches must not. The query knows nothing about
+    which templates exist — appearance is decided entirely by the fingerprint
+    array the sweep passes it (`propagation_fingerprints`, pinned above), so
+    what is pinned here is the array-driven shape of the SQL."""
+    import inspect
+    source = inspect.getsource(wq.list_senders_needing_templates)
+    assert "t.template_key || '|' || coalesce(t.body_hash, '')" in source
+    assert "= ANY($1)" in source
+    assert "cardinality($1::text[])" in source
+
+
+# ---------------------------------------------------------------- secret box
+
+def test_sealed_token_round_trips_and_is_not_readable_at_rest():
+    """The one credential with no parent behind it must not sit in plaintext."""
+    from cryptography.fernet import Fernet
+    from booking_engine.services import secret_box as sb
+
+    key = Fernet.generate_key().decode()
+    stored = sb.seal("EAAG-real-business-token", key)
+
+    assert "EAAG-real-business-token" not in stored, "a dump would read it"
+    assert stored.startswith("v1:"), "the prefix is what tells sealed from legacy"
+    assert sb.unseal(stored, key) == "EAAG-real-business-token"
+
+
+def test_legacy_plaintext_reads_without_a_migration():
+    """Rows written before the key existed still open — that is the rollout."""
+    from cryptography.fernet import Fernet
+    from booking_engine.services import secret_box as sb
+
+    assert sb.unseal("EAAG-legacy", Fernet.generate_key().decode()) == "EAAG-legacy"
+    assert sb.unseal("EAAG-legacy", "") == "EAAG-legacy"
+
+
+def test_unconfigured_stores_plaintext_rather_than_taking_whatsapp_offline():
+    from booking_engine.services import secret_box as sb
+    assert sb.seal("EAAG-x", "") == "EAAG-x"
+
+
+def test_a_sealed_token_never_silently_becomes_its_own_ciphertext():
+    """Returning ciphertext would reach Meta as a bearer token and come back as
+    a generic auth error — read as an expired token, sending the salon through
+    a reconnect that cannot fix it."""
+    from cryptography.fernet import Fernet
+    from booking_engine.services import secret_box as sb
+
+    stored = sb.seal("EAAG-x", Fernet.generate_key().decode())
+    with pytest.raises(sb.SecretBoxError):
+        sb.unseal(stored, "")
+    with pytest.raises(sb.SecretBoxError):
+        sb.unseal(stored, Fernet.generate_key().decode())
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_for_a_template_we_never_recorded_is_reported(monkeypatch):
+    """Silent until 2026-09-20, when six templates did exactly this.
+
+    Meta ruling on a name we hold no row for updates nothing. Reporting the
+    miss is what makes the gap audible while the sweep's adoption repairs it.
+    """
+    seen = {}
+    async def _set(**kw):
+        seen.update(kw)
+        return False  # no row matched
+    monkeypatch.setattr(wq, "set_template_status", _set)
+    warnings = []
+    monkeypatch.setattr(
+        whatsapp_routes.logger, "warning",
+        lambda msg, *a: warnings.append(msg % a if a else msg),
+    )
+
+    await whatsapp_routes._handle_change(
+        {"shop_id": SHOP},
+        {"field": "message_template_status_update",
+         "value": {"message_template_name": "it_promo_v1", "event": "APPROVED"}},
+    )
+
+    assert seen["name"] == "it_promo_v1"
+    assert any("template_verdict_unmatched" in w for w in warnings)
+
+
+async def _noop():
+    return None
+
+
+async def _run_sweep_stage(monkeypatch):
+    """Run sweep() with every stage but the reminder stubbed to nothing."""
+    async def _none(*a, **kw):
+        return []
+    async def _empty_set(*a, **kw):
+        return set()
+    for name in ("list_verifying_senders", "list_senders_needing_templates",
+                 "list_unresolved_templates"):
+        monkeypatch.setattr(wq, name, _none)
+    monkeypatch.setattr(wo, "approved_on_kairo_waba", _empty_set)
+    return await wo.sweep(settings=FakeSettings())
+
+
+@pytest.mark.asyncio
+async def test_the_tick_emails_once_per_window_not_once_per_hour(monkeypatch):
+    """The banner is pull-only; email is the only warning that reaches a salon
+    whose owner does not open the app in the week that matters."""
+    sent, marked = [], []
+    async def _due(*, window_days, cooldown_hours):
+        sent.append((window_days, cooldown_hours))
+        return [{"shop_id": SHOP, "phone_number": "+39 02 1", "days_left": 3}]
+    async def _notify(**kw):
+        sent.append(kw)
+        return True
+    async def _mark(shop_id):
+        marked.append(shop_id)
+    monkeypatch.setattr(wq, "list_senders_needing_token_reminder", _due)
+    monkeypatch.setattr(wq, "mark_token_reminder_sent", _mark)
+    monkeypatch.setattr(wo.webapp_notify, "whatsapp_token_expiring", _notify)
+
+    await _run_sweep_stage(monkeypatch)
+
+    assert sent[0] == (wo.RENEW_WINDOW_DAYS, wo.REMINDER_COOLDOWN_HOURS)
+    assert sent[1]["days_left"] == 3
+    assert marked == [SHOP], "unmarked means the next tick mails again in an hour"
+
+
+@pytest.mark.asyncio
+async def test_a_salon_with_no_mailbox_is_not_retried_every_hour(monkeypatch):
+    """The attempt is recorded, not the delivery — an hourly retry against a
+    shop that simply has no owner email is noise, and the banner still covers
+    that salon."""
+    marked = []
+    async def _due(**kw):
+        return [{"shop_id": SHOP, "phone_number": None, "days_left": 0}]
+    async def _notify(**kw):
+        return False  # no owner email, or Resend refused
+    monkeypatch.setattr(wq, "list_senders_needing_token_reminder", _due)
+    monkeypatch.setattr(wq, "mark_token_reminder_sent",
+                        lambda shop_id: marked.append(shop_id) or _noop())
+    monkeypatch.setattr(wo.webapp_notify, "whatsapp_token_expiring", _notify)
+
+    await _run_sweep_stage(monkeypatch)
+
+    assert marked == [SHOP]
+
+
+@pytest.mark.asyncio
+async def test_a_template_under_review_is_left_alone_however_drifted(monkeypatch):
+    """Editing one Meta is still reviewing either fails or restarts the review.
+
+    The sweep runs hourly. Without this, a row whose body no longer matches the
+    catalogue would be re-submitted every hour — failing every hour while Meta
+    holds it PENDING, and, on the reading where the edit lands, pushing the
+    approval further out exactly as often as we asked for it.
+    """
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={"template": {"meta_template_id": "M1", "status": "pending",
+                            "body_hash": "una-copia-vecchia"}},
+    )
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(),
+        approved={("it", k) for k in wt.CATALOGUE},
+    )
+
+    assert not calls.get("edit_template"), "Meta refuses this, hourly"
+    assert not calls.get("create_template")
+    assert result["created"] == 0 and result["edited"] == 0
+
+
+@pytest.mark.asyncio
+async def test_drift_is_deferred_not_dropped_once_meta_has_ruled(monkeypatch):
+    """The same row, now approved, is edited on the next sweep."""
+    calls = _patch_onboarding(
+        monkeypatch, sender={"shop_id": SHOP, "source": "coexistence",
+                             "status": "online", "display_name": "Salone X",
+                             "waba_id": "WABA1", "access_token": "tok"},
+        calls={"template": {"meta_template_id": "M1", "status": "approved",
+                            "body_hash": "una-copia-vecchia"}},
+    )
+
+    result = await wo.ensure_templates(
+        shop_id=SHOP, settings=FakeSettings(),
+        approved={("it", k) for k in wt.CATALOGUE},
+    )
+
+    assert result["edited"] == len(wt.CATALOGUE)
+

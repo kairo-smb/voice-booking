@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import re
 
-from booking_engine.services.messaging.whatsapp_templates import CATALOGUE
+from booking_engine.services.messaging.whatsapp_templates import (
+    CATALOGUE, MARKETING_WITHOUT_GENERATED_SLOT,
+)
 
 _VAR = re.compile(r"\{\{(\d+)\}\}")
 _LETTER = re.compile(r"[A-Za-zÀ-ÿ]")
@@ -87,14 +89,49 @@ def test_utility_templates_stay_utility():
 
 def test_marketing_templates_generate_exactly_one_slot():
     """The invariant the send path, the preview renderer and the prompt all
-    rely on: one generated slot, and it is a real variable of that template."""
+    rely on: one generated slot, and it is a real variable of that template.
+
+    A MARKETING template with no slot is legal only under the explicit, named
+    exemption in `MARKETING_WITHOUT_GENERATED_SLOT` (`feedback_v2`, which Meta
+    reclassified as MARKETING while every one of its variables stayed a
+    database fact). The exemption is per key so this test still catches the
+    failure it exists for: an LLM marketing template that lost its slot would
+    reach the model with no frame to write into.
+    """
     for key, tpl in CATALOGUE.items():
         if tpl.category != "MARKETING":
+            continue
+        if key in MARKETING_WITHOUT_GENERATED_SLOT:
+            assert tpl.generated_slot is None, f"{key}: exemption means no slot"
+            assert tpl.filled_by is None, f"{key}: exemption means no fill source"
             continue
         assert tpl.generated_slot is not None, f"{key}: MARKETING must generate"
         assert 1 <= tpl.generated_slot <= tpl.variables, f"{key}: slot out of range"
         if tpl.filled_by == "llm":
             assert tpl.guidance, f"{key}: no guidance for the model"
+
+
+def test_feedback_runs_marketing_and_the_reminder_stays_utility():
+    """The split Meta handed us, pinned so a later copy edit cannot quietly
+    put it back.
+
+    Appointment reminders must never be consent-gated or cooldown-suppressed;
+    review requests are promotion on Meta's reading. The two are the same kind
+    of message only in the catalogue.
+    """
+    assert CATALOGUE["feedback_v2"].category == "MARKETING"
+    assert CATALOGUE["reminder_v6"].category == "UTILITY"
+
+
+def test_the_slot_exemption_names_real_marketing_templates():
+    """An exemption key that names nothing — a typo, or a template that got
+    deleted — would silently stop exempting the template it was written for and
+    fail no test, because the loop above never sees an unknown key."""
+    for key in MARKETING_WITHOUT_GENERATED_SLOT:
+        assert key in CATALOGUE, f"{key}: exemption names a template that is gone"
+        assert CATALOGUE[key].category == "MARKETING", (
+            f"{key}: only MARKETING needs the exemption"
+        )
 
 
 def test_fill_source_agrees_with_the_slot():

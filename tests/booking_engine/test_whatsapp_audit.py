@@ -99,3 +99,47 @@ async def test_campaign_enqueue_hook_records_actor(monkeypatch):
     assert event["is_template"] is True
     assert event["recipient_count"] == 1
     assert event["status"] == "success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source,sends_now", [("offer", True), ("touchpoint", False)])
+async def test_single_offer_is_sent_at_enqueue_bulk_waits_for_tick(monkeypatch, source, sends_now):
+    """The win-back modal is one click for one customer; waiting for the tick
+    (the next scheduled drain) read as "nothing happened". Bulk keeps
+    its drip."""
+    from booking_engine.api.routes import whatsapp as wa_routes
+    from booking_engine.api.routes.whatsapp import CampaignRequest
+
+    send_calls: list[dict] = []
+
+    async def fake_enqueue(**kw):
+        return {"ok": True, "queued": 1, "suppressed": 0, "already_sent": 0,
+                "first_at": None, "last_at": None}
+
+    async def fake_send_due(**kw):
+        send_calls.append(kw)
+        return {"sent": 1}
+
+    async def fake_audit(**kw):
+        pass
+
+    monkeypatch.setattr(wa_routes, "enqueue_campaign", fake_enqueue)
+    monkeypatch.setattr(wa_routes, "locked_send_due", fake_send_due)
+    monkeypatch.setattr(wa_routes.waq, "record_audit_event", fake_audit)
+
+    shop = uuid4()
+    payload = CampaignRequest(
+        shop_id=shop, source=source, campaign_key="winback-1",
+        template_key="winback_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {"1": "Giulia"}}],
+    )
+
+    out = await wa_routes.campaign(payload=payload, settings=FakeSettings(), _auth=True)
+
+    if sends_now:
+        assert send_calls == [{"settings": send_calls[0]["settings"],
+                               "shop_id": shop, "campaign_key": "winback-1"}]
+        assert out["data"]["sent_now"] == 1
+    else:
+        assert send_calls == []
+        assert "sent_now" not in out["data"]

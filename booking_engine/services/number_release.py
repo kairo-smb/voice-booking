@@ -3,7 +3,7 @@
 `billing/webhook/process-event.ts` (webapp) nulls `shops.plan_id` on
 cancellation but has no reach into this repo's `voice_agent.shop_telephony` —
 so without this module a lapsed shop keeps a number we keep paying ~$3/mo
-for, forever (the "Cancellation gap" flagged in CLAUDE.md, 2026-08-14).
+for, forever (the "Cancellation gap" flagged in AGENTS.md, 2026-08-14).
 
 Design: a grace period, not an instant release. Releasing the moment a plan
 lapses gives no warning and Twilio does not hold a released number for a
