@@ -415,6 +415,11 @@ class TestAutomationQueriesIntegration:
         nothing and no row on the shared QA branch is claimed.
         """
         assert await wq.claim_due(0) == []
+        assert await wq.claim_due(0, shop_id=shop, campaign_key="x") == []
+
+    async def test_pending_campaigns_sql_is_valid(self, shop):
+        """Parses and plans against the real schema; a fresh shop has none."""
+        assert await wq.pending_campaigns(shop_id=shop) == []
 
 
 # ------------------------------------------------------- the tick (unit)
@@ -739,7 +744,7 @@ async def test_send_due_does_not_suppress_a_utility_message_for_no_consent(monke
         "variables": {"1": "Giulia"}, "category": "UTILITY",
     }
 
-    async def _claim(limit):
+    async def _claim(limit, **kw):
         return [message]
     async def _requeue_stuck(*a, **kw):
         return 0

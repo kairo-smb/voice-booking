@@ -33,7 +33,7 @@ from booking_engine.services.messaging import wa_inbound
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
 from booking_engine.services.messaging.whatsapp_pricing import price_list
 from booking_engine.services.messaging import whatsapp_receipt
-from booking_engine.services.messaging.whatsapp_send import enqueue_campaign
+from booking_engine.services.messaging.whatsapp_send import enqueue_campaign, send_due
 from booking_engine.services.messaging.whatsapp_onboarding import template_name
 from booking_engine.services.messaging.whatsapp_templates import (
     CATALOGUE, DEFAULT_LANGUAGE, RECEIPT_TEMPLATE_NAME, resolve_language,
@@ -408,7 +408,25 @@ async def campaign(
     )
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
+    # A single win-back is one owner, one customer, one click: waiting for the
+    # tick (hourly on paper, every few hours in practice on GitHub's cron)
+    # reads as "nothing happened". Send what is due now; `spread` already put
+    # an out-of-hours send on tomorrow's opening, so that one still waits.
+    if payload.source == "offer" and result.get("queued"):
+        result["sent_now"] = (await send_due(
+            settings=settings, shop_id=payload.shop_id,
+            campaign_key=payload.campaign_key,
+        ))["sent"]
     return {"data": result}
+
+
+@router.get("/campaigns/{shop_id}")
+async def campaigns_pending(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+) -> dict:
+    """Campaigns with messages still queued — the bulk tile's persistent view."""
+    return {"data": await wq.pending_campaigns(shop_id=shop_id)}
 
 
 @router.get("/campaigns/{shop_id}/{campaign_key}")

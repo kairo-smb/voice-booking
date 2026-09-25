@@ -353,7 +353,7 @@ def _patch_send_due(
     spy = {"sent": [], "suppressed": [], "failed": [], "deferred": [],
            "consent_withdrawn": []}
 
-    async def _claim(limit):
+    async def _claim(limit, **kw):
         return claimed
     async def _requeue_stuck(*a, **kw):
         return 0
@@ -2566,3 +2566,28 @@ async def test_drift_is_deferred_not_dropped_once_meta_has_ruled(monkeypatch):
     )
 
     assert result["edited"] == len(wt.CATALOGUE)
+
+
+@pytest.mark.asyncio
+async def test_send_loop_survives_a_failed_run(monkeypatch):
+    """One bad run (DB blip, Meta outage) must not kill the loop for the
+    lifetime of the machine."""
+    import asyncio
+    calls = []
+
+    async def _send_due(*, settings):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("db blip")
+        if len(calls) == 3:
+            raise asyncio.CancelledError
+        return {"sent": 0}
+
+    monkeypatch.setattr(ws, "send_due", _send_due)
+
+    class S(FakeSettings):
+        whatsapp_send_loop_seconds = 0
+
+    with pytest.raises(asyncio.CancelledError):
+        await ws.send_loop(settings=S())
+    assert len(calls) == 3

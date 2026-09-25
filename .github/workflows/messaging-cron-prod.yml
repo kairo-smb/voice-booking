@@ -1,0 +1,48 @@
+name: Messaging cron (production)
+
+# Same tick + heartbeat as messaging-cron.yml, against the PRODUCTION app.
+# Hourly on paper; GitHub runs it every few hours in practice, which is fine
+# here — prod WhatsApp drips are meant to be slow, and a single win-back is
+# sent at enqueue time (routes/whatsapp.py), not by this tick. QA additionally
+# drains its queue in-process every 2 minutes (fly.qa.toml).
+#
+# Its own secret, because the prod app's CONTROL_PLANE_SECRET is not
+# guaranteed to equal QA's.
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: booking-engine-messaging-cron-prod
+  cancel-in-progress: false
+
+jobs:
+  tick-and-heartbeat:
+    name: Messaging tick + forwarding heartbeat
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CONTROL_PLANE_SECRET: ${{ secrets.PROD_CONTROL_PLANE_SECRET }}
+      BASE_URL: ${{ vars.PROD_BASE_URL || 'https://kairo-booking-engine.fly.dev' }}
+    steps:
+      - name: Guard - required secret must be set
+        run: |
+          if [ -z "${CONTROL_PLANE_SECRET}" ]; then
+            echo "::error::PROD_CONTROL_PLANE_SECRET is not set. Refusing to send an unauthenticated request."
+            exit 1
+          fi
+
+      - name: Messaging tick (bundle poll, provisioning, health semaphore)
+        run: |
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer ${CONTROL_PLANE_SECRET}" \
+            "${BASE_URL}/api/v1/messaging/tick"
+
+      - name: Forwarding heartbeat (silent-forwarding-drop detection)
+        if: always()
+        run: |
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer ${CONTROL_PLANE_SECRET}" \
+            "${BASE_URL}/api/v1/voice/heartbeat/forwarding"

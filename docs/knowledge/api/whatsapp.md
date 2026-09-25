@@ -239,6 +239,8 @@ Returns immediately with the schedule; nothing is sent inline:
 - `suppressed` — a row written with a `suppressed_reason` (`no_consent`, `no_phone`, `customer_not_found`). Refusals are recorded, never silent.
 - `already_sent` — this `campaign_key` already reached that customer; the unique index made the retry a no-op. That guard earns its keep here, where "invia a 400 clienti" is exactly the button someone double-clicks.
 
+**Exception: `source: "offer"`** (the webapp's single win-back modal) is sent at enqueue time — `send_due` scoped to that shop + `campaign_key`, same consent/cooldown/cap checks — and the response carries `sent_now`. One click for one customer can't wait for the tick, which GitHub's scheduler runs every few hours rather than hourly. Out of opening hours `spread` has already put the row on tomorrow's first slot, so it still waits.
+
 `spread()` lays the campaign across the salon's opening hours (`WHATSAPP_SEND_START_HOUR`–`WHATSAPP_SEND_END_HOUR`, Europe/Rome), rolling onto **following days** once a day's `daily_cap` is used. A 400-recipient campaign against a 50/day sender is eight days of drip, and the owner is told so at enqueue time.
 
 There is **no `over_daily_cap` rejection any more**: exceeding a day's allowance is a longer schedule, not an error. Keeping it would have made bulk impossible, and piling everything onto today just hands `send_due` hundreds of rows to defer by an hour, repeatedly, until nobody can read the queue.
@@ -246,6 +248,10 @@ There is **no `over_daily_cap` rejection any more**: exceeding a day's allowance
 Errors (409): `sender_not_online`, `unknown_template`, `template_pending`/`template_rejected`/…, `sender_has_no_allowance`.
 
 **Only the code crosses the wire.** `enqueue_campaign` returns richer refusals than the route can carry — `HTTPException(detail=<code>)` flattens them to the bare string. The webapp translates it (`mapWaError`) and reads any numbers from `GET /whatsapp/status/{shop_id}` instead.
+
+### `GET /whatsapp/campaigns/{shop_id}`
+
+Every campaign of the shop with rows still `queued`/`sending`, with the same counts plus `next_due_at`/`last_due_at`. The webapp's bulk tile renders it on load so a scheduled drip survives a reload, and a campaign drops out once its last row has left.
 
 ### `GET /whatsapp/campaigns/{shop_id}/{campaign_key}`
 

@@ -27,6 +27,7 @@ sms_send.py's re-check.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -232,7 +233,9 @@ async def enqueue_campaign(
             "last_at": when[-1].isoformat() if when else None}
 
 
-async def send_due(*, settings) -> dict:
+async def send_due(
+    *, settings, shop_id: UUID | None = None, campaign_key: str | None = None,
+) -> dict:
     """Send everything due right now, within each shop's daily cap.
 
     Dispatch is serial and **paced**. Serial because the loop mutates per-shop
@@ -241,11 +244,16 @@ async def send_due(*, settings) -> dict:
     claim MAX_PER_TICK rows across every tenant at once: Meta's per-number
     ceiling is far above that, but the Graph API's app-level limit is shared
     by all of them and is the one we can actually trip.
+
+    `shop_id` + `campaign_key` scope it to one campaign — the route's inline
+    send for a single win-back. Every check below still applies.
     """
     counts = {"sent": 0, "suppressed": 0, "failed": 0, "deferred": 0,
               "rate_capped": 0, "requeued": await wq.requeue_stuck()}
 
-    claimed = await wq.claim_due(MAX_PER_TICK)
+    claimed = await wq.claim_due(
+        MAX_PER_TICK, shop_id=shop_id, campaign_key=campaign_key,
+    )
     if not claimed:
         return counts
 
@@ -363,3 +371,18 @@ async def send_due(*, settings) -> dict:
         counts["sent"] += 1
 
     return counts
+
+
+async def send_loop(*, settings) -> None:
+    """Drain the queue every `whatsapp_send_loop_seconds`, for as long as the
+    process lives. A failed run is logged, never fatal: the next one retries,
+    and claim_due's SKIP LOCKED keeps it safe beside the tick or a second
+    machine."""
+    while True:
+        await asyncio.sleep(settings.whatsapp_send_loop_seconds)
+        try:
+            counts = await send_due(settings=settings)
+            if counts.get("sent") or counts.get("failed"):
+                logger.info("whatsapp.send_loop %s", counts)
+        except Exception:  # noqa: BLE001
+            logger.exception("whatsapp.send_loop failed")

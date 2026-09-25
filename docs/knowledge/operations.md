@@ -92,3 +92,9 @@ python -m venv /tmp/ci && /tmp/ci/bin/pip install -r booking_engine/requirements
 ```
 
 The remaining gap is deliberate: CI also runs `tests/live_db/` against an ephemeral Neon branch, which a local run skips unless `TEST_DATABASE_URL` is set. A green local run therefore says nothing about those.
+
+## WhatsApp send cadence (QA vs production)
+
+- **Production:** `.github/workflows/messaging-cron-prod.yml` hits `/api/v1/messaging/tick` hourly — every few hours in practice, since GitHub throttles schedules. Needs the `PROD_CONTROL_PLANE_SECRET` repo secret (the prod app's `CONTROL_PLANE_SECRET`). Slow is acceptable: bulk drips are meant to be spread, and single win-backs (`source: offer`) are sent at enqueue time.
+- **QA:** `messaging-cron.yml` still runs the full tick, and on top of it `WHATSAPP_SEND_LOOP_SECONDS=120` (`fly.qa.toml`) drains the WhatsApp queue in-process every 2 minutes. GitHub cannot schedule below 5 minutes. The loop only works because QA keeps `min_machines_running = 1`; prod scales to zero, where it would stop with the machine.
+

@@ -402,7 +402,9 @@ async def requeue_stuck(older_than_minutes: int = 60) -> int:
     return len(rows)
 
 
-async def claim_due(limit: int) -> list[dict]:
+async def claim_due(
+    limit: int, *, shop_id: UUID | None = None, campaign_key: str | None = None,
+) -> list[dict]:
     """Atomically claim up to `limit` due messages for online senders.
 
     The claim (queued -> sending) and the selection are one statement on
@@ -414,6 +416,9 @@ async def claim_due(limit: int) -> list[dict]:
     the cooldown only to MARKETING. A LEFT JOIN (not inner) so a row whose
     template can't be resolved is still claimed — and fails closed to the
     stricter MARKETING checks when category is missing.
+
+    `shop_id` + `campaign_key` narrow the claim to one campaign: the single
+    win-back is sent at enqueue time instead of waiting for the tick.
 
     The category is resolved inside the CTE and carried out through `due`, not
     joined again in the UPDATE's FROM: Postgres refuses to let an outer join in
@@ -431,6 +436,8 @@ async def claim_due(limit: int) -> list[dict]:
             LEFT JOIN whatsapp.templates t
               ON t.shop_id = m.shop_id AND t.name = m.template_name
             WHERE m.status = 'queued' AND m.scheduled_at <= now()
+              AND ($2::uuid IS NULL OR m.shop_id = $2)
+              AND ($3::text IS NULL OR m.campaign_key = $3)
             ORDER BY m.scheduled_at
             LIMIT $1
             FOR UPDATE OF m SKIP LOCKED
@@ -441,7 +448,7 @@ async def claim_due(limit: int) -> list[dict]:
         WHERE m.id = due.id
         RETURNING m.*, due.category AS category
         """,
-        limit,
+        limit, shop_id, campaign_key,
     )
 
 
@@ -678,6 +685,33 @@ async def campaign_progress(*, shop_id: UUID, campaign_key: str) -> dict:
         shop_id, campaign_key,
     )
     return dict(row) if row else {}
+
+
+async def pending_campaigns(*, shop_id: UUID) -> list[dict]:
+    """Every campaign of this shop that still has messages waiting to leave.
+
+    The bulk tile renders this on load, so a scheduled drip stays visible
+    after a reload (or on another device) — and drops out on its own once the
+    tick has sent the last row.
+    """
+    return await execute(
+        """
+        SELECT
+          campaign_key,
+          count(*) FILTER (WHERE status IN ('queued','sending')) AS pending,
+          count(*) FILTER (WHERE status IN ('sent','delivered','read')) AS sent,
+          count(*) FILTER (WHERE status = 'failed')     AS failed,
+          count(*) FILTER (WHERE status = 'suppressed') AS suppressed,
+          min(scheduled_at) FILTER (WHERE status = 'queued') AS next_due_at,
+          max(scheduled_at) FILTER (WHERE status = 'queued') AS last_due_at
+        FROM whatsapp.outbound_messages
+        WHERE shop_id = $1 AND campaign_key IS NOT NULL
+        GROUP BY campaign_key
+        HAVING count(*) FILTER (WHERE status IN ('queued','sending')) > 0
+        ORDER BY min(scheduled_at)
+        """,
+        shop_id,
+    )
 
 
 async def customer_campaign_messages(*, shop_id: UUID, customer_id: UUID) -> list[dict]:
