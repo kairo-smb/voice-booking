@@ -117,6 +117,11 @@ async def subscribe_app(*, waba_id: str, token: str) -> None:
     await _request("POST", f"{waba_id}/subscribed_apps", token=token)
 
 
+async def unsubscribe_app(*, waba_id: str, token: str) -> None:
+    """Undo `subscribe_app` when the owner disconnects: stop their webhooks."""
+    await _request("DELETE", f"{waba_id}/subscribed_apps", token=token)
+
+
 async def waba_ids_for_token(*, token: str, app_id: str, app_secret: str) -> list[str]:
     """Which WABAs this business token was actually granted access to.
 

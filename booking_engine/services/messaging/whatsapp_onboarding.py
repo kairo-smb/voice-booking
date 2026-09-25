@@ -380,6 +380,26 @@ async def abort(*, shop_id: UUID) -> dict:
     return {"ok": True}
 
 
+async def disconnect(*, shop_id: UUID) -> dict:
+    """The owner detaches their WABA from Kairo, whatever state the sender is in.
+
+    Unsubscribing is best effort: a token that has expired or been revoked is
+    a common reason to disconnect in the first place, and failing here would
+    leave the owner unable to remove a sender that already cannot send.
+    Idempotent — no row deletes nothing and still reports ok.
+    """
+    row = await wq.get_sender(shop_id)
+    if not row:
+        return {"ok": True, "cancelled": 0}
+    if row.get("waba_id") and row.get("access_token"):
+        try:
+            await meta.unsubscribe_app(waba_id=row["waba_id"], token=row["access_token"])
+        except meta.MetaError as exc:
+            logger.warning("whatsapp.unsubscribe_failed shop=%s err=%s", shop_id, exc)
+    cancelled = await wq.delete_sender(shop_id)
+    return {"ok": True, "cancelled": cancelled}
+
+
 async def approved_on_kairo_waba(settings) -> set[tuple[str, str]]:
     """Which (language, key) pairs Meta has approved on *Kairo's own* WABA,
     **with the body this file currently holds**.

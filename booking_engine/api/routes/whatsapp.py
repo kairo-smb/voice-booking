@@ -281,6 +281,21 @@ async def abort_onboarding(
     return {"data": result}
 
 
+@router.delete("/sender/{shop_id}")
+async def disconnect_sender(
+    shop_id: UUID,
+    _auth: Annotated[bool, Depends(require_control_plane_token)],
+    requested_by: UUID | None = Query(default=None),
+) -> dict:
+    """Owner disconnects their WABA: unsubscribe, cancel the queue, forget it."""
+    result = await onboarding.disconnect(shop_id=shop_id)
+    await waq.record_audit_event(
+        shop_id=shop_id, event="sender.disconnect", actor_id=requested_by,
+        status="success",
+    )
+    return {"data": result}
+
+
 @router.get("/status/{shop_id}")
 async def status(
     shop_id: UUID,

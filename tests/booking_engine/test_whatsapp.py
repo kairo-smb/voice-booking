@@ -994,6 +994,30 @@ async def test_abort_drops_the_pending_row(monkeypatch):
     assert calls["shop_id"] == SHOP
 
 
+@pytest.mark.asyncio
+async def test_disconnect_survives_a_dead_token(monkeypatch):
+    """A revoked token is a reason to disconnect, so Meta refusing the
+    unsubscribe must not stop the sender from being forgotten."""
+    calls = {}
+
+    async def _get(shop_id):
+        return {"waba_id": "WABA1", "access_token": "tok"}
+
+    async def _unsub(*, waba_id, token):
+        calls["unsub"] = waba_id
+        raise meta.MetaError(190, "token expired")
+
+    async def _delete(shop_id):
+        calls["deleted"] = shop_id
+        return 3
+    monkeypatch.setattr(wq, "get_sender", _get)
+    monkeypatch.setattr(meta, "unsubscribe_app", _unsub)
+    monkeypatch.setattr(wq, "delete_sender", _delete)
+
+    assert await wo.disconnect(shop_id=SHOP) == {"ok": True, "cancelled": 3}
+    assert calls == {"unsub": "WABA1", "deleted": SHOP}
+
+
 def test_is_abandoned_ignores_a_fresh_pending_row():
     sender = {"status": "pending_signup",
               "updated_at": datetime.now(timezone.utc) - timedelta(minutes=2)}

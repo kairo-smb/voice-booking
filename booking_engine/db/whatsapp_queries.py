@@ -95,6 +95,34 @@ async def set_sender_fields(shop_id: UUID, **fields) -> None:
     )
 
 
+async def delete_sender(shop_id: UUID) -> int:
+    """The owner disconnected the WABA. Returns how many queued sends it cancelled.
+
+    One statement so it is all-or-nothing. Templates go with the sender: they
+    mirror *that* WABA's approvals, and a reconnect to a different one would
+    otherwise skip pushing to it because the rows already read "approved".
+    Outbound history stays; only not-yet-sent rows are cancelled, since
+    nothing would ever send them. `sending` is left alone — it is mid-flight.
+    """
+    row = await execute_one(
+        """
+        WITH cancelled AS (
+          UPDATE whatsapp.outbound_messages
+          SET status = 'cancelled', updated_at = now()
+          WHERE shop_id = $1 AND status = 'queued'
+          RETURNING 1
+        ), templates AS (
+          DELETE FROM whatsapp.templates WHERE shop_id = $1 RETURNING 1
+        ), sender AS (
+          DELETE FROM whatsapp.senders WHERE shop_id = $1 RETURNING 1
+        )
+        SELECT (SELECT count(*) FROM cancelled)::int AS cancelled
+        """,
+        shop_id,
+    )
+    return row["cancelled"] if row else 0
+
+
 async def delete_pending_sender(shop_id: UUID) -> None:
     """Drop an abandoned onboarding row.
 

@@ -100,6 +100,10 @@ The owner closed Meta's popup without finishing (or the code exchange failed on 
 
 Idempotent and narrow: it deletes only a `pending_signup` row (an `online` or `failed` sender is real state and is never touched), and deleting nothing still returns `{"data": {"ok": true}}`.
 
+### `DELETE /whatsapp/sender/{shop_id}?requested_by=`
+
+The owner disconnects their WABA, in any state (added 2026-09-25). Unsubscribes our app from the WABA's webhooks (best effort: a revoked or expired token is a common reason to disconnect, so Meta refusing is logged, not fatal), then in one statement cancels the shop's `queued` messages, deletes its `whatsapp.templates` rows (they mirror *that* WABA's approvals — a reconnect to another WABA would otherwise skip pushing templates to it) and deletes the sender. Outbound history, inbound threads and automation rules stay. Audited as `sender.disconnect`. Idempotent: `{"data": {"ok": true, "cancelled": <n>}}`.
+
 ### `GET /whatsapp/status/{shop_id}`
 
 ```json
