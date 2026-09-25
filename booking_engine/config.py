@@ -111,7 +111,16 @@ class Settings(BaseSettings):
     # are still rejected as unroutable; only set this on QA for manual testing.
     sip_test_fallback_shop_id: str = ""
 
-    model_config = {"env_prefix": ""}
+    # `env_file` added 2026-09-24. Without it the README's own run command —
+    # `uvicorn booking_engine.api.app:create_app --factory` — started against an
+    # empty `database_url`, which asyncpg reads as "the database named after the
+    # current user", so startup died on `database "<you>" does not exist`. The
+    # only way in was `set -a && . ./.env && set +a` first, written down nowhere.
+    #
+    # No effect on Fly: there is no .env in the image, and pydantic-settings
+    # ignores a missing file. Real environment variables keep priority over the
+    # file either way, so `fly secrets` still win and so does an explicit export.
+    model_config = {"env_prefix": "", "env_file": ".env", "extra": "ignore"}
 
 
 def get_settings() -> Settings:

@@ -323,6 +323,55 @@ async def modify_appointment(
     return result is not None
 
 
+async def any_staff_could_ever_serve(
+    *, shop_id: UUID, services: list[dict],
+) -> bool:
+    """Is there an active staff member who can do ALL these services **and**
+    works at all?
+
+    This exists to tell two very different empty results apart. `find_availability`
+    returns `[]` both for "the diary is full that fortnight" and for "nobody in
+    this shop can ever perform this service", and the agent cannot act on the
+    difference it cannot see: told only "no slots", it offers the customer another
+    day, and another, forever. Found 2026-09-24 on the demo shop, where four
+    services are mapped in `staff_services` only to a staff member with zero
+    `staff_schedules` rows — structurally unbookable, reported as a busy week.
+
+    "Works at all" is the second half on purpose. Eligibility in
+    `staff_services` without a single schedule row produces no candidate slot on
+    any date, so for this question it is the same as not being eligible.
+
+    Mirrors `get_available_slots`' own eligibility test — all requested services
+    covered by one person, and an explicit `staff_id` narrowing it to that person
+    — so the two cannot disagree about who is eligible.
+    """
+    service_ids = [s["service_id"] for s in services]
+    if not service_ids:
+        return False
+    # An explicit staff request narrows the question to that person; the tool
+    # schema allows a different staff_id per leg, so any of them constrains it.
+    named = [s["staff_id"] for s in services if s.get("staff_id")]
+
+    row = await connection.execute_one(
+        """
+        SELECT 1 AS ok
+        FROM business_app_core.staff st
+        WHERE st.shop_id = $1
+          AND st.is_active = true
+          AND ($4::uuid[] = '{}'::uuid[] OR st.id = ANY($4::uuid[]))
+          AND (SELECT COUNT(DISTINCT ss.service_id)
+                 FROM business_app_core.staff_services ss
+                WHERE ss.staff_id = st.id
+                  AND ss.service_id = ANY($2::uuid[])) = $3
+          AND EXISTS (SELECT 1 FROM business_app_core.staff_schedules sch
+                       WHERE sch.staff_id = st.id)
+        LIMIT 1
+        """,
+        shop_id, service_ids, len(set(service_ids)), named,
+    )
+    return row is not None
+
+
 async def service_belongs_to_shop(*, shop_id: UUID, service_id: UUID) -> bool:
     """True if the service exists in this shop's active catalog."""
     row = await connection.execute_one(

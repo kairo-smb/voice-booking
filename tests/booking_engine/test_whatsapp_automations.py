@@ -131,8 +131,8 @@ async def _insert_appointment_service(appointment_id, service_id):
     await connection.execute_void(
         """
         INSERT INTO business_app_core.appointment_services
-            (appointment_id, service_id, duration_minutes, price_eur)
-        VALUES ($1, $2, 30, 25.00)
+            (appointment_id, service_id, duration_minutes)
+        VALUES ($1, $2, 30)
         """,
         appointment_id, service_id,
     )
