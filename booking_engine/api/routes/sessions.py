@@ -1,6 +1,6 @@
 """Session-owned writes for the customer agents (marketing-engine).
 
-The customer agents — WhatsApp now, voice after Phase C — run in the
+The customer agents — WhatsApp and voice — run in the
 marketing-engine, and every booking/customer write goes to the webapp. What
 stays here is what this repo owns: the `voice_agent.calls` session row. Three
 writes touch it — linking the identified customer, escalating to the owner,
@@ -12,14 +12,13 @@ context; a session that is not the header shop's is answered exactly like a
 session that does not exist (404 `unknown_session`), so the difference between
 "not yours" and "not there" is never something a caller can probe.
 
-Root-mounted, like `/voice/tools/*`: the marketing-engine reaches this service
+Root-mounted (no `/api/v1`): the marketing-engine reaches this service
 through `VOICE_AGENT_TOOLS_URL`, which by contract carries no `/api/v1`
 (AGENTS.md 2026-09-22).
 
-The escalation and outcome bodies are the `/voice/tools/escalate_to_merchant`
-and `/mark_outcome` handlers, moved unchanged. Those two routes stay until
-Phase C moves the voice agent onto the marketing-engine too, and are deleted
-with the rest of the voice tool layer then.
+The escalation and outcome bodies are the former `/voice/tools/escalate_to_merchant`
+and `/mark_outcome` handlers, moved unchanged; the voice tool layer they came
+from was deleted on 2026-09-28 (AGENTS.md).
 """
 from __future__ import annotations
 

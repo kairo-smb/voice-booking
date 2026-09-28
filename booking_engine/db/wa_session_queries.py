@@ -1,10 +1,11 @@
 """A WhatsApp conversation is a session row, and voice_agent.calls already is
 one: shop, caller_number, customer, outcome, summary, appointment.
 
-Nothing about booking, authz or constraints is rebuilt. caller_number here is
-the customer's WhatsApp number, which Meta has verified — strictly stronger
-evidence than a voice call's caller ID, so authorize_booking_change works
-unchanged.
+Nothing about booking, authz or constraints is rebuilt per channel. caller_number
+here is the customer's WhatsApp number, which Meta has verified — strictly
+stronger evidence than a voice call's caller ID — and it is the number
+marketing-engine's customer agents authorize every write on (AGENTS.md,
+2026-09-28), for both channels.
 
 The table was never telephony-specific. `twilio_call_sid` is UNIQUE but
 nullable and `duration_seconds` is the only voice-only column (migration 24
@@ -185,7 +186,7 @@ async def mark_escalated(*, call_id: UUID, reason: str) -> None:
 
     Written on `voice_agent.calls` rather than a WhatsApp-only flag: 'escalated'
     is already in that column's CHECK and already what the voice agent writes
-    when it gives up (`voice_tools_lifecycle`), so the Inbox has one vocabulary
+    when it gives up (now via `POST /sessions/{call_id}/escalation`), so the Inbox has one vocabulary
     for "a human is needed" across both channels.
 
     `summary` is left alone — the agent may have written one — and the reason

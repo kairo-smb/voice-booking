@@ -13,9 +13,9 @@ Caller (phone) → Twilio (TwiML) → OpenAI Realtime API (native SIP, STT/LLM/T
 ```
 
 **Booking Engine** (`booking_engine/`) — the only deployed service. A FastAPI app that:
-- serves the plain REST API (shops, staff, services, customers, availability, appointments) against the shared `business_app_core` Neon schema — read/write boundaries are documented in `docs/knowledge/database.md`;
-- accepts inbound Twilio calls (`voice_twiml.py`), dials them via `<Dial><Sip>` straight into OpenAI's native SIP gateway, and handles the `realtime.call.incoming` webhook (`voice_openai.py`) to accept the call with the assembled session prompt + tool config;
-- exposes 12 authz'd voice tools (`/voice/tools/*`) that OpenAI calls over MCP, mounted in-process at `/mcp` — tool dispatch never leaves the process (see `booking_engine/mcp_server.py`, `booking_engine/services/mcp_tools.py`);
+- serves the plain REST API (shops, staff, services, customers, appointments) against the shared `business_app_core` Neon schema — read/write boundaries are documented in `docs/knowledge/database.md`;
+- accepts inbound Twilio calls (`voice_twiml.py`), dials them via `<Dial><Sip>` straight into OpenAI's native SIP gateway, and handles the `realtime.call.incoming` webhook (`voice_openai.py`) to accept the call with the salon's persona, plus the agent rules and the MCP tool server of marketing-engine's customer agents (`/customer-agents/voice/*`) — this service no longer executes any agent tool;
+- owns the agent session row (`voice_agent.calls`) and its writes (`/sessions/*`: customer link, escalation, outcome), which the customer agents call back into;
 - persists calls, transcripts, and voice-specific config in its own `voice_agent` schema (DDL in `booking_engine/db/sql/`), while treating `business_app_core` as ground truth it never alters.
 
 Deployed on Fly.io with auto-stop machines ($0 idle). QA and production are separate Fly apps (`fly.toml` / `fly.qa.toml`), both built from the same `booking_engine/Dockerfile.fly`.
@@ -24,8 +24,8 @@ Deployed on Fly.io with auto-stop machines ($0 idle). QA and production are sepa
 
 ```
 booking_engine/
-├── api/routes/       # REST + voice webhook + voice tool endpoints
-├── services/         # safety_layer, prompt_assembler, booking_authz, call_supervisor, ...
+├── api/routes/       # REST + voice webhooks + session endpoints for the customer agents
+├── services/         # prompt_assembler, realtime_session, call_supervisor, messaging/, ...
 ├── db/                # asyncpg pool + queries
 │   └── sql/           # voice_agent schema migrations (03+; 01/02 are a local-only bootstrap pair)
 ├── clients/           # OpenAI Realtime, Twilio numbers, push notifications
@@ -65,15 +65,14 @@ uvicorn booking_engine.api.app:create_app --factory --port 8000
 See `docs/knowledge/operations.md` ("Testing a real call without a phone") for dialing the real OpenAI SIP path with a softphone, or use one of the local harnesses:
 
 ```bash
-# Browser/WebRTC harness (mic + speakers, mints a real session)
+# Browser/WebRTC harness (mic + speakers, mints a real session). Tools and
+# rules come from marketing-engine: point DATABASE_URL and MARKET_INTEL_API_URL
+# at the same environment (QA).
 ./scripts/run_webrtc_harness.sh
-
-# Text-only local simulation, no audio (writes stubbed unless --live)
-python scripts/chat_agent.py <shop_id> <caller> "message one" "message two"
-
-# Data-only: shows what the assembled prompt + tools would return for a caller
-python scripts/simulate_call.py <shop_id> <caller_number>
 ```
+
+(`chat_agent.py` and `simulate_call.py` drove this repo's own `/voice/tools/*`
+and were deleted with them on 2026-09-28.)
 
 ### 5. Run tests
 

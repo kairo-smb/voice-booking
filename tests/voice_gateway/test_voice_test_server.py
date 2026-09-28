@@ -16,10 +16,19 @@ def _config():
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("DEMO_SHOP_ID", str(uuid4()))
+    monkeypatch.setenv("MARKET_INTEL_API_URL", "https://mi-qa.test")
+    monkeypatch.setenv("VOICE_AGENT_TOOL_SECRET", "s3cret")
     return TestClient(server.app)
 
 
-def test_session_returns_client_secret_and_targets_qa_mcp(client):
+@pytest.fixture(autouse=True)
+def rules():
+    with patch("scripts.voice_test_server.fetch_instructions",
+               new=AsyncMock(return_value="REGOLE")) as m:
+        yield m
+
+
+def test_session_targets_the_customer_agents_mcp_with_its_rules(client, rules):
     shop_id = uuid4()
     build_payload_mock = AsyncMock(
         return_value={"type": "realtime", "model": "gpt-realtime"}
@@ -46,8 +55,10 @@ def test_session_returns_client_secret_and_targets_qa_mcp(client):
     assert "call_id" in body
 
     _, kwargs = build_payload_mock.call_args
-    assert kwargs["mcp_server_url"] == "https://kairo-booking-engine-qa.fly.dev/mcp/"
+    assert kwargs["mcp_server_url"] == "https://mi-qa.test/customer-agents/voice/mcp"
     assert kwargs["mcp_token"]
+    assert kwargs["agent_instructions"] == "REGOLE"
+    assert rules.await_args.kwargs["token"] == kwargs["mcp_token"]
 
     create_session_mock.assert_awaited_once()
     _, create_kwargs = create_session_mock.call_args

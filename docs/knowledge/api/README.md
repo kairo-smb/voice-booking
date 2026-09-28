@@ -16,7 +16,7 @@ Most routes return `{"data": ...}` on success (see `voice.py::_wrap`, or a Pydan
 |---|---|---|---|
 | Control-plane bearer | `Authorization: Bearer <CONTROL_PLANE_SECRET>` | the `webapp` Control Plane, and the hourly messaging cron | [Voice Control Plane](voice-control-plane.md), [Number Provisioning](number-provisioning.md) |
 | Control-plane bearer | `Authorization: Bearer <CONTROL_PLANE_SECRET>` | the `webapp` Control Plane | [Voice Control Plane](voice-control-plane.md), and [SMS](sms.md)'s `POST /sms/send` |
-| Tool bearer | `Authorization: Bearer <VOICE_AGENT_TOOL_SECRET>` | OpenAI Realtime (tool calls + session events), and the marketing-engine booking agent (tool calls only) | [Voice Tools](voice-tools.md), [Sessions](sessions.md) (+ `X-Shop-Id`), and the `/mcp` mount |
+| Tool bearer | `Authorization: Bearer <VOICE_AGENT_TOOL_SECRET>` | marketing-engine's customer agents (session writes), and the session-event webhooks | [Sessions](sessions.md) (+ `X-Shop-Id`), `/voice/events/*` ([Voice Tools](voice-tools.md#session-lifecycle-webhooks-still-here)) |
 | Signature-verified webhook | `X-Twilio-Signature`, validated against `TWILIO_AUTH_TOKEN` | Twilio | [Telephony Webhooks](telephony-webhooks.md) and [SMS](sms.md)'s two webhooks (one shared verifier, `services/twilio_signature.py` — no-op if `TWILIO_AUTH_TOKEN` unset) |
 | Signature-verified webhook, **Meta** | `X-Hub-Signature-256`, HMAC-SHA256 of the raw body with `META_APP_SECRET` | Meta, for every salon at once | [WhatsApp](whatsapp.md)'s single `POST /whatsapp/webhook` (`services/meta_signature.py`). One app secret covers all tenants; the shop is identified by `entry[].id`, the WABA id. Verifies the bytes as received — re-serialising the parsed JSON breaks the digest |
 | **None** | — | anyone who can reach the route | [Business API](business.md) (`shops`/`customers`/`services`/`availability`/`appointments`); `voice_openai.py`'s `/voice/openai/incoming` also has no *enforced* auth today — see [Telephony Webhooks](telephony-webhooks.md) |
@@ -27,7 +27,7 @@ Auth dependencies live in `booking_engine/api/deps.py` (`require_control_plane_t
 
 - **[Business API](business.md)** — plain CRUD REST: shops, staff, services, customers, availability, appointments.
 - **[Telephony Webhooks](telephony-webhooks.md)** — the two inbound-call entrypoints (Twilio TwiML, OpenAI SIP accept).
-- **[Voice Tools](voice-tools.md)** — the 12 OpenAI-callable tools, mounted via `/mcp` and dispatched in-process.
+- **[Voice Tools](voice-tools.md)** — where the voice agent's tools went (marketing-engine's customer agents, since 2026-09-28) and what the accept path still does here.
 - **[Sessions](sessions.md)** — session-owned writes (customer link, escalation, outcome) for the marketing-engine customer agents.
 - **[Voice Control Plane](voice-control-plane.md)** — config, balance, heartbeat, telephony provisioning, calls/analytics — everything the webapp calls.
 - **[Number Provisioning](number-provisioning.md)** — self-service Estonian number request (per-salon Twilio regulatory bundle) and the hourly cron that polls/purchases/health-checks it.

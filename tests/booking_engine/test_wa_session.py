@@ -1,9 +1,8 @@
 """A WhatsApp conversation is a session row on voice_agent.calls.
 
 The point of these tests is what they *don't* cover: there is no booking logic
-here, no authz, no constraints. Opening a session mints the same call token the
-voice path mints, and the twelve existing tools answer it unchanged — the last
-test proves that end of it by driving `execute_tool` for real.
+here, no authz, no constraints: those are marketing-engine's customer agents,
+keyed on the session row these tests open (AGENTS.md, 2026-09-28).
 
 The two statements `open_session` issues are exercised against a fake that
 applies their predicate, and against a real Postgres separately (the scratch-DB
@@ -12,14 +11,11 @@ run in the task report) — a fake cannot tell us whether `$3::interval` binds.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 
-from booking_engine.api.app import create_app
 from booking_engine.db import wa_session_queries as ws
-from booking_engine.services.call_token import mint_call_token
 from booking_engine.services.messaging import wa_routing
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
@@ -196,30 +192,6 @@ async def test_two_shops_with_the_same_number_get_separate_sessions(db):
     # agent a token scoped to shop A.
     assert a != b
     assert len(db.rows) == 2
-
-
-# --- the whole point ------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_the_minted_token_authorises_the_booking_tools(db, monkeypatch):
-    """Nothing about booking is rebuilt: the existing tool layer answers."""
-    monkeypatch.setenv("VOICE_AGENT_TOOL_SECRET", "tool-secret")
-    from booking_engine.services.mcp_tools import execute_tool
-
-    call_id = await ws.open_session(shop_id=SHOP, phone=PHONE, customer_id=None)
-    token = mint_call_token(shop_id=SHOP, call_id=call_id, secret="tool-secret")
-
-    rows = [{"id": uuid4(), "name": "Taglio", "duration_min": 30,
-             "price_cents": 2500}]
-    with patch("booking_engine.api.routes.voice_tools_catalog.list_services",
-               new=AsyncMock(return_value=rows)):
-        resp = await execute_tool(
-            "get_services", {}, token=token, secret="tool-secret",
-            app=create_app(),
-        )
-
-    assert resp["ok"] is True
-    assert resp["data"][0]["name"] == "Taglio"
 
 
 def test_open_session_returns_a_uuid(db):

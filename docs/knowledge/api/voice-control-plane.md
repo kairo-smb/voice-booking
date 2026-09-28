@@ -23,7 +23,7 @@ Endpoints the `webapp` Control Plane calls to manage voice config, telephony num
 | `GET` | `/api/v1/shops/{shop_id}/voice/calls/{call_id}` | `voice.py` | full call detail: summary + transcript + events |
 | `PATCH` | `/api/v1/shops/{shop_id}/voice/calls/{call_id}/link-customer` | `voice.py` | manually link an unmatched call to a customer |
 | `GET` | `/api/v1/shops/{shop_id}/voice/analytics` | `voice.py` | volume/outcome/demand aggregates |
-| `GET` | `/api/v1/voice/memos/{shop_id}` | `voice_memos.py` | list callback memos (from `escalate_to_merchant`) |
+| `GET` | `/api/v1/voice/memos/{shop_id}` | `voice_memos.py` | list callback memos (from the agents' `escalate_to_owner`) |
 | `GET` | `/api/v1/voice/memos/{shop_id}/count` | `voice_memos.py` | unread count, for an Action Center badge |
 | `PATCH` | `/api/v1/voice/memos/{memo_id}` | `voice_memos.py` | mark a memo read/actioned |
 

@@ -1,13 +1,13 @@
 # Sessions
 
 Session-owned writes for the **customer agents** — the marketing-engine's common
-layer (`src/lib/customer-agents/`), which runs the WhatsApp booking agent now and
-the voice agent after Phase C. The agents' booking and customer writes go to the
+layer (`src/lib/customer-agents/`), which runs the WhatsApp booking agent and the
+voice agent. The agents' booking and customer writes go to the
 webapp's `/api/v1/hair-salon/agent/*` routes; what stays here is the one row this
 repo owns, `voice_agent.calls` — the session.
 
 Route file: `booking_engine/api/routes/sessions.py`. Mounted at the **root**
-(no `/api/v1`), like `/voice/tools/*`: the caller reaches it through
+(no `/api/v1`): the caller reaches it through
 `VOICE_AGENT_TOOLS_URL`, which by contract carries no prefix.
 
 > **Maintenance rule:** an endpoint added/removed/changed updates this file in the same change. See [../README](../README.md#maintenance-rule).
@@ -37,7 +37,6 @@ from a missing route.
 — the `calls.outcome` CHECK values plus `info_only`, the agents' name for
 `info`, stored as `info`. Anything else is a FastAPI 422.
 
-The escalation and outcome bodies are the `/voice/tools/escalate_to_merchant` and
-`/voice/tools/mark_outcome` handlers ([Voice Tools](voice-tools.md)), moved
-unchanged; those two stay until the voice agent moves onto the common layer
-(Phase C).
+The escalation and outcome bodies are the former `/voice/tools/escalate_to_merchant` and
+`/voice/tools/mark_outcome` handlers, moved unchanged; the voice tool layer was
+deleted on 2026-09-28 ([Voice Tools](voice-tools.md)).

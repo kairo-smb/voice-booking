@@ -88,11 +88,12 @@ class Settings(BaseSettings):
     openai_realtime_model: str = "gpt-realtime"
     # OpenAI webhook signing secret (verify realtime.call.incoming when set)
     openai_webhook_secret: str = ""
-    # Bearer for this repo's agent-facing surface — `/voice/tools/*`,
-    # `/voice/events/*` and the `/mcp` mount (`require_tool_token`). Two callers
-    # present it: OpenAI's Realtime, which sends it back on every tool call, and
-    # the marketing-engine booking agent, which reaches the same routes over
-    # HTTP. Named for neither — it was `OPENAI_TOOL_SECRET` until 2026-09-22,
+    # Bearer for this repo's agent-facing surface — `/sessions/*` and
+    # `/voice/events/*` (`require_tool_token`), presented by marketing-engine's
+    # customer agents. It also signs the per-call token (`call_token.py`) that
+    # OpenAI Realtime presents to marketing-engine's voice MCP, which verifies it
+    # with the same value (the voice tools moved there on 2026-09-28). Named for
+    # neither caller — it was `OPENAI_TOOL_SECRET` until 2026-09-22,
     # which read as "a credential for authenticating *to* OpenAI" when it is
     # the opposite: a token OpenAI and the engine use to call *us*. Deliberately
     # not `CONTROL_PLANE_SECRET` (the webapp's `/api/v1` token): that one can buy
@@ -101,9 +102,6 @@ class Settings(BaseSettings):
     # Token meter
     voice_kairo_tokens_per_second: int = 18
     voice_min_session_reserve_tokens: int = 1500
-    # Within this many hours of the slot, the agent can't self-serve a
-    # reschedule/cancel — it must escalate to the salon.
-    voice_cancellation_lead_time_hours: int = 2
     # Spawn a per-call server-side Realtime control WebSocket (greeting + voice
     # tool results). Off by default; enable per environment for live SIP calls.
     enable_call_supervisor: bool = False

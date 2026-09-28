@@ -13,7 +13,6 @@ from booking_engine.db.queries import (
     SlotConflictError,
     cancel_appointment,
     create_appointment,
-    create_appointment_chain,
     create_customer,
     find_customers_by_name_and_phone,
     find_customers_by_phone,
@@ -27,9 +26,7 @@ from booking_engine.db.queries import (
 
 SHOP = UUID("a0000000-0000-0000-0000-000000000001")
 STAFF = UUID("11111111-0000-0000-0000-000000000001")
-STAFF2 = UUID("11111111-0000-0000-0000-000000000002")
 SVC = UUID("aaaa0001-0000-0000-0000-000000000001")
-SVC2 = UUID("aaaa0001-0000-0000-0000-000000000002")
 CUSTOMER = UUID("cccc0001-0000-0000-0000-000000000001")
 APPT = UUID("dddddddd-0000-0000-0000-000000000001")
 _ROME = ZoneInfo("Europe/Rome")
@@ -180,57 +177,3 @@ class TestListAppointments:
         result = await list_appointments(SHOP)
         assert len(result) == 1
         assert "services" in result[0]
-
-
-class TestCreateAppointmentChain:
-    @patch("booking_engine.db.queries.execute_void", new_callable=AsyncMock)
-    @patch("booking_engine.db.queries.execute_one", new_callable=AsyncMock)
-    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
-    async def test_success(self, mock_exec, mock_one, mock_void):
-        leg1_start = datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
-        leg2_start = datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
-        mock_exec.side_effect = [
-            [{"id": SVC, "duration_minutes": 30, "price_eur": Decimal("35.00")},
-             {"id": SVC2, "duration_minutes": 30, "price_eur": Decimal("20.00")}],  # durations
-            [],  # leg1 overlap check
-            [],  # leg2 overlap check
-        ]
-        mock_one.return_value = {"id": APPT, "status": "scheduled"}
-        legs = [
-            {"service_id": SVC, "staff_id": STAFF, "slot_start": leg1_start},
-            {"service_id": SVC2, "staff_id": STAFF2, "slot_start": leg2_start},
-        ]
-        result = await create_appointment_chain(SHOP, CUSTOMER, legs)
-        assert result["status"] == "scheduled"
-        assert mock_void.await_count == 3  # 1 appointment insert + 2 appointment_services inserts
-
-    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
-    async def test_conflict_on_second_leg(self, mock_exec):
-        leg1_start = datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
-        leg2_start = datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
-        mock_exec.side_effect = [
-            [{"id": SVC, "duration_minutes": 30, "price_eur": Decimal("35.00")},
-             {"id": SVC2, "duration_minutes": 30, "price_eur": Decimal("20.00")}],
-            [],  # leg1 overlap check: clear
-            [{"id": "existing"}],  # leg2 overlap check: conflict
-        ]
-        legs = [
-            {"service_id": SVC, "staff_id": STAFF, "slot_start": leg1_start},
-            {"service_id": SVC2, "staff_id": STAFF2, "slot_start": leg2_start},
-        ]
-        with pytest.raises(SlotConflictError):
-            await create_appointment_chain(SHOP, CUSTOMER, legs)
-
-    @patch("booking_engine.db.queries.execute", new_callable=AsyncMock)
-    async def test_missing_service_raises_invalid_service(self, mock_exec):
-        leg1_start = datetime(2026, 5, 5, 9, 0, tzinfo=_ROME)
-        leg2_start = datetime(2026, 5, 5, 9, 30, tzinfo=_ROME)
-        mock_exec.side_effect = [
-            [{"id": SVC, "duration_minutes": 30, "price_eur": Decimal("35.00")}],  # only 1 of 2 services found
-        ]
-        legs = [
-            {"service_id": SVC, "staff_id": STAFF, "slot_start": leg1_start},
-            {"service_id": SVC2, "staff_id": STAFF2, "slot_start": leg2_start},
-        ]
-        with pytest.raises(RuntimeError, match="invalid_service"):
-            await create_appointment_chain(SHOP, CUSTOMER, legs)
