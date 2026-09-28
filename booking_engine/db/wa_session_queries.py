@@ -13,6 +13,7 @@ and the twelve existing tools answer it exactly as they answer a phone call.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from booking_engine.db.connection import execute, execute_one, execute_void
@@ -52,15 +53,24 @@ SELECT id
 _OPEN = """
 INSERT INTO voice_agent.calls
     (shop_id, channel, caller_number, customer_id, customer_match, started_at)
-VALUES ($1, 'whatsapp', $2, $3, $4, now())
+VALUES ($1, 'whatsapp', $2, $3, $4, coalesce($5::timestamptz, now()))
 RETURNING id
 """
 
 
 async def open_session(
     *, shop_id: UUID, phone: str, customer_id: UUID | None,
+    started_at: datetime | None = None,
 ) -> UUID:
     """The call id for this message — the conversation's, or a new one.
+
+    `started_at` is when the customer wrote, not when we got round to it. The
+    agent opens the session only after classification and the debounce —
+    seconds later — and the transcript is read from `started_at` on, so
+    stamping `now()` cut the very message that opened the conversation out of
+    it: the model saw an empty thread and every first message went unanswered
+    (found live in QA, 2026-09-28). Absent means now(), for the owner's
+    takeover, where there is no triggering message.
 
     `shop_id` is part of the lookup because a phone number is not globally
     unique across tenants: one person can be a customer of two salons, and a
@@ -82,7 +92,7 @@ async def open_session(
     # existing / created / unmatched / ambiguous. Opening a session never
     # creates a customer, so 'created' is not ours to write here.
     match = "existing" if customer_id else "unmatched"
-    row = await execute_one(_OPEN, shop_id, phone, customer_id, match)
+    row = await execute_one(_OPEN, shop_id, phone, customer_id, match, started_at)
     return row["id"]
 
 

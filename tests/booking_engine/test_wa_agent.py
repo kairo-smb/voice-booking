@@ -568,6 +568,15 @@ async def test_the_session_id_is_the_authorization_basis_for_the_turn(wired):
     assert wired.open_session.last["shop_id"] == SHOP
 
 
+async def test_the_session_starts_when_the_customer_wrote_not_when_we_answered(wired):
+    """The transcript is read from started_at on. Stamping the session at the
+    moment the agent woke (after triage + debounce) cut the opening message out
+    and the model answered an empty thread with silence — found live in QA."""
+    r = row(received_at=NOW - timedelta(seconds=12))
+    await run(wired, r)
+    assert wired.open_session.last["started_at"] == r["received_at"]
+
+
 async def test_prices_reach_the_agent_as_cents(wired):
     await run(wired)
     assert wired.turn.last["services"][0]["price_cents"] == 2500

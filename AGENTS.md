@@ -49,11 +49,22 @@ each hour (`get_messaging_limit`, `list_online_senders`). `complete()` still
 writes the number's (now absent) field — it is frozen — and the first sweep
 corrects it.
 
+**Bug 3 — the WhatsApp agent never answered a first message.** The session
+row was stamped `now()` when the agent woke — after triage and the 2s debounce,
+~12s after the customer wrote — and the transcript is read from `started_at`
+on, so the message that opened the conversation was excluded. The engine got
+an empty thread, returned empty text, and the agent stood down silently (info
+log only, invisible at QA's log level). Every unit test passed because none
+compared the two clocks. `open_session` now takes `started_at` (the inbound
+row's `received_at`; absent still means now(), for the owner's takeover).
+Known residue: when the routing menu fires first, the session opens at the
+*tap*, so the typed message before it is still outside the transcript.
+
 **Also:** three sweep tests only passed thanks to a pool left initialised by an
 earlier test (`list_senders_needing_sync` was unstubbed); `_patch_onboarding`
 now stubs it. **Verification:** `python -m pytest tests/ --ignore=tests/live_db
---ignore=tests/live_twilio -q` — **847 passed, 25 skipped, 0 failed** (up from
-845/25: the upload-contract test and the tier-refresh test).
+--ignore=tests/live_twilio -q` — **849 passed, 25 skipped, 0 failed** (up from
+845/25: upload contract, tier refresh, and two session-start tests).
 
 ## 2026-09-25 — Error tracking: GlitchTip via sentry-sdk
 

@@ -155,6 +155,7 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
     #    basis for every booking tool this turn may call.
     call_id = await wsq.open_session(
         shop_id=shop_id, phone=phone, customer_id=row.get("customer_id"),
+        started_at=row.get("received_at"),
     )
     state = await wsq.session_state(call_id=call_id, phone=phone)
 

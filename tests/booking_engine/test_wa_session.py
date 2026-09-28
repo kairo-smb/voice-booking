@@ -54,10 +54,11 @@ class FakeCalls:
             ]
             hits.sort(key=lambda r: r["started_at"], reverse=True)
             return {"id": hits[0]["id"]} if hits else None
-        shop_id, phone, customer_id, match = args
+        shop_id, phone, customer_id, match, started_at = args
         row = {"id": uuid4(), "shop_id": shop_id, "channel": "whatsapp",
                "caller_number": phone, "customer_id": customer_id,
-               "customer_match": match, "started_at": NOW, "ended_at": None,
+               "customer_match": match, "started_at": started_at or NOW,
+               "ended_at": None,
                "duration_seconds": None}
         self.rows.append(row)
         return {"id": row["id"]}
@@ -84,6 +85,14 @@ def db(monkeypatch):
 
 
 # --- the row --------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_session_can_start_at_the_message_that_opened_it(db):
+    wrote = NOW - timedelta(seconds=12)
+    await ws.open_session(shop_id=SHOP, phone=PHONE, customer_id=None, started_at=wrote)
+    assert db.rows[0]["started_at"] == wrote
+    assert "coalesce($5" in db.inserts[0][0], "absent must still mean now()"
+
 
 @pytest.mark.asyncio
 async def test_opening_a_session_writes_a_whatsapp_call_row(db):
