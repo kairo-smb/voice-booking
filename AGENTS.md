@@ -6,6 +6,148 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-28 — Customer agents on one common layer: one engine, and this repo stops executing tools
+
+**The redesign, across all three repos in one day** (plan
+`docs/superpowers/plans/2026-09-28-customer-agents-common-layer.md`, phases A
+and C). Before it there were three booking agents with three sets of rules:
+this repo's voice tools (`/voice/tools/*`, served over an in-process MCP), the
+WhatsApp agent in marketing-engine calling those same routes over HTTP, and the
+owner-chat agents on marketing-engine's `runTool`. After it there is one.
+
+**The common layer lives in marketing-engine** (`src/lib/customer-agents/`):
+one `CUSTOMER_TOOL_SCHEMAS`, one per-session dispatch run through `runTool`
+(every call lands in `market_intel.agent_call`, `surface` `whatsapp_agent` /
+`voice_agent`), and a per-surface allow-list. The owner called `runTool`
+**fundamental** and it was not open for re-litigation: the allow-list is the
+perimeter, which is why the prompts lost their role-lock / privacy / scope
+prose — those were rules about capabilities the model no longer has. WhatsApp
+is its turn loop (`POST /whatsapp/agent`, request now just
+`{shop_id, call_id, messages, now}`); voice is an MCP endpoint OpenAI Realtime
+calls directly (`/customer-agents/voice/mcp`) plus `/instructions`. The
+session is the authority: shop name, `shops.timezone` and the caller number
+come off our `voice_agent.calls` row; **no schema has a phone, a shop or a call
+id**, so the number every write is authorized on is never something a model
+typed.
+
+**One engine for search *and* writes: the webapp.** `availability_search` wraps
+the webapp's `/availability`; writes go to new engine-authenticated
+`/api/v1/hair-salon/agent/*` routes that call the agenda's own repository
+functions (`createAppointment` with `source: 'whatsapp' | 'voice_agent'`). What
+that fixed, concretely: **this repo's slot search and writes never checked
+`time_off` or shop hours** — an absent stylist or a closed day was bookable —
+and **`modify_booking`'s reschedule checked nothing at all** (no overlap, no
+absence, no hours, no shift). The webapp's write path enforces all four for
+every non-manual source, reschedule included.
+
+**Naming** (reads domain-first, writes verb-first, "appointment" everywhere):
+`lookup_customer`→`customers_identify`, `create_customer_from_call`→`create_customer`,
+`update_customer_from_call`→`update_customer`, `get_services`+`get_staff_for_service`→`services_catalog`,
+`check_availability`→`availability_search`, `create_booking`→`create_appointment`,
+`get_booking`→`appointments_upcoming`, `modify_booking`→`reschedule_appointment`,
+`cancel_booking`→`cancel_appointment`, `escalate_to_merchant`→`escalate_to_owner`,
+`mark_outcome`→`set_conversation_outcome`; owner-chat `reschedule_visit`→`reschedule_appointment`.
+`realtime_session.CUSTOMER_AGENT_TOOLS` is the voice `allowed_tools`, pinned by a
+test — an old name there would silently filter every tool out of a call.
+
+**Writes are deterministic, twice.** (1) `availability_search` issues
+`proposal_id`s (`P1`, `P2`, … unique for the session's life, so a second
+search can never redefine one the customer agreed to); `create_appointment`
+and `reschedule_appointment` take a `proposal_id` and resolve instant, staff
+and services from the session — never a time or staff id from the model
+(`unknown_proposal` otherwise). (2) **The confirmation is composed in code**
+(`confirmation.ts`): on WhatsApp a successful write ends the turn with that
+text and no further model call; on voice the same text rides the tool result
+as `confirmation` and the rules say to read it as is. "Martedì" cannot become
+"mercoledì" in a paraphrase.
+
+**What stays here: the session.** `/sessions/{call_id}/{customer,escalation,outcome}`
+([API → Sessions](docs/knowledge/api/sessions.md)), `require_tool_token` +
+`X-Shop-Id`, a session of another shop answered exactly like a missing one.
+**Sessions record the booked appointment again:** `outcome` takes an optional
+`appointment_id` (same-shop check, 404 `unknown_appointment`) and sets
+`calls.appointment_id` (+ `created_booking_id` and the appointment's
+`voice_call_id` on `booked`). `create_booking` used to do that inside the
+booking; the move dropped it and the cross-repo review caught it.
+
+**The voice call, now.** At accept (`voice_openai.py`) this repo inserts the
+call row, mints the per-call token (`call_token.py`, unchanged — marketing-engine
+verifies the same HMAC), builds the **persona only** (`prompt_assembler.py`:
+caller context, greeting, tone), fetches the rules from
+`/customer-agents/voice/instructions` with that token and appends them, and
+points the session's one `mcp` tool at `{MARKET_INTEL_API_URL}/customer-agents/voice/mcp`.
+A failed rules fetch still accepts the call (persona only, `logger.error` →
+GlitchTip): a call that talks without rules is worth an alert, a call that
+rings out is worse. No `MARKET_INTEL_API_URL`/`VOICE_AGENT_TOOL_SECRET` accepts
+it with no tools, also an error. The call supervisor is unchanged — it nudges
+after every `mcp_call`, and the names in its telemetry are now marketing-engine's.
+
+**Deleted from this repo** (every symbol grepped first): the old slot engine
+(`find_availability`, `get_available_slots`/`_chains` and helpers,
+`api/routes/availability.py`, `check_availability`); the four
+`api/routes/voice_tools_*.py`; `mcp_server.py`, `services/mcp_tools.py`, the
+`/mcp` mount and its lifespan in `asgi.py`; `services/safety_layer.py`
+(`SAFETY_PROMPT`, `_TOOL_SCHEMAS`, `DEFAULT_TOOL_ALLOWLIST`, `ATTESA_TOOLS`);
+`services/booking_authz.py` and `services/booking_constraints.py` (no caller
+outside the deleted routes); the tool writes in `voice_tool_queries.py`;
+`queries.create_appointment_chain`; the unused tool models;
+`VOICE_CANCELLATION_LEAD_TIME_HOURS`; `scripts/chat_agent.py` and
+`simulate_call.py` (they only drove `/voice/tools`); the `mcp` dependency from
+both requirements files. **Kept, and why:** `queries.create/cancel/reschedule_appointment`
+(`api/routes/appointments.py` still uses them); `find_customers_by_phone`,
+`get_customer_shop_id`, `list_services` (identity resolver, `/sessions`,
+`voice.py`, `voice_memos.py`); `call_token` and `require_tool_token` (accept
+path, `/sessions`, `/voice/events`); the WebRTC harness, repointed at
+marketing-engine.
+
+**Two webapp fixes found on the way, both worth knowing on their own.**
+(1) **Security (webapp `618f306`):** five `[id]` routes resolved the caller's
+shop with `getShopId` and then discarded it — any signed-in account could read,
+edit, move or delete another salon's appointments and service blocks, read its
+reschedule log, and deactivate its staff. Fixed with `assertOwned` (404 either
+way, so the answer does not confirm an id exists elsewhere). (2) **Availability
+(webapp `0c60767`):** the time window and nearness were applied *after* the
+20-candidate cap, so on a quiet day the cap kept only mornings and a 17:00
+request found nothing on an empty agenda. The window now filters first.
+
+**Known limits, deliberately left:**
+- **Voice proposals are per process.** marketing-engine keeps a call's
+  proposals in a module-level map (2h sliding TTL); with more than one machine a
+  proposal made on one is `unknown_proposal` on another — the model searches
+  again, never books wrong. Upgrade path: a `voice_agent.call_proposals` table.
+- **WhatsApp proposal ids last one turn:** the thread carries messages, not
+  earlier tool results, so a `P1` from a previous message is refused and the
+  agent re-searches.
+- **The 2-hour self-service lead time is gone.** The old voice tools refused a
+  reschedule/cancel within `VOICE_CANCELLATION_LEAD_TIME_HOURS` of the slot; the
+  webapp `/agent/*` routes refuse only the past (`slot_in_past`,
+  `appointment_in_past`). If the salon wants a lead time back it is a webapp rule.
+- **Hidden caller ID on voice** has no phone to authorize on; the persona now
+  says so and sends booking requests to `escalate_to_owner`. The default overflow
+  greeting still says "sono l'assistente di …" — shop-authored text, left as is
+  beside the no-self-introduction rule of the entry below.
+- **Phase B (shop timezone everywhere else, ~150 `'Europe/Rome'` sites)** is
+  pending; this change only fixed the paths it touched (`sent_today`, the
+  agents, `/availability`).
+- **Routing-menu tap residue:** when the menu fires first, the typed message
+  before the tap is still outside the transcript (entry below).
+- **Not verified live.** No voice call has run on the new path. Done means one
+  QA SIP call showing `tools/list` and one `availability_search` in
+  `market_intel.agent_call` with `surface='voice_agent'`.
+
+**Verification.** voice-booking `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **791 passed, 25 skipped** (832/25 before
+C2–C3: C2 +12, C3 −62 deleted tool/MCP/authz/constraint/chain tests, the
+sessions `appointment_id` change +9); the same suite on a scratch venv built
+from `booking_engine/requirements.txt` without `mcp`: 782/25 at C3, green;
+`pytest --collect-only tests/live_db` collects 43 (the three
+`test_tool_dispatch_*` files went with the tool layer). The new
+`attach_appointment_to_call` SQL was executed against the Neon DB in `.env` in
+a rolled-back transaction (types bind; a real call+appointment pair got both
+columns set). marketing-engine **1285 passed, 3 skipped**. webapp
+`npm run verify` **1874+ tests**, exit 0. No push; the coordinator pushes all
+three repos together.
+
 ## 2026-09-28 — First real Graph traffic: Meta's test number in QA, and two bugs it found at once
 
 **No customer WABA exists, so QA's "Kairo Demo Parrucchiere" now sends from
