@@ -18,6 +18,8 @@ The 12 tools OpenAI calls during a live session, over MCP (`/mcp`, dispatched in
 | `lookup_customer` | `POST /voice/tools/lookup_customer` | `voice_tools_identity.py` |
 | `create_customer_from_call` | `POST /voice/tools/create_customer_from_call` | `voice_tools_identity.py` |
 | `update_customer_from_call` | `POST /voice/tools/update_customer_from_call` | `voice_tools_identity.py` |
+
+`check_availability` returns the `max_results` slots **closest to `preferred_when`** (a naive value is salon time, Europe/Rome), in time order — not the first slots of the day. Without `preferred_when` it returns the earliest.
 | `mark_outcome` | `POST /voice/tools/mark_outcome` | `voice_tools_lifecycle.py` |
 | `escalate_to_merchant` | `POST /voice/tools/escalate_to_merchant` | `voice_tools_lifecycle.py` |
 

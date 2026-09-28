@@ -60,11 +60,52 @@ row's `received_at`; absent still means now(), for the owner's takeover).
 Known residue: when the routing menu fires first, the session opens at the
 *tap*, so the typed message before it is still outside the transcript.
 
+**Bug 4 — the agent offered only mornings, on an empty day.** `find_availability`
+used `preferred_when` only to pick the start *date*, then returned the first
+`max_results` (5) slots in time order — always the first morning. "Giovedì
+verso le 15" with Marco free all afternoon came back "solo 9:00–11:30". Now the
+wrapper ranks candidates by distance from `preferred_when` (naive = Europe/Rome)
+and returns the nearest, in time order; the chain search is asked for 200
+candidates to rank from. The ground-truth searches in `queries.py` are
+unchanged. Same conversation, the agent also said "giovedì 8" on Monday 28/09:
+the engine prompt carried a bare UTC ISO stamp and left weekday arithmetic to a
+flash model. The marketing-engine now spells out today (Italian weekday, Rome
+time) and the next 14 dates in the prompt (`dateContext`).
+
+**Decision (owner, 2026-09-28): the agent no longer introduces itself as an AI.**
+The marketing-engine prepended "Sono l'assistente digitale di {shop}." to the
+first reply ("not optional", design §9); the owner called it a banner and had
+it removed, and the prompt now tells the model not to present itself as an
+assistant. **Recorded as a knowingly accepted risk:** EU AI Act art. 50(1)
+(applicable since 2026-08-02) requires telling people they are interacting with
+an AI system unless obvious from context; this was raised before the change.
+The one guard kept: asked directly whether it is a person, the model answers
+truthfully.
+
+**Webapp: the open thread no longer looks frozen.** It polled every 15s while
+the agent answers in ~10s, so a reply appeared up to 15s late and read as
+"stuck until reload". Now 3s while a thread is open (15s otherwise), paused
+while the browser tab is hidden (reading a thread marks it read upstream), a
+failed poll no longer blanks the conversation, and a "l'assistente sta
+scrivendo…" bubble shows while the agent owes an answer (`agentIsTyping`, 90s
+window). Not streamed token-by-token: a WhatsApp reply arrives whole, and the
+app has no realtime transport — the bubble covers the gap instead.
+
+**Open, noted by the owner: an inbound message is never matched to a customer.**
+`record_inbound` writes no `customer_id` and the thread shows the bare number,
+so neither the Inbox nor the agent knows who is writing (the agent's
+`customer_match` is always `unmatched`). Must match by normalised phone against
+`business_app_core.customers` — and decide what to do when a number maps to
+several customers (households, `phone_shared_with`; in QA, every Demo customer
+shares one of two numbers, so ambiguity is the norm there).
+
 **Also:** three sweep tests only passed thanks to a pool left initialised by an
 earlier test (`list_senders_needing_sync` was unstubbed); `_patch_onboarding`
 now stubs it. **Verification:** `python -m pytest tests/ --ignore=tests/live_db
---ignore=tests/live_twilio -q` — **849 passed, 25 skipped, 0 failed** (up from
-845/25: upload contract, tier refresh, and two session-start tests).
+--ignore=tests/live_twilio -q` — **851 passed, 25 skipped, 0 failed** (up from
+845/25: upload contract, tier refresh, two session-start, two availability
+tests). marketing-engine **1197 passed, 3 skipped**, `tsc --noEmit` clean.
+webapp `npm run verify` exit 0, **1827 tests**.
 
 ## 2026-09-25 — Error tracking: GlitchTip via sentry-sdk
 

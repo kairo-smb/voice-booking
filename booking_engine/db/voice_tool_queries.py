@@ -1,11 +1,15 @@
 """DB access for voice agent tools — customers, services, appointments."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import asyncpg
 
 from booking_engine.db import connection
+
+_ROME = ZoneInfo("Europe/Rome")
 
 
 async def find_customers_by_phone(*, shop_id: UUID, phone_digits: str) -> list[dict]:
@@ -152,6 +156,26 @@ async def list_staff_for_service(*, shop_id: UUID, service_id: UUID) -> list[dic
     )
 
 
+# ponytail: rank from a wide candidate pool rather than teach the ground-truth
+# searches about proximity. 200 covers two weeks of a small salon; a shop with
+# more slots than that loses the far tail, never the requested hour.
+_CANDIDATES = 200
+
+
+def _closest(items: list[dict], want, n: int) -> list[dict]:
+    """The `n` slots nearest `want`, returned in time order.
+
+    Both searches answer in pure time order, so the old `[:max_results]` handed
+    the agent the first five slots of the first morning whatever the customer
+    asked — "verso le 15" on an empty Thursday came back "only 9:00–11:30"
+    (found live in QA, 2026-09-28).
+    """
+    if want is None:
+        return items[:n]
+    near = sorted(items, key=lambda c: abs(c["slot_start"] - want))[:n]
+    return sorted(near, key=lambda c: c["slot_start"])
+
+
 async def find_availability(
     *, shop_id: UUID, services: list[dict],
     preferred_when: datetime | None,
@@ -161,12 +185,17 @@ async def find_availability(
     ground-truth booking layer. A single-service request reuses the
     existing single-staff slot search unchanged; multiple services go
     through the chain search (different staff per leg, ordered, gapped).
-    """
-    from datetime import datetime, timedelta
 
+    `preferred_when` is the hour asked for, not just the day to start from:
+    results are the slots closest to it. A naive value is salon time, which
+    is what a customer means by "alle 15".
+    """
     from booking_engine.db import queries
 
-    start_date = (preferred_when or datetime.utcnow()).date()
+    want = preferred_when
+    if want is not None and want.tzinfo is None:
+        want = want.replace(tzinfo=_ROME)
+    start_date = (want or datetime.now(_ROME)).astimezone(_ROME).date()
     end_date = start_date + timedelta(days=14)
 
     if len(services) == 1:
@@ -184,13 +213,15 @@ async def find_availability(
                     "slot_start": s["slot_start"], "slot_end": s["slot_end"],
                 }],
             }
-            for s in slots[:max_results]
+            for s in _closest(slots, want, max_results)
         ]
 
-    return await queries.get_available_slot_chains(
+    chains = await queries.get_available_slot_chains(
         shop_id=shop_id, services=services,
-        start_date=start_date, end_date=end_date, max_results=max_results,
+        start_date=start_date, end_date=end_date,
+        max_results=max_results if want is None else _CANDIDATES,
     )
+    return _closest(chains, want, max_results)
 
 
 async def insert_booking_locked(
