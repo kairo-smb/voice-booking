@@ -37,7 +37,8 @@ from booking_engine.services.messaging.whatsapp_send import enqueue_campaign
 from booking_engine.services.scheduler import locked_send_due
 from booking_engine.services.messaging.whatsapp_onboarding import template_name
 from booking_engine.services.messaging.whatsapp_templates import (
-    CATALOGUE, DEFAULT_LANGUAGE, RECEIPT_TEMPLATE_NAME, resolve_language,
+    CATALOGUE, DEFAULT_LANGUAGE, DOCUMENT_TEMPLATES, RECEIPT_TEMPLATE_NAME,
+    resolve_language,
 )
 from booking_engine.services.meta_signature import meta_signature_valid
 
@@ -90,6 +91,21 @@ def _template_descriptor(key: str, language: str = DEFAULT_LANGUAGE) -> dict:
         # with realistic values (the automations tile shows the owner exactly
         # what the customer will read) without duplicating the catalogue.
         "sample": tpl.sample,
+    }
+
+
+def _document_descriptor(key: str) -> dict:
+    """The receipt's row in `templates`: status only, nothing to compose.
+
+    Document templates have no variables and no slot, so the descriptor is the
+    identity plus the fixed body. Listed so the owner sees Meta's verdict on
+    it next to the catalogue; `category` UTILITY and no `filled_by` keep it out
+    of every picker that filters on those.
+    """
+    doc = DOCUMENT_TEMPLATES[key]
+    return {
+        "template_key": key, "name": doc.name, "body": doc.body,
+        "category": doc.category, "language": doc.language,
     }
 
 
@@ -318,6 +334,9 @@ async def status(
             "templates": [
                 {**_template_descriptor(key, language), "status": "missing"}
                 for key in CATALOGUE
+            ] + [
+                {**_document_descriptor(key), "status": "missing"}
+                for key in DOCUMENT_TEMPLATES
             ],
             "sent_this_month": 0,
             "pricing": price_list(),
@@ -327,6 +346,10 @@ async def status(
         {**_template_descriptor(key, language),
          "status": (await wq.get_template(shop_id, key) or {}).get("status", "missing")}
         for key in CATALOGUE
+    ] + [
+        {**_document_descriptor(key),
+         "status": (await wq.get_template(shop_id, key) or {}).get("status", "missing")}
+        for key in DOCUMENT_TEMPLATES
     ]
     return {"data": {
         "status": sender["status"],

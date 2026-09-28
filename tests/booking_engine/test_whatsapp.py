@@ -2615,3 +2615,39 @@ async def test_drift_is_deferred_not_dropped_once_meta_has_ruled(monkeypatch):
 
     assert result["edited"] == len(wt.CATALOGUE)
 
+
+
+
+async def test_status_lists_the_receipt_with_its_meta_verdict(monkeypatch):
+    """The receipt is pushed to Meta and its verdict tracked like the catalogue's,
+    so the owner must see it in the same list — before this, /status iterated
+    CATALOGUE only and a rejected receipt was invisible. It must also stay out
+    of the campaign picker, which selects on MARKETING + filled_by."""
+    from collections import defaultdict
+    from unittest.mock import MagicMock
+    from booking_engine.api.routes import whatsapp as wa_routes
+
+    async def _sender(shop_id):
+        return defaultdict(lambda: None, status="online")
+
+    async def _template(shop_id, key):
+        return {"status": "rejected"} if key == wt.RECEIPT_TEMPLATE_KEY else None
+
+    async def _zero(*a, **kw):
+        return 0
+
+    monkeypatch.setattr(wa_routes.wq, "get_sender", _sender)
+    monkeypatch.setattr(wa_routes.wq, "get_template", _template)
+    monkeypatch.setattr(wa_routes.wq, "get_shop_language", _zero)
+    for fn in ("sent_today", "sent_last_24h", "sent_this_month"):
+        monkeypatch.setattr(wa_routes.wq, fn, _zero)
+    monkeypatch.setattr(wa_routes.onboarding, "is_abandoned", lambda s: False)
+    monkeypatch.setattr(wa_routes.meta_limits, "effective_daily_cap", lambda s: 0)
+    monkeypatch.setattr(wa_routes.meta_limits, "tier_daily_conversations", lambda t: 0)
+
+    data = (await wa_routes.status(SHOP, settings=MagicMock(), _auth=True))["data"]
+
+    receipt = next(t for t in data["templates"] if t["template_key"] == wt.RECEIPT_TEMPLATE_KEY)
+    assert receipt["status"] == "rejected"
+    assert receipt["category"] == "UTILITY"
+    assert receipt.get("filled_by") is None
