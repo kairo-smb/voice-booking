@@ -10,6 +10,7 @@
   - [Business API](api/business.md)
   - [Telephony Webhooks](api/telephony-webhooks.md)
   - [Voice Tools](api/voice-tools.md)
+  - [Sessions](api/sessions.md)
   - [Voice Control Plane](api/voice-control-plane.md)
   - [Number Provisioning](api/number-provisioning.md)
   - [SMS](api/sms.md)
