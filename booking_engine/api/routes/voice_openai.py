@@ -2,7 +2,8 @@
 
 OpenAI fires `realtime.call.incoming` when a SIP call reaches our project. We
 identify the shop (from the X-Shop-Id SIP header we set), assemble the
-session (prompt + the 12 authz'd tools), and accept the call.
+session and accept the call. The persona is ours; the agent rules and the tools
+are marketing-engine's customer agents (AGENTS.md, 2026-09-28).
 
 ponytail: webhook signature verified only when OPENAI_WEBHOOK_SECRET is set.
 Wire mandatory verification once the signing secret is provisioned.
@@ -15,6 +16,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 
+from booking_engine.clients.customer_agents_voice import fetch_instructions, mcp_url
 from booking_engine.clients.openai_realtime import accept_sip_call
 from booking_engine.config import Settings, get_settings
 from booking_engine.db.voice_calls_queries import insert_call
@@ -70,21 +72,32 @@ async def incoming(
         shop_id=shop_id, caller_phone=caller, matched_customer_id=matched_id,
     )
 
-    # Remote MCP: OpenAI calls our tool server directly with a per-call bearer
-    # carrying our internal call/shop ids (distinct from OpenAI's SIP call_id).
-    # Trailing slash is required: /mcp 307-redirects to /mcp/, and OpenAI's
-    # Realtime MCP client does not re-POST the body on the redirect (verified in
-    # fly logs: bare /mcp calls 307 and never complete). Point straight at /mcp/.
-    mcp_url = f"{settings.public_base_url}/mcp/" if settings.public_base_url else None
-    mcp_token = (
-        mint_call_token(shop_id=shop_id, call_id=db_call_id,
-                        secret=settings.voice_agent_tool_secret)
-        if mcp_url else None
-    )
+    # The tools and the rules are marketing-engine's customer agents. OpenAI
+    # calls that MCP server directly, with a per-call bearer naming *our* call
+    # row (not OpenAI's SIP call_id): that row's caller number is what every
+    # write is authorized on. The same token authorizes the rules fetch.
+    server_url = mcp_url(settings)
+    token = None
+    instructions = None
+    if server_url and settings.voice_agent_tool_secret:
+        token = mint_call_token(shop_id=shop_id, call_id=db_call_id,
+                                secret=settings.voice_agent_tool_secret)
+        # None on any failure (already logged as an error): the call is still
+        # answered, with the persona only — better than one that rings out.
+        instructions = await fetch_instructions(
+            shop_id=shop_id, call_id=db_call_id, token=token, settings=settings,
+        )
+    else:
+        server_url = None
+        logger.error(
+            "openai.incoming: MARKET_INTEL_API_URL/VOICE_AGENT_TOOL_SECRET not "
+            "configured; accepting call for shop %s with no tools", shop_id,
+        )
     payload = await build_accept_payload(
         config=config, policy=policy, resolution=resolution,
         model=settings.openai_realtime_model,
-        mcp_server_url=mcp_url, mcp_token=mcp_token,
+        mcp_server_url=server_url, mcp_token=token,
+        agent_instructions=instructions,
         enable_input_transcription=settings.call_supervisor_verbose_logging,
     )
     ok = await accept_sip_call(

@@ -5,7 +5,7 @@ import pytest
 
 from booking_engine.services.identity_resolver import ResolutionResult
 from booking_engine.services.realtime_session import (
-    build_accept_payload, build_sip_uri, shop_id_from_sip_headers, to_realtime_tools,
+    CUSTOMER_AGENT_TOOLS, build_accept_payload, build_sip_uri, shop_id_from_sip_headers,
 )
 
 
@@ -24,16 +24,6 @@ def _config(**kw):
 
 def _policy():
     return {"disclosure_text": "Salve, assistente AI."}
-
-
-def test_to_realtime_tools_wraps_as_function_type():
-    out = to_realtime_tools([
-        {"name": "create_booking", "description": "d",
-         "parameters": {"type": "object", "properties": {}}},
-    ])
-    assert out[0]["type"] == "function"
-    assert out[0]["name"] == "create_booking"
-    assert out[0]["parameters"] == {"type": "object", "properties": {}}
 
 
 def test_shop_id_from_sip_headers_reads_custom_header():
@@ -60,18 +50,41 @@ def test_build_sip_uri_uses_twilio_custom_header_query_syntax():
 
 
 @pytest.mark.asyncio
-async def test_accept_payload_has_model_instructions_and_tools():
+async def test_accept_payload_appends_agent_rules_after_the_persona():
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    payload = await build_accept_payload(
+        config=_config(), policy=_policy(), resolution=resolution,
+        model="gpt-realtime", agent_instructions="REGOLE_DAL_MOTORE",
+    )
+    assert payload["type"] == "realtime"
+    assert payload["model"] == "gpt-realtime"
+    instructions = payload["instructions"]
+    assert "Salone Lucia" in instructions
+    assert instructions.rstrip().endswith("REGOLE_DAL_MOTORE")
+    assert instructions.index("Salone Lucia") < instructions.index("REGOLE_DAL_MOTORE")
+
+
+@pytest.mark.asyncio
+async def test_accept_payload_is_persona_only_without_agent_rules():
     resolution = ResolutionResult(is_anonymous=False, matches=[])
     payload = await build_accept_payload(
         config=_config(), policy=_policy(), resolution=resolution,
         model="gpt-realtime",
     )
-    assert payload["type"] == "realtime"
-    assert payload["model"] == "gpt-realtime"
-    assert "REGOLE NON NEGOZIABILI" in payload["instructions"]
-    names = {t["name"] for t in payload["tools"]}
-    assert "create_booking" in names and "escalate_to_merchant" in names
-    assert all(t["type"] == "function" for t in payload["tools"])
+    assert "Salone Lucia" in payload["instructions"]
+    # The old in-repo rule block is gone: the rules come from marketing-engine.
+    assert "REGOLE NON NEGOZIABILI" not in payload["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_accept_payload_has_no_tools_without_an_mcp_server():
+    # No inline function tools any more: nothing in this repo executes them.
+    resolution = ResolutionResult(is_anonymous=False, matches=[])
+    payload = await build_accept_payload(
+        config=_config(), policy=_policy(), resolution=resolution,
+        model="gpt-realtime",
+    )
+    assert payload["tools"] == []
 
 
 @pytest.mark.asyncio
@@ -117,18 +130,30 @@ async def test_accept_payload_adds_input_transcription_when_enabled():
 
 
 @pytest.mark.asyncio
-async def test_accept_payload_registers_mcp_server_when_url_given():
+async def test_accept_payload_registers_the_customer_agents_mcp_server():
     resolution = ResolutionResult(is_anonymous=False, matches=[])
     payload = await build_accept_payload(
         config=_config(), policy=_policy(), resolution=resolution,
         model="gpt-realtime",
-        mcp_server_url="https://x/mcp", mcp_token="tok123",
+        mcp_server_url="https://mi/customer-agents/voice/mcp", mcp_token="tok123",
     )
     tools = payload["tools"]
     assert len(tools) == 1
     mcp = tools[0]
     assert mcp["type"] == "mcp"
-    assert mcp["server_url"] == "https://x/mcp"
+    assert mcp["server_url"] == "https://mi/customer-agents/voice/mcp"
     assert mcp["authorization"] == "tok123"
     assert mcp["require_approval"] == "never"
-    assert "create_booking" in mcp["allowed_tools"]
+    assert mcp["allowed_tools"] == list(CUSTOMER_AGENT_TOOLS)
+
+
+def test_allowed_tools_are_the_eleven_customer_agent_names():
+    # The approved naming table (plan 2026-09-28). An old name here would make
+    # OpenAI filter every marketing-engine tool out of the session.
+    assert set(CUSTOMER_AGENT_TOOLS) == {
+        "customers_identify", "services_catalog", "availability_search",
+        "create_customer", "update_customer", "create_appointment",
+        "appointments_upcoming", "reschedule_appointment", "cancel_appointment",
+        "escalate_to_owner", "set_conversation_outcome",
+    }
+    assert len(CUSTOMER_AGENT_TOOLS) == 11

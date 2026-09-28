@@ -40,11 +40,11 @@ Pure functions, no DB access, shared by create/modify/cancel:
 
 ## Prompt assembly
 
-Source: `prompt_assembler.py`. Four layers composed in order into the session prompt sent on `session.started`:
-1. **Layer 3 — `SAFETY_PROMPT`** (above), immutable.
-2. **Caller context** — built from `identity_resolver.py`'s `ResolutionResult`: anonymous caller ID → greet neutrally, ask for name + spoken phone number; unique phone match → greet by name, mention last visit / notes; multiple customers share this number → ask who the booking is for before proceeding; no match → treat as a new caller, only create a customer record once a name is confirmed.
-3. **Layer 1 — shop identity** — `display_name`, and a greeting: `answer_mode == "overflow"` shops use `greeting_overflow` (falling back to a generated default `"Salve, sono l'assistente di {name}. Come posso aiutarla?"` if the shop hasn't written one) since they're standing in for busy staff; other shops use `greeting_after_disclosure` with no code fallback (shop-authored, via the webapp).
-4. **Tone instruction** — resolved from `shop_config.tone_id` against `voice_agent.voice_tones`; any lookup failure, missing id, or unknown tone falls back to a hardcoded default Italian instruction ("clear and professional"), never a hard error.
+Source: `prompt_assembler.py` (the persona) + marketing-engine (the rules). Since 2026-09-28 this repo owns only the salon's persona; the agent rules are fetched at accept time from marketing-engine (`GET /customer-agents/voice/instructions`, `clients/customer_agents_voice.py`) and appended after it (`realtime_session.py::build_accept_payload`). The persona, in order:
+1. **Caller context** — built from `identity_resolver.py`'s `ResolutionResult`: hidden caller ID → greet neutrally; since no tool takes a phone number and every write is authorized on the session's caller number, a booking/change request is collected and handed over with `escalate_to_owner`; unique phone match → greet by name, mention last visit / notes; multiple customers share this number → ask who the booking is for before proceeding; no match → treat as a new caller, only create a customer record once a name is confirmed.
+2. **Shop identity** — `display_name`, and a greeting: `answer_mode == "overflow"` shops use `greeting_overflow` (falling back to a generated default `"Salve, sono l'assistente di {name}. Come posso aiutarla?"` if the shop hasn't written one) since they're standing in for busy staff; other shops use `greeting_after_disclosure` with no code fallback (shop-authored, via the webapp). The first turn is that greeting, said as written.
+3. **Tone instruction** — resolved from `shop_config.tone_id` against `voice_agent.voice_tones`; any lookup failure, missing id, or unknown tone falls back to a hardcoded default Italian instruction ("clear and professional"), never a hard error.
+4. **Agent rules** (marketing-engine's `customerRules('voice')`) — appended last. If the fetch fails the call is still accepted with the persona alone and a `logger.error`.
 
 ## Tone system
 

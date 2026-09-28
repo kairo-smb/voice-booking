@@ -22,8 +22,8 @@ webapp's host, which is why they are written down once here.
 | `VOICE_AGENT_API_URL` | **webapp** | voice-booking base **including `/api/v1`** | webapp → this repo's `/api/v1/*` |
 | `VOICE_AGENT_SECRET` | **webapp** | = this repo's `CONTROL_PLANE_SECRET` | webapp → this repo's `/api/v1/*` **and** `/voice/memos/*` |
 | `VOICE_AGENT_TOOLS_URL` | **marketing-engine** | voice-booking base **with NO `/api/v1`** | engine → this repo's `/voice/tools/*` |
-| `VOICE_AGENT_TOOL_SECRET` | booking engine + **marketing-engine** | = this repo's `voice_agent_tool_secret` | OpenAI Realtime (per session), and the engine's booking agent |
-| `MARKET_INTEL_API_URL` | booking engine | engine base **with NO `/api/v1`** | this repo → engine `/whatsapp/triage`, `/whatsapp/agent` |
+| `VOICE_AGENT_TOOL_SECRET` | booking engine + **marketing-engine** | = this repo's `voice_agent_tool_secret` | signs the per-call token OpenAI Realtime presents to the engine's voice MCP; the engine → this repo's `/sessions/*` |
+| `MARKET_INTEL_API_URL` | booking engine | engine base **with NO `/api/v1`** | this repo → engine `/whatsapp/triage`, `/whatsapp/agent`, `/customer-agents/voice/instructions`; and OpenAI Realtime → engine `/customer-agents/voice/mcp` (the voice session's `server_url` is built from it — unset means a call is answered with no tools) |
 | `MARKET_INTEL_SECRET` | booking engine + marketing-engine + webapp | shared bearer | this repo → engine; both → webapp's credit + notify endpoints |
 | `WEBAPP_BASE_URL` | booking engine + marketing-engine | webapp base, no trailing slash | this repo + engine → webapp |
 | `JWT_SECRET` | webapp + marketing-engine | **byte-identical** | the engine verifies the webapp's session tokens on the browser-facing chat routes |
@@ -319,13 +319,13 @@ and [Onboard WhatsApp Business app users](https://developers.facebook.com/docume
 
 **Purpose:** speech-to-text, LLM reasoning, text-to-speech, and voice activity detection for the live call — via **native SIP** (production path) or an ephemeral browser/WebRTC session (local testing only).
 
-**Key files:** `booking_engine/clients/openai_realtime.py` (`accept_sip_call`, `create_ephemeral_session`), `booking_engine/api/routes/voice_openai.py` (`realtime.call.incoming` webhook), `booking_engine/services/call_supervisor.py`, `booking_engine/mcp_server.py` (hosted MCP tool mount).
+**Key files:** `booking_engine/clients/openai_realtime.py` (`accept_sip_call`, `create_ephemeral_session`), `booking_engine/api/routes/voice_openai.py` (`realtime.call.incoming` webhook), `booking_engine/services/call_supervisor.py`, `booking_engine/clients/customer_agents_voice.py` (the MCP `server_url` and the rules fetch — the tools are marketing-engine's `/customer-agents/voice/mcp` since 2026-09-28).
 
-**Env vars:** `OPENAI_SIP_PROJECT_ID`, `OPENAI_API_KEY`, `OPENAI_REALTIME_MODEL` (`gpt-realtime` — not `gpt-4o-realtime-preview`), `OPENAI_WEBHOOK_SECRET`, `VOICE_AGENT_TOOL_SECRET`, `ENABLE_CALL_SUPERVISOR`, `CALL_SUPERVISOR_VERBOSE_LOGGING`.
+**Env vars:** `OPENAI_SIP_PROJECT_ID`, `OPENAI_API_KEY`, `OPENAI_REALTIME_MODEL` (`gpt-realtime` — not `gpt-4o-realtime-preview`), `OPENAI_WEBHOOK_SECRET`, `VOICE_AGENT_TOOL_SECRET`, `MARKET_INTEL_API_URL`, `ENABLE_CALL_SUPERVISOR`, `CALL_SUPERVISOR_VERBOSE_LOGGING`.
 
 **Hard-won gotcha #1 — hosted MCP does not auto-continue.** After a tool call, the model's response ends (`response.done` fires *before* the tool even returns); the tool executes, `response.output_item.done` delivers the result, and then nothing — OpenAI does not open a new response to voice it. This directly contradicts the Responses-API "hosted MCP auto-continues" assumption. Full event-trace evidence and the fix (a server-side control WebSocket sending `response.create`) in `AGENTS.md` §2026-07-21 (two entries: "Realtime + hosted MCP..." and "SIP call supervisor...").
 
-**Hard-won gotcha #2 — `server_url` needs a trailing slash.** `app.mount("/mcp", ...)` makes Starlette 307-redirect bare `/mcp` → `/mcp/`, and OpenAI's Realtime MCP client does **not** follow that redirect for the tool-call POST body — it silently never calls the tool. Always point `server_url` at `/mcp/`. Root-caused via `fly logs`; full story in `AGENTS.md` §2026-07-21 "MCP server_url must carry a trailing slash".
+**Hard-won gotcha #2 — `server_url` needs a trailing slash.** `app.mount("/mcp", ...)` makes Starlette 307-redirect bare `/mcp` → `/mcp/`, and OpenAI's Realtime MCP client does **not** follow that redirect for the tool-call POST body — it silently never calls the tool. Always point `server_url` at `/mcp/`. Root-caused via `fly logs`; full story in `AGENTS.md` §2026-07-21 "MCP server_url must carry a trailing slash". (Since 2026-09-28 the server is marketing-engine's Express route, which matches `/mcp` and `/mcp/` alike with no redirect; the rule still holds for any Starlette mount.)
 
 **Gotcha #3 — webhook signature is opt-in.** `voice_openai.py`'s `realtime.call.incoming` handler only verifies a signature when `OPENAI_WEBHOOK_SECRET` is set (see the `ponytail:` comment at the top of that file) — currently unwired, so the endpoint accepts unsigned requests.
 
