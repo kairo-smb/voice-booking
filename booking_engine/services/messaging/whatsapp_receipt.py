@@ -71,6 +71,7 @@ async def ensure_receipt_template(*, shop_id: UUID, settings) -> dict:
             name=RECEIPT_TEMPLATE_NAME, language=RECEIPT_TEMPLATE_LANGUAGE,
             category="UTILITY", body_text=RECEIPT_TEMPLATE_BODY,
             example_url=settings.meta_receipt_sample_url,
+            app_id=settings.meta_app_id,
         )
     except meta.MetaError as exc:
         logger.warning("whatsapp.receipt_template_create_failed shop=%s err=%s",

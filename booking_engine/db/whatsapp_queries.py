@@ -151,6 +151,13 @@ async def delete_pending_sender(shop_id: UUID) -> None:
     )
 
 
+async def list_online_senders() -> list[dict]:
+    return _opened_all(await execute(
+        "SELECT * FROM whatsapp.senders WHERE status = 'online' "
+        "AND waba_id IS NOT NULL AND access_token IS NOT NULL"
+    ))
+
+
 async def list_verifying_senders() -> list[dict]:
     """Senders not yet online — polled by the tick to pick up Meta's verdict.
 

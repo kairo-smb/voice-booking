@@ -8,6 +8,7 @@ A short index into `AGENTS.md`'s full history log — enough to find the relevan
 
 | Date | Decision | AGENTS.md section |
 |---|---|---|
+| 2026-09-28 | QA sends from Meta's test number (seeded, no Embedded Signup); first real Graph traffic found the receipt template needs an upload handle not a URL, and the tier now lives on the WABA (portfolio, `TIER_2K`) and is refreshed hourly | §"First real Graph traffic: Meta's test number in QA..." |
 | 2026-09-22 | WhatsApp becomes two-way and an agent books through it: `voice_agent.calls` was already a session table, so the booking tools were reused untouched; session-scoped routing with a button menu to disambiguate; echoes from the owner's phone suspend the agent; the ZDR waiver, scoped to the classifier alone | §"WhatsApp becomes a conversation, and an agent books through it" |
 | 2026-08-24 | Meta's platform limits become a floor nothing may cross (`meta_limits.py`): `min(Meta, ours)`, rolling-24h tier window, per-recipient cooldown, clamped send rate, onboarding cap | §"Meta's limits become a floor nothing may cross..." |
 | 2026-08-24 | WhatsApp leaves Twilio for Meta Cloud API direct (Tech Provider): BYO WABA + coexistence, templates injected into the salon's own WABA, no credit debit, multi-day bulk drip with a paced scheduler | §"WhatsApp leaves Twilio: Meta Cloud API direct..." |

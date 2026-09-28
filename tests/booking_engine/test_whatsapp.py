@@ -650,6 +650,11 @@ def _patch_onboarding(monkeypatch, *, sender, calls):
     monkeypatch.setattr(wq, "list_senders_needing_token_reminder", _due_for_reminder)
     monkeypatch.setattr(wq, "mark_token_reminder_sent", _mark_reminded)
 
+    async def _no_online():
+        return []
+    monkeypatch.setattr(wq, "list_online_senders", _no_online)
+    monkeypatch.setattr(wq, "list_senders_needing_sync", _no_online)
+
     async def _exchange(**kw):
         calls.setdefault("exchange", []).append(kw)
         # Our Login Configuration mints 60-day tokens, so the expiring shape
@@ -2651,3 +2656,35 @@ async def test_status_lists_the_receipt_with_its_meta_verdict(monkeypatch):
     assert receipt["status"] == "rejected"
     assert receipt["category"] == "UTILITY"
     assert receipt.get("filled_by") is None
+
+
+@pytest.mark.asyncio
+async def test_sweep_refreshes_the_portfolio_tier_of_live_senders(monkeypatch):
+    """Meta moved the tier to the business portfolio (WABA field) and re-rates
+    it over time; a live sender must pick the new value up, not keep its
+    onboarding one — and TIER_2K must widen the cap, not fall to 250."""
+    from booking_engine.services.messaging import meta_limits
+
+    sender = {"shop_id": SHOP, "source": "coexistence", "status": "online",
+              "display_name": "Salone X", "waba_id": "WABA1", "access_token": "tok",
+              "messaging_limit": None}
+    calls = _patch_onboarding(monkeypatch, sender=sender, calls={})
+
+    async def _none(*a):
+        return []
+    async def _online():
+        return [sender]
+    async def _tier(*, waba_id, token):
+        assert (waba_id, token) == ("WABA1", "tok")
+        return "TIER_2K"
+    monkeypatch.setattr(wq, "list_verifying_senders", _none)
+    monkeypatch.setattr(wq, "list_unresolved_templates", _none)
+    monkeypatch.setattr(wq, "list_senders_needing_templates", _none)
+    monkeypatch.setattr(wq, "list_online_senders", _online)
+    monkeypatch.setattr(wq, "list_senders_needing_sync", _none)
+    monkeypatch.setattr(meta, "get_messaging_limit", _tier)
+
+    result = await wo.sweep(settings=FakeSettings())
+
+    assert result["tiers_updated"] == 1
+    assert meta_limits.tier_daily_conversations("TIER_2K") == 2_000

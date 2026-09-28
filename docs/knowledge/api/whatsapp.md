@@ -113,9 +113,9 @@ The owner disconnects their WABA, in any state (added 2026-09-25). Unsubscribes 
 ```json
 {"data": {"status": "online", "source": "coexistence", "phone_number": "+39…",
           "display_name": "Salone Bellezza", "quality_rating": "GREEN",
-          "messaging_limit": "TIER_1K", "coexistence": true,
+          "messaging_limit": "TIER_2K", "coexistence": true,
           "daily_cap": 50, "configured_daily_cap": 50,
-          "meta_tier": "TIER_1K", "meta_tier_daily": 1000,
+          "meta_tier": "TIER_2K", "meta_tier_daily": 2000,
           "recipient_cooldown_hours": 168,
           "offline_reason": null, "sent_today": 12, "sent_last_24h": 47,
           "sent_this_month": 87,

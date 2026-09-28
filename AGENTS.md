@@ -6,6 +6,55 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-28 — First real Graph traffic: Meta's test number in QA, and two bugs it found at once
+
+**No customer WABA exists, so QA's "Kairo Demo Parrucchiere" now sends from
+Meta's free test number** (test WABA `1740733127074469`, number
+`1334466979746060`, +1 555-670-5857), attached by `scripts/seed_test_sender.py`
+rather than through Embedded Signup. The seed writes the row `complete()`
+would have left, via the same query layer (so the token is sealed with QA's
+key), using `META_KAIRO_TOKEN` — Kairo's system user already has full access to
+the test WABA. **The onboarding/auth path is frozen by owner decision
+(2026-09-28) and was not touched**: nothing in `start`/`complete`/`abort`/
+`exchange_code`/`waba_ids_for_token` changed. The test number only delivers to
+≤5 recipients allowlisted in API Setup; every other QA shop holds thousands of
+real-looking numbers and must never get a sender. Coexistence-only behaviour
+(echoes, history sync) cannot be produced this way.
+
+**Verified live, end to end:** status, template propagation (6 created on the
+test WABA, verdicts back by webhook within a minute), and a single-recipient
+`promo_v1` campaign — sent, `delivered`, `read` by status webhook.
+
+**Bug 1 — the receipt template could never be created on any customer WABA.**
+`create_document_template` put the sample PDF's **URL** in `header_handle`;
+Meta wants a Resumable Upload handle (`POST /{app_id}/uploads` → bytes →
+`h: "4::…"`) and refuses the URL with code 100. Kairo's own copy had been built
+by hand in WhatsApp Manager, so nothing had ever run this path. Now uploads the
+sample first (`_upload_sample`), which needs `app_id` from both callers.
+Verified by creating `purchase_receipt_1` on the test WABA. Unverified: the
+upload with a salon's *business* token rather than a system user's — no worse
+than before if it fails, since it always failed. `scripts/kairo_waba.py` has
+the same bug on its create path and is left alone (Kairo's copy exists; edits
+don't resubmit the header).
+
+**Bug 2 — the Meta tier was never read.** The phone number's
+`messaging_limit_tier` is no longer returned (not even for Kairo's real
+number); Meta now rates the **business portfolio**, exposed on the WABA as
+`whatsapp_business_manager_messaging_limit` — `TIER_2K` for Kairo today, a
+value our table didn't know. So every sender sat on the 250 fail-closed floor.
+And the sweep only re-read `verifying` senders, so a live sender's tier was
+frozen at onboarding despite the docstring saying otherwise. Now: `TIER_2K`
+added, and the sweep refreshes the tier of every `online` sender from the WABA
+each hour (`get_messaging_limit`, `list_online_senders`). `complete()` still
+writes the number's (now absent) field — it is frozen — and the first sweep
+corrects it.
+
+**Also:** three sweep tests only passed thanks to a pool left initialised by an
+earlier test (`list_senders_needing_sync` was unstubbed); `_patch_onboarding`
+now stubs it. **Verification:** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **847 passed, 25 skipped, 0 failed** (up from
+845/25: the upload-contract test and the tier-refresh test).
+
 ## 2026-09-25 — Error tracking: GlitchTip via sentry-sdk
 
 `booking_engine/observability.py`, called first thing in `asgi.py` (tests use

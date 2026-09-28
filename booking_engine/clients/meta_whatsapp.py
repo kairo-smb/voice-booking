@@ -207,6 +207,18 @@ async def get_waba_name(*, waba_id: str, token: str) -> str:
     return body.get("name") or waba_id
 
 
+async def get_messaging_limit(*, waba_id: str, token: str) -> str | None:
+    """The portfolio's business-initiated tier ('TIER_2K', …), read off the WABA.
+
+    Meta moved the tier from the phone number to the business portfolio; the
+    number's `messaging_limit_tier` now comes back absent, which silently pinned
+    every sender to the unverified floor.
+    """
+    body = await _request("GET", waba_id, token=token,
+                          params={"fields": "whatsapp_business_manager_messaging_limit"})
+    return body.get("whatsapp_business_manager_messaging_limit")
+
+
 @dataclass(frozen=True)
 class PhoneNumber:
     id: str
@@ -502,16 +514,52 @@ async def send_template(
 
 # -------------------------------------------------------------------- document
 
+async def _upload_sample(*, app_id: str, token: str, url: str) -> str:
+    """Turn a public sample file into the handle a template `example` needs.
+
+    `header_handle` takes a Resumable Upload handle (`4::…`), never a URL —
+    passing the URL is refused with code 100 "DOCUMENT header … need an
+    example". Found on the first real create against a WABA (2026-09-28): the
+    receipt on Kairo's own WABA had been built by hand, so nothing had ever
+    exercised this path.
+    """
+    async with AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+        sample = await client.get(url)
+        sample.raise_for_status()
+        session = await client.post(
+            f"{GRAPH}/{app_id}/uploads",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"file_name": url.rsplit("/", 1)[-1] or "sample.pdf",
+                    "file_length": len(sample.content), "file_type": "application/pdf"},
+        )
+        upload_id = session.json().get("id") if session.content else None
+        if session.status_code >= 400 or not upload_id:
+            err = (session.json().get("error") or {}) if session.content else {}
+            raise MetaError(err.get("code"), err.get("message") or "sample_upload_failed")
+        done = await client.post(
+            f"{GRAPH}/{upload_id}",
+            headers={"Authorization": f"OAuth {token}", "file_offset": "0"},
+            content=sample.content,
+        )
+        handle = done.json().get("h") if done.content else None
+        if done.status_code >= 400 or not handle:
+            err = (done.json().get("error") or {}) if done.content else {}
+            raise MetaError(err.get("code"), err.get("message") or "sample_upload_failed")
+        return handle
+
+
 async def create_document_template(
     *, waba_id: str, token: str, name: str, language: str,
-    category: str, body_text: str, example_url: str,
+    category: str, body_text: str, example_url: str, app_id: str,
 ) -> tuple[str, str]:
     """Create a DOCUMENT-header template (the Smart Receipt shape).
 
     `example_url` is a publicly-hosted sample PDF for Meta's review — mandatory
     for a document header, and the reason this is a separate call from
-    `create_template` (which only ever emits a BODY). Returns (id, status).
+    `create_template` (which only ever emits a BODY). It is uploaded first, to
+    get the handle Meta actually accepts. Returns (id, status).
     """
+    handle = await _upload_sample(app_id=app_id, token=token, url=example_url)
     body = await _request(
         "POST", f"{waba_id}/message_templates", token=token,
         json_body={
@@ -522,7 +570,7 @@ async def create_document_template(
                 {
                     "type": "HEADER",
                     "format": "DOCUMENT",
-                    "example": {"header_handle": [example_url]},
+                    "example": {"header_handle": [handle]},
                 },
                 {"type": "BODY", "text": body_text},
             ],

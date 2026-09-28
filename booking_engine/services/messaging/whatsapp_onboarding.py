@@ -673,6 +673,7 @@ async def ensure_templates(
                     name=doc.name, language=doc.language,
                     category=doc.category, body_text=doc.body,
                     example_url=settings.meta_receipt_sample_url,
+                    app_id=settings.meta_app_id,
                 )
                 tpl_category = doc.category
         except meta.MetaError as exc:
@@ -759,6 +760,21 @@ async def sweep(*, settings) -> dict:
             counts["online"] += 1
         except Exception:  # noqa: BLE001 — one shop must not abort the sweep
             logger.exception("whatsapp.sender_poll_failed shop=%s", row["shop_id"])
+            counts["errors"] += 1
+
+    # Meta re-evaluates the tier and can move it either way; before this stage
+    # only onboarding ever read it, so a live sender kept whatever it started
+    # with. Failure leaves the stored value alone — the stale tier is still a
+    # better guess than none, and an absent one fails closed to 250 anyway.
+    for row in await wq.list_online_senders():
+        try:
+            tier = await meta.get_messaging_limit(
+                waba_id=row["waba_id"], token=row["access_token"])
+            if tier and tier != row.get("messaging_limit"):
+                await wq.set_sender_fields(row["shop_id"], messaging_limit=tier)
+                counts["tiers_updated"] = counts.get("tiers_updated", 0) + 1
+        except Exception:  # noqa: BLE001 — one shop must not abort the sweep
+            logger.exception("whatsapp.tier_refresh_failed shop=%s", row["shop_id"])
             counts["errors"] += 1
 
     # Live senders missing part of the catalogue — or the document template —
