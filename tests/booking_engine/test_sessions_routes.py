@@ -176,3 +176,57 @@ async def test_outcome_outside_the_check_is_rejected():
         r = await _post("outcome", {"outcome": "whatever"})
     assert r.status_code == 422
     outcome.assert_not_awaited()
+
+
+# ── outcome: the appointment it produced ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome_name,created", [
+    ("booked", True), ("rescheduled", False), ("cancelled", False),
+])
+async def test_outcome_records_the_sessions_appointment(outcome_name, created):
+    appt = uuid4()
+    with patch(f"{_MOD}.get_call", new=AsyncMock(return_value=_call())), \
+         patch(f"{_MOD}.get_appointment_shop_id",
+               new=AsyncMock(return_value=SHOP)) as owner, \
+         patch(f"{_MOD}.set_call_outcome", new=AsyncMock()) as outcome, \
+         patch(f"{_MOD}.attach_appointment_to_call", new=AsyncMock()) as attach:
+        r = await _post("outcome", {"outcome": outcome_name,
+                                    "appointment_id": str(appt)})
+    assert r.json() == {"ok": True, "data": {"marked": True}, "error": None}
+    assert owner.await_args.kwargs["appointment_id"] == appt
+    outcome.assert_awaited_once()
+    assert attach.await_args.kwargs == {
+        "call_id": CALL, "appointment_id": appt, "created": created,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_shop", [uuid4(), None])
+async def test_outcome_with_another_shops_appointment_is_refused(owner_shop):
+    # "Not yours" and "not there" are one refusal, like the session check.
+    with patch(f"{_MOD}.get_call", new=AsyncMock(return_value=_call())), \
+         patch(f"{_MOD}.get_appointment_shop_id",
+               new=AsyncMock(return_value=owner_shop)), \
+         patch(f"{_MOD}.set_call_outcome", new=AsyncMock()) as outcome, \
+         patch(f"{_MOD}.attach_appointment_to_call", new=AsyncMock()) as attach:
+        r = await _post("outcome", {"outcome": "booked",
+                                    "appointment_id": str(uuid4())})
+    assert r.status_code == 404
+    assert r.json() == {"ok": False, "data": None, "error": "unknown_appointment"}
+    # A refusal writes nothing — not even the outcome.
+    outcome.assert_not_awaited()
+    attach.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_outcome_without_appointment_touches_no_appointment():
+    with patch(f"{_MOD}.get_call", new=AsyncMock(return_value=_call())), \
+         patch(f"{_MOD}.get_appointment_shop_id", new=AsyncMock()) as owner, \
+         patch(f"{_MOD}.set_call_outcome", new=AsyncMock()), \
+         patch(f"{_MOD}.attach_appointment_to_call", new=AsyncMock()) as attach:
+        r = await _post("outcome", {"outcome": "info_only"})
+    assert r.status_code == 200
+    owner.assert_not_awaited()
+    attach.assert_not_awaited()

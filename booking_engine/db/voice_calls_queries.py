@@ -44,6 +44,45 @@ async def set_call_outcome(
     )
 
 
+async def get_appointment_shop_id(*, appointment_id: UUID) -> UUID | None:
+    """Which shop owns this appointment. None when there is no such appointment."""
+    row = await connection.execute_one(
+        "SELECT shop_id FROM business_app_core.appointments WHERE id = $1",
+        appointment_id,
+    )
+    return row["shop_id"] if row else None
+
+
+async def attach_appointment_to_call(
+    *, call_id: UUID, appointment_id: UUID, created: bool,
+) -> None:
+    """Record the appointment a session booked, moved or cancelled.
+
+    `calls.appointment_id` is what readers use (the webapp's call list,
+    `whatsapp.interaction_history`): the latest appointment the session acted
+    on. `created` — the session *made* it — also sets `created_booking_id` and
+    the appointment's `voice_call_id`, the SQL the deleted
+    `voice_tool_queries.attach_booking_to_call` ran on a voice booking. The
+    appointment's link is only ever filled, never moved: a later session that
+    reschedules or cancels it is not where it came from.
+    """
+    await connection.execute_void(
+        """
+        UPDATE voice_agent.calls
+        SET appointment_id = $2,
+            created_booking_id = CASE WHEN $3 THEN $2 ELSE created_booking_id END
+        WHERE id = $1
+        """,
+        call_id, appointment_id, created,
+    )
+    if created:
+        await connection.execute_void(
+            "UPDATE business_app_core.appointments SET voice_call_id = $1 "
+            "WHERE id = $2 AND voice_call_id IS NULL",
+            call_id, appointment_id,
+        )
+
+
 async def finalize_call(
     *, call_id: UUID, ended_at: datetime, duration_seconds: int,
 ) -> None:

@@ -33,7 +33,8 @@ from booking_engine.api.deps import require_tool_token
 from booking_engine.api.voice_tool_models import EscalateIn, Envelope
 from booking_engine.clients.push_notifications import send_push
 from booking_engine.db.voice_calls_queries import (
-    get_call, insert_callback_memo, set_call_outcome,
+    attach_appointment_to_call, get_appointment_shop_id, get_call,
+    insert_callback_memo, set_call_outcome,
 )
 from booking_engine.db.voice_queries import link_customer
 from booking_engine.db.voice_tool_queries import get_customer_shop_id
@@ -55,6 +56,10 @@ class SessionOutcomeIn(BaseModel):
         "abandoned", "escalated", "failed",
     ]
     summary: str | None = None
+    # The appointment the session just booked/moved/cancelled. marketing-engine
+    # sends it after a successful write, so the session row points at what it
+    # produced again (the voice tools did it inside create_booking).
+    appointment_id: UUID | None = None
 
 
 def _refuse(error: str) -> JSONResponse:
@@ -132,9 +137,19 @@ async def set_session_outcome(
 ):
     if not await _session(call_id, x_shop_id):
         return _refuse("unknown_session")
+    # Checked before anything is written: a refusal leaves the row untouched.
+    if body.appointment_id is not None and await get_appointment_shop_id(
+        appointment_id=body.appointment_id,
+    ) != x_shop_id:
+        return _refuse("unknown_appointment")
     await set_call_outcome(
         call_id=call_id,
         outcome="info" if body.outcome == "info_only" else body.outcome,
         summary=body.summary, callback_window=None,
     )
+    if body.appointment_id is not None:
+        await attach_appointment_to_call(
+            call_id=call_id, appointment_id=body.appointment_id,
+            created=body.outcome == "booked",
+        )
     return Envelope[dict](ok=True, data={"marked": True})
