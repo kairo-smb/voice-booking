@@ -158,8 +158,11 @@ an empty basket rather than run unpaid.
 **The booking agent turn — `POST {MARKET_INTEL_API_URL}/whatsapp/agent`, bearer
 `MARKET_INTEL_SECRET`.** The turn itself (prompt, model, tool-calling loop)
 lives in marketing-engine; `clients/marketing_agent.py` is the thin client.
-Request carries `{shop_id, call_id, shop_name, services[], intake{}, messages[],
-first_turn, customer_name, customer_phone, now}`; a 200 answers
+Request carries `{shop_id, call_id, messages[], now}` and nothing else: the
+engine's customer-agents layer loads the shop (name, timezone), the customer's
+phone (`calls.caller_number`), the customer and the catalogue itself, keyed off
+the session row. It ignores unknown fields, so the two sides deploy in either
+order. A 200 answers
 `{data: {text, escalate, reason, tool_calls}, llm_cost_usd}`.
 
 - **The gateway gates and charges this turn, not this repo.** It reads the
@@ -171,9 +174,10 @@ first_turn, customer_name, customer_phone, now}`; a 200 answers
   forbids and the 2026-09-03 one deleted this repo's basket arithmetic to
   prevent. What this repo owns instead is the ceiling the gateway cannot see:
   `wa_agent.MAX_SESSION_TURNS` (12), counted per session.
-- **`call_id` is not bookkeeping.** The gateway passes it back to *this* repo's
-  voice tools, which read the shop off the session row and never off a header —
-  it is the authorization basis for every booking the turn touches.
+- **`call_id` is not bookkeeping.** It names the session row the engine reads
+  the customer's phone from, and the gateway's session writes (customer link,
+  escalation, outcome) go back to *this* repo's [`/sessions/{call_id}/*`](api/sessions.md),
+  scoped to the shop.
 - **`text` is empty whenever `escalate` is true**, by contract. An agent that
   apologises in a way that still reads like an answer leaves the customer
   waiting for a reply that is not coming. `marketing_agent` re-blanks it anyway,

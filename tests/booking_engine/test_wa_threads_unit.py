@@ -150,3 +150,33 @@ async def test_an_unreadable_confidence_is_stored_as_null_not_raised(recorded):
     )
     assert recorded[0][1] == "booking"
     assert recorded[0][2] is None
+
+
+# --- the customer a thread shows ---------------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_thread_falls_back_to_the_customer_the_session_identified(
+        monkeypatch):
+    """A first-time writer's inbound rows carry no customer_id — nobody knew
+    them when the message landed. Once the agent identifies or creates them it
+    links the *session* (`/sessions/{call_id}/customer`), so that is where the
+    list must look next, or the Inbox keeps showing a bare number for a
+    customer the salon now has on file."""
+    seen = {}
+    customer = uuid4()
+
+    async def fake(sql, *args):
+        seen["sql"] = " ".join(sql.split())
+        seen["args"] = args
+        return [{"phone": "393331112222", "customer_id": customer}]
+
+    monkeypatch.setattr(th, "execute", fake)
+    rows = await th.thread_list(uuid4())
+
+    assert rows[0]["customer_id"] == customer
+    sql = seen["sql"]
+    assert "coalesce(li.customer_id, sc.customer_id) AS customer_id" in sql
+    # The fallback is a WhatsApp session of this shop that has a customer on it.
+    assert "channel = 'whatsapp' AND customer_id IS NOT NULL" in sql
+    assert "LEFT JOIN session_customer sc USING (key)" in sql
+    assert len(seen["args"]) == 3  # binds nothing new

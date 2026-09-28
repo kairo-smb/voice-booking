@@ -39,8 +39,8 @@ logger = logging.getLogger(__name__)
 
 _AGENT_PATH = "/whatsapp/agent"
 
-# Longer than the classifier's 15s: a turn may run a tool-calling loop against
-# this repo's own availability queries before it has anything to say. Still
+# Longer than the classifier's 15s: a turn may run a tool-calling loop (slot
+# search, booking writes) before it has anything to say. Still
 # bounded — a customer waiting on WhatsApp has no spinner to watch, and a turn
 # that takes a minute has already failed at being a conversation.
 _TIMEOUT_SECONDS = 45.0
@@ -69,23 +69,15 @@ async def turn(
     *,
     shop_id: UUID,
     call_id: UUID,
-    shop_name: str,
-    services: list[dict[str, Any]],
-    intake: dict[str, str],
     messages: list[dict[str, str]],
-    first_turn: bool,
-    customer_name: str | None,
-    customer_phone: str | None,
     now: datetime,
     settings: Settings,
 ) -> Turn:
     """Run one turn. Never raises; every failure is an escalation with a reason."""
     try:
         return await _turn(
-            shop_id=shop_id, call_id=call_id, shop_name=shop_name,
-            services=services, intake=intake, messages=messages,
-            first_turn=first_turn, customer_name=customer_name,
-            customer_phone=customer_phone, now=now, settings=settings,
+            shop_id=shop_id, call_id=call_id, messages=messages, now=now,
+            settings=settings,
         )
     except Exception:  # noqa: BLE001 — every failure here is the same refusal
         logger.exception("whatsapp.agent_unexpected_error shop=%s call=%s",
@@ -97,13 +89,7 @@ async def _turn(
     *,
     shop_id: UUID,
     call_id: UUID,
-    shop_name: str,
-    services: list[dict[str, Any]],
-    intake: dict[str, str],
     messages: list[dict[str, str]],
-    first_turn: bool,
-    customer_name: str | None,
-    customer_phone: str | None,
     now: datetime,
     settings: Settings,
 ) -> Turn:
@@ -116,20 +102,19 @@ async def _turn(
         )
         return _refused("unconfigured")
 
+    # The whole payload, on purpose. The engine loads everything else itself,
+    # keyed off the session row: shop name and timezone from the shop, the
+    # customer's phone from `calls.caller_number` (never from a model), the
+    # customer via `customers_identify`, the catalogue via `services_catalog`.
+    # Sending them from here too would be a second, drifting copy of the
+    # context — and the engine ignores unknown fields anyway, so this side and
+    # that one deploy in either order.
     payload = {
         "shop_id": str(shop_id),
-        # Not bookkeeping: the engine passes this back to *this* repo's voice
-        # tools, which read the shop off the session row and never off a
-        # header. It is the authorization basis for every booking the turn
-        # touches.
+        # Not bookkeeping: the session row this names is how the engine finds
+        # the customer's phone, and what its session writes are scoped to.
         "call_id": str(call_id),
-        "shop_name": shop_name,
-        "services": services,
-        "intake": intake,
         "messages": messages,
-        "first_turn": first_turn,
-        "customer_name": customer_name,
-        "customer_phone": customer_phone,
         "now": now.isoformat(),
     }
 

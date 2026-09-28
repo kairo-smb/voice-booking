@@ -8,13 +8,13 @@ three things, and two of them are about the text never being trusted as given:
   touches the service, so an owner who pastes an essay pays for it each time;
 - a shop can only write intake for a service it owns, because the one place a
   cross-tenant leak would be invisible is inside a prompt;
-- `for_services([])` does not go to the database — the agent calls it on every
-  turn, and a query that can only return `{}` is a round trip for nothing.
+- the config screen reads back exactly what the owner wrote, cleared fields
+  included. (The agents' own read lives in the marketing-engine now.)
 
 The fake below applies each statement's own predicate rather than matching SQL
 text, so the tests are about behaviour. The SQL itself is checked against a
 real Postgres separately (the scratch-DB run in the task report) — a fake
-cannot tell us whether `= ANY($2::uuid[])` binds, or whether an
+cannot tell us whether an
 `INSERT … SELECT … WHERE EXISTS … ON CONFLICT` is even legal.
 """
 from __future__ import annotations
@@ -56,12 +56,6 @@ class FakeIntake:
 
     async def execute(self, sql: str, *args):
         self.statements.append((sql, args))
-        if "= ANY(" in sql:
-            shop_id, service_ids = args
-            return [
-                dict(r) for (s, sv), r in self.rows.items()
-                if s == shop_id and sv in service_ids and r["questions"] != ""
-            ]
         shop_id = args[0]
         return [dict(r) for (s, _), r in self.rows.items() if s == shop_id]
 
@@ -79,6 +73,11 @@ class FakeIntake:
         return dict(row)
 
 
+async def _questions(shop_id) -> dict[str, str]:
+    """What the owner has on file, keyed like the old agent read."""
+    return {str(r["service_id"]): r["questions"] for r in await si.for_shop(shop_id)}
+
+
 @pytest.fixture
 def db():
     fake = FakeIntake()
@@ -94,7 +93,7 @@ async def test_questions_are_capped_at_2000_characters(db):
     # The cap is the server's. A UI counter that the server does not back is
     # not a cap — this text enters the prompt on every single turn.
     await si.set_questions(shop_id=SHOP, service_id=COLORE, questions="x" * 3500)
-    got = await si.for_services(SHOP, [COLORE])
+    got = await _questions(SHOP)
     assert len(got[str(COLORE)]) == si.MAX_QUESTIONS_CHARS == 2000
 
 
@@ -103,34 +102,6 @@ async def test_text_at_the_cap_is_stored_whole(db):
     exact = "y" * 2000
     row = await si.set_questions(shop_id=SHOP, service_id=COLORE, questions=exact)
     assert row["questions"] == exact
-
-
-# --- what the agent reads ---------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_only_the_services_in_play_are_returned(db):
-    await si.set_questions(shop_id=SHOP, service_id=COLORE,
-                           questions="ritocco o completo?")
-    await si.set_questions(shop_id=SHOP, service_id=PIEGA,
-                           questions="liscia o mossa?")
-
-    got = await si.for_services(SHOP, [COLORE])
-
-    assert got == {str(COLORE): "ritocco o completo?"}
-    assert str(PIEGA) not in got
-
-
-@pytest.mark.asyncio
-async def test_for_services_with_no_services_does_not_touch_the_database(db):
-    # Called on every turn of every conversation. A query that can only answer
-    # {} is a round trip bought for nothing.
-    assert await si.for_services(SHOP, []) == {}
-    assert db.statements == []
-
-
-@pytest.mark.asyncio
-async def test_a_service_with_no_intake_is_simply_absent(db):
-    assert await si.for_services(SHOP, [COLORE, PIEGA]) == {}
 
 
 # --- writing ----------------------------------------------------------------
@@ -144,7 +115,7 @@ async def test_setting_questions_twice_updates_rather_than_erroring(db):
                                  questions="seconda")
 
     assert row["questions"] == "seconda"
-    assert await si.for_services(SHOP, [COLORE]) == {str(COLORE): "seconda"}
+    assert await _questions(SHOP) == {str(COLORE): "seconda"}
 
 
 @pytest.mark.asyncio
@@ -153,14 +124,14 @@ async def test_empty_questions_are_allowed_and_mean_nothing_extra_to_ask(db):
     # field is a configured shop, not an unfinished one.
     row = await si.set_questions(shop_id=SHOP, service_id=COLORE, questions="")
     assert row["questions"] == ""
-    assert await si.for_services(SHOP, [COLORE]) == {}
+    assert await _questions(SHOP) == {str(COLORE): ""}
 
 
 @pytest.mark.asyncio
-async def test_clearing_questions_removes_them_from_the_agents_view(db):
+async def test_clearing_questions_stores_them_as_empty(db):
     await si.set_questions(shop_id=SHOP, service_id=COLORE, questions="qualcosa")
     await si.set_questions(shop_id=SHOP, service_id=COLORE, questions="")
-    assert await si.for_services(SHOP, [COLORE]) == {}
+    assert await _questions(SHOP) == {str(COLORE): ""}
 
 
 @pytest.mark.asyncio
@@ -190,19 +161,6 @@ async def test_a_shop_cannot_write_intake_for_a_service_it_does_not_own(db):
 
 
 @pytest.mark.asyncio
-async def test_another_shops_service_is_never_returned_even_when_asked_for(db):
-    # The id is passed in deliberately: the read must scope by shop on its own,
-    # not rely on the caller having asked for the right ids. A prompt is
-    # exactly where a leak of someone else's configuration would be invisible.
-    await si.set_questions(shop_id=OTHER_SHOP, service_id=SOMEONE_ELSES,
-                           questions="segreto dell'altro salone")
-
-    got = await si.for_services(SHOP, [COLORE, SOMEONE_ELSES])
-
-    assert got == {}
-
-
-@pytest.mark.asyncio
 async def test_for_shop_lists_only_that_shops_rows(db):
     await si.set_questions(shop_id=SHOP, service_id=COLORE, questions="a")
     await si.set_questions(shop_id=OTHER_SHOP, service_id=SOMEONE_ELSES,
@@ -215,8 +173,7 @@ async def test_for_shop_lists_only_that_shops_rows(db):
 
 @pytest.mark.asyncio
 async def test_for_shop_keeps_empty_rows_so_the_owner_sees_their_own_field(db):
-    # The opposite rule from for_services: the config screen must show the
-    # field the owner deliberately cleared, the prompt must not.
+    # The config screen must show the field the owner deliberately cleared.
     await si.set_questions(shop_id=SHOP, service_id=COLORE, questions="")
     assert [r["questions"] for r in await si.for_shop(SHOP)] == [""]
 

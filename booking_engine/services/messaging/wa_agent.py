@@ -32,8 +32,6 @@ from uuid import UUID
 from booking_engine.clients import marketing_agent
 from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.config import get_settings
-from booking_engine.db import queries
-from booking_engine.db import service_intake_queries as intake_q
 from booking_engine.db import voice_config_queries as config_q
 from booking_engine.db import wa_session_queries as wsq
 from booking_engine.db import whatsapp_thread_queries as tq
@@ -179,20 +177,12 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
                           escalate=reason in _ESCALATING_REASONS)
         return
 
-    # 5. One turn. The catalogue is read once and used twice — the services
-    #    themselves and the owner's per-service intake questions are keyed off
-    #    the same rows, and fetching them separately bought nothing.
-    catalogue = await queries.list_services(shop_id)
+    # 5. One turn. Only the session and the transcript: the engine loads the
+    #    shop, the customer and the catalogue itself from the session row.
     turn = await marketing_agent.turn(
         shop_id=shop_id,
         call_id=call_id,
-        shop_name=await _shop_name(shop_id),
-        services=_services(catalogue),
-        intake=await intake_q.for_services(shop_id, [r["id"] for r in catalogue]),
         messages=await _messages(shop_id, phone, state.get("started_at")),
-        first_turn=int(state.get("agent_turns") or 0) == 0,
-        customer_name=await _customer_name(shop_id, phone),
-        customer_phone=phone,
         now=datetime.now(timezone.utc),
         settings=settings,
     )
@@ -285,51 +275,6 @@ async def _messages(shop_id, phone: str, since) -> list[dict[str, str]]:
         return []
     rows = await wsq.session_transcript(shop_id=shop_id, phone=phone, since=since)
     return [{"role": r["role"], "content": r["content"]} for r in rows]
-
-
-def _services(rows: list[dict]) -> list[dict]:
-    """The catalogue, in the engine's shape. `price_cents` from `price_eur`.
-
-    The agent needs prices to answer "quanto costa", which is an ordinary part
-    of booking on this channel — unlike the voice agent, where cost is gated
-    behind an explicit ask (AGENTS.md 2026-07-21) because a phone agent reciting
-    a price list is a worse experience than a written one.
-    """
-    return [
-        {
-            "id": str(r["id"]),
-            "name": r["service_name"],
-            "duration_minutes": r.get("duration_minutes"),
-            "price_cents": _cents(r.get("price_eur")),
-        }
-        for r in rows
-    ]
-
-
-def _cents(price_eur) -> int | None:
-    """`price_eur` is numeric; the engine's contract is integer cents."""
-    if price_eur is None:
-        return None
-    try:
-        return int(round(float(price_eur) * 100))
-    except (TypeError, ValueError):
-        return None
-
-
-async def _shop_name(shop_id) -> str:
-    shop = await queries.get_shop(shop_id)
-    return str((shop or {}).get("shop_name") or (shop or {}).get("name") or "")
-
-
-async def _customer_name(shop_id, phone: str) -> str | None:
-    """The customer's name, when we know it. None is a legal answer.
-
-    Most inbound numbers match a row — this is a salon's own clientele — but a
-    new customer writing for the first time does not, and the agent asking for
-    a name is better than the agent inventing one.
-    """
-    matches = await queries.find_customers_by_phone(shop_id, phone)
-    return matches[0].get("full_name") if matches else None
 
 
 async def _say(sender: dict, phone: str, text: str) -> None:

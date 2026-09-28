@@ -91,11 +91,6 @@ def wired(monkeypatch):
         turn=Spy(a_turn()),
         send_text=Spy("wamid.out"),
         record_reply=Spy({}),
-        services=Spy([{"id": uuid4(), "service_name": "Taglio",
-                       "duration_minutes": 30, "price_eur": 25}]),
-        shop=Spy({"shop_name": "Salone Rosa"}),
-        customers=Spy([{"id": uuid4(), "full_name": "Giulia"}]),
-        intake=Spy({}),
     )
     monkeypatch.setattr(wa_agent.config_q, "get_config", fakes.config)
     monkeypatch.setattr(wa_agent.tq, "inbound_history", fakes.history)
@@ -106,10 +101,6 @@ def wired(monkeypatch):
     monkeypatch.setattr(wa_agent.marketing_agent, "turn", fakes.turn)
     monkeypatch.setattr(wa_agent.meta, "send_text", fakes.send_text)
     monkeypatch.setattr(wa_agent.tq, "record_reply", fakes.record_reply)
-    monkeypatch.setattr(wa_agent.queries, "list_services", fakes.services)
-    monkeypatch.setattr(wa_agent.queries, "get_shop", fakes.shop)
-    monkeypatch.setattr(wa_agent.queries, "find_customers_by_phone", fakes.customers)
-    monkeypatch.setattr(wa_agent.intake_q, "for_services", fakes.intake)
     return fakes
 
 
@@ -549,15 +540,15 @@ async def test_the_agent_stands_down_silently_on_an_empty_basket(wired):
 
 # --- the payload the engine is handed ---------------------------------------
 
-async def test_the_first_turn_is_flagged_as_such(wired):
+async def test_the_engine_is_handed_only_the_session_and_the_transcript(wired):
+    """The engine loads its own context — shop name and timezone off the shop,
+    the customer via `customers_identify`, the catalogue via `services_catalog`
+    — so this side reads none of it and sends none of it."""
     await run(wired)
-    assert wired.turn.last["first_turn"] is True
-
-
-async def test_a_later_turn_is_not_flagged_as_first(wired):
-    wired.state.result = {**wired.state.result, "agent_turns": 3}
-    await run(wired)
-    assert wired.turn.last["first_turn"] is False
+    assert set(wired.turn.last) == {"shop_id", "call_id", "messages", "now",
+                                    "settings"}
+    assert wired.turn.last["messages"] == [
+        {"role": "user", "content": "vorrei prenotare"}]
 
 
 async def test_the_session_id_is_the_authorization_basis_for_the_turn(wired):
@@ -575,30 +566,6 @@ async def test_the_session_starts_when_the_customer_wrote_not_when_we_answered(w
     r = row(received_at=NOW - timedelta(seconds=12))
     await run(wired, r)
     assert wired.open_session.last["started_at"] == r["received_at"]
-
-
-async def test_prices_reach_the_agent_as_cents(wired):
-    await run(wired)
-    assert wired.turn.last["services"][0]["price_cents"] == 2500
-    assert wired.turn.last["services"][0]["name"] == "Taglio"
-
-
-async def test_the_catalogue_is_read_once_per_turn(wired):
-    """The services and the owner's intake questions are keyed off the same
-    rows. Fetching them separately bought a second round trip and nothing."""
-    await run(wired)
-
-    assert wired.services.count == 1
-    assert wired.intake.count == 1
-
-
-async def test_a_known_customer_is_named_and_an_unknown_one_is_not(wired):
-    await run(wired)
-    assert wired.turn.last["customer_name"] == "Giulia"
-
-    wired.customers.result = []
-    await run(wired, r=row())
-    assert wired.turn.last["customer_name"] is None
 
 
 # --- nothing escapes ---------------------------------------------------------

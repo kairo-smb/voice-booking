@@ -327,7 +327,10 @@ not appear — there is no window on that phone and nothing there to answer.
 One query, not one per thread: the session's routed intent is derived inside
 the list SQL, because this is the Inbox's first screen.
 
-Each row: `phone`, `customer_id`, `last_inbound`, `last_message` (a voice note
+Each row: `phone`, `customer_id` (the newest inbound message's match, else the
+customer the agent linked to the newest WhatsApp session that has one — so a
+first-time writer shows up by name once the agent identifies or creates them),
+`last_inbound`, `last_message` (a voice note
 reads as its transcript), `message_type`, `unread`, `last_outbound`,
 `window_expires_at`, `intent` (the **session's** verdict, not the last
 message's), `escalated` (the newest WhatsApp session's `outcome = 'escalated'`

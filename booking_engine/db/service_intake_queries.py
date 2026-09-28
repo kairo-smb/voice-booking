@@ -11,6 +11,10 @@ agent needs exactly the same thing; it is a table of its own and not a column
 on `business_app_core.services` because that schema belongs to the webapp and
 this repo does not alter it.
 
+The agents read it themselves (marketing-engine's customer-agents
+`services_catalog`, as per-service owner notes); this module is the owner's
+write side and the config screen's read.
+
 **The cap is the point of this module, not a detail.** The text is re-read
 into the agent's prompt on *every turn of every conversation that touches the
 service*. An owner who pastes an essay pays for it on each one, and the
@@ -42,42 +46,11 @@ def normalise(questions: str | None) -> str:
     return (questions or "").strip()[:MAX_QUESTIONS_CHARS].strip()
 
 
-async def for_services(shop_id: UUID, service_ids: list[UUID]) -> dict[str, str]:
-    """What to ask about each of these services, keyed by service id as text.
-
-    Returns **only services that have something to ask**: a row set to empty
-    means "nothing extra", and carrying it as `""` into the caller would add a
-    blank section to the prompt for no reason. A service with no row at all is
-    absent for the same reason — absence and emptiness mean the same thing
-    here, which is why the two are deliberately not distinguished.
-
-    No ids, no query. The agent calls this on every turn, and a statement that
-    can only answer `{}` is a round trip bought for nothing.
-
-    Scoped by `shop_id` on its own, never by the caller having passed the right
-    ids: a prompt is exactly where another salon's configuration would leak
-    without anyone seeing it.
-    """
-    if not service_ids:
-        return {}
-    rows = await execute(
-        """
-        SELECT service_id, questions
-          FROM voice_agent.service_intake
-         WHERE shop_id = $1
-           AND service_id = ANY($2::uuid[])
-           AND questions <> ''
-        """,
-        shop_id, list(service_ids),
-    )
-    return {str(r["service_id"]): r["questions"] for r in rows}
-
-
 async def for_shop(shop_id: UUID) -> list[dict]:
     """Every row the shop has, for the config screen.
 
-    Unlike `for_services`, empty rows are kept: the owner who deliberately
-    cleared a field should see it cleared, not see it vanish. The screen joins
+    Empty rows are kept: the owner who deliberately cleared a field should see
+    it cleared, not see it vanish. The screen joins
     these to the service list it already loaded — service *names* live in
     `business_app_core`, which this repo reads but does not own, and the webapp
     has them in hand already.

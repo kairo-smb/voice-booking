@@ -176,9 +176,26 @@ async def thread_list(shop_id: UUID) -> list[dict]:
             FROM voice_agent.calls
            WHERE shop_id = $1 AND channel = 'whatsapp'
            ORDER BY ltrim(caller_number, '+'), started_at DESC
+        ), session_customer AS (
+          -- Who the agent decided this is. Inbound rows carry the customer the
+          -- phone matched *when the message landed*, so a first-time writer's
+          -- are NULL forever; the agent then identifies or creates them and
+          -- links the session row (`POST /sessions/:call_id/customer`), not
+          -- the messages. The newest session that has a customer, rather than
+          -- the newest session: a fresh conversation opens its row before the
+          -- agent has identified anyone, and the thread must not forget the
+          -- customer for those seconds. Same phone, same shop, same person.
+          SELECT DISTINCT ON (ltrim(caller_number, '+'))
+                 ltrim(caller_number, '+') AS key,
+                 customer_id
+            FROM voice_agent.calls
+           WHERE shop_id = $1 AND channel = 'whatsapp' AND customer_id IS NOT NULL
+           ORDER BY ltrim(caller_number, '+'), started_at DESC
         )
         SELECT li.phone,
-               li.customer_id,
+               -- The message's own match first: it is what the webapp's
+               -- matching wrote, and a session link never overrides it.
+               coalesce(li.customer_id, sc.customer_id) AS customer_id,
                li.last_inbound,
                li.last_message,
                li.message_type,
@@ -214,6 +231,7 @@ async def thread_list(shop_id: UUID) -> list[dict]:
           LEFT JOIN last_out lo USING (key)
           LEFT JOIN routed r ON ltrim(r.from_phone, '+') = li.key
           LEFT JOIN escalations e USING (key)
+          LEFT JOIN session_customer sc USING (key)
           LEFT JOIN voice_agent.shop_config cfg ON cfg.shop_id = $1
          ORDER BY li.last_inbound DESC
         """,
