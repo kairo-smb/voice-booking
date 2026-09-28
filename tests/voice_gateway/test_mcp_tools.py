@@ -21,10 +21,10 @@ def env(monkeypatch):
     monkeypatch.setenv("VOICE_AGENT_TOOL_SECRET", SECRET)
 
 
-def test_tool_defs_expose_the_twelve_tools():
+def test_tool_defs_expose_the_eleven_tools():
     names = {t["name"] for t in TOOL_DEFS}
     assert "create_booking" in names and "escalate_to_merchant" in names
-    assert len(TOOL_DEFS) == 12
+    assert len(TOOL_DEFS) == 11
     assert all("inputSchema" in t and "description" in t for t in TOOL_DEFS)
 
 

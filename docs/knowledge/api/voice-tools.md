@@ -1,6 +1,6 @@
 # Voice Tools
 
-The 12 tools OpenAI calls during a live session, over MCP (`/mcp`, dispatched in-process — see [Architecture](../architecture.md#call-flow)) or directly via their own `/voice/tools/*` routes. All require `Authorization: Bearer <VOICE_AGENT_TOOL_SECRET>` (`require_tool_token`). Tool semantics/rules: [Voice Agent Logic](../voice-agent-logic.md).
+The 11 tools OpenAI calls during a live session, over MCP (`/mcp`, dispatched in-process — see [Architecture](../architecture.md#call-flow)) or directly via their own `/voice/tools/*` routes. All require `Authorization: Bearer <VOICE_AGENT_TOOL_SECRET>` (`require_tool_token`). Tool semantics/rules: [Voice Agent Logic](../voice-agent-logic.md).
 
 > **Maintenance rule:** a tool added/removed/changed (in `safety_layer.py` or its route file) updates this file in the same change. See [../README](../README.md#maintenance-rule).
 
@@ -10,7 +10,6 @@ The 12 tools OpenAI calls during a live session, over MCP (`/mcp`, dispatched in
 |---|---|---|
 | `get_services` | `POST /voice/tools/get_services` | `voice_tools_catalog.py` |
 | `get_staff_for_service` | `POST /voice/tools/get_staff_for_service` | `voice_tools_catalog.py` |
-| `check_availability` | `POST /voice/tools/check_availability` | `voice_tools_booking.py` |
 | `create_booking` | `POST /voice/tools/create_booking` | `voice_tools_booking.py` |
 | `get_booking` | `POST /voice/tools/get_booking` | `voice_tools_booking.py` |
 | `modify_booking` | `POST /voice/tools/modify_booking` | `voice_tools_booking.py` |
@@ -19,9 +18,10 @@ The 12 tools OpenAI calls during a live session, over MCP (`/mcp`, dispatched in
 | `create_customer_from_call` | `POST /voice/tools/create_customer_from_call` | `voice_tools_identity.py` |
 | `update_customer_from_call` | `POST /voice/tools/update_customer_from_call` | `voice_tools_identity.py` |
 
-`check_availability` returns the `max_results` slots **closest to `preferred_when`** (a naive value is salon time, Europe/Rome), in time order — not the first slots of the day. Without `preferred_when` it returns the earliest.
 | `mark_outcome` | `POST /voice/tools/mark_outcome` | `voice_tools_lifecycle.py` |
 | `escalate_to_merchant` | `POST /voice/tools/escalate_to_merchant` | `voice_tools_lifecycle.py` |
+
+`check_availability` (`POST /voice/tools/check_availability`) was removed on 2026-09-28. Slot search moved to marketing-engine's `availability_search`, which wraps the webapp `/availability` route, the only slot engine. The voice agent has no slot search until Phase C points its session at the marketing-engine MCP surface, and the remaining tools here move there in that phase too.
 
 Session lifecycle webhooks (same auth, same "in-process, not agent-facing tools" category):
 

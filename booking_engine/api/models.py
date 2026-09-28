@@ -51,18 +51,6 @@ class CreateCustomerRequest(BaseModel):
     phone_number: str | None = None
 
 
-class AvailableSlotResponse(BaseModel):
-    staff_id: UUID
-    staff_name: str
-    slot_start: datetime
-    slot_end: datetime
-
-
-class AvailabilityResponse(BaseModel):
-    slots: list[AvailableSlotResponse]
-    suggestions: list[AvailableSlotResponse] | None = None
-
-
 class AppointmentServiceDetail(BaseModel):
     service_id: UUID
     service_name: str | None = None

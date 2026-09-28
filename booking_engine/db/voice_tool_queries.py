@@ -1,15 +1,12 @@
 """DB access for voice agent tools — customers, services, appointments."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 import asyncpg
 
 from booking_engine.db import connection
-
-_ROME = ZoneInfo("Europe/Rome")
 
 
 async def find_customers_by_phone(*, shop_id: UUID, phone_digits: str) -> list[dict]:
@@ -156,82 +153,14 @@ async def list_staff_for_service(*, shop_id: UUID, service_id: UUID) -> list[dic
     )
 
 
-# ponytail: rank from a wide candidate pool rather than teach the ground-truth
-# searches about proximity. 200 covers two weeks of a small salon; a shop with
-# more slots than that loses the far tail, never the requested hour.
-_CANDIDATES = 200
-
-
-def _closest(items: list[dict], want, n: int) -> list[dict]:
-    """The `n` slots nearest `want`, returned in time order.
-
-    Both searches answer in pure time order, so the old `[:max_results]` handed
-    the agent the first five slots of the first morning whatever the customer
-    asked — "verso le 15" on an empty Thursday came back "only 9:00–11:30"
-    (found live in QA, 2026-09-28).
-    """
-    if want is None:
-        return items[:n]
-    near = sorted(items, key=lambda c: abs(c["slot_start"] - want))[:n]
-    return sorted(near, key=lambda c: c["slot_start"])
-
-
-async def find_availability(
-    *, shop_id: UUID, services: list[dict],
-    preferred_when: datetime | None,
-    max_results: int,
-) -> list[dict]:
-    """Open slots for the ordered `services` list — delegates to the
-    ground-truth booking layer. A single-service request reuses the
-    existing single-staff slot search unchanged; multiple services go
-    through the chain search (different staff per leg, ordered, gapped).
-
-    `preferred_when` is the hour asked for, not just the day to start from:
-    results are the slots closest to it. A naive value is salon time, which
-    is what a customer means by "alle 15".
-    """
-    from booking_engine.db import queries
-
-    want = preferred_when
-    if want is not None and want.tzinfo is None:
-        want = want.replace(tzinfo=_ROME)
-    start_date = (want or datetime.now(_ROME)).astimezone(_ROME).date()
-    end_date = start_date + timedelta(days=14)
-
-    if len(services) == 1:
-        leg = services[0]
-        slots = await queries.get_available_slots(
-            shop_id=shop_id, service_ids=[leg["service_id"]],
-            start_date=start_date, end_date=end_date, staff_id=leg.get("staff_id"),
-        )
-        return [
-            {
-                "slot_start": s["slot_start"], "slot_end": s["slot_end"],
-                "legs": [{
-                    "service_id": leg["service_id"], "staff_id": s["staff_id"],
-                    "staff_name": s["staff_name"],
-                    "slot_start": s["slot_start"], "slot_end": s["slot_end"],
-                }],
-            }
-            for s in _closest(slots, want, max_results)
-        ]
-
-    chains = await queries.get_available_slot_chains(
-        shop_id=shop_id, services=services,
-        start_date=start_date, end_date=end_date,
-        max_results=max_results if want is None else _CANDIDATES,
-    )
-    return _closest(chains, want, max_results)
-
-
 async def insert_booking_locked(
     *, shop_id: UUID, customer_id: UUID, legs: list[dict],
 ) -> dict:
     """Create the appointment via the ground-truth layer. Raises on conflict.
 
     `legs` is the ordered list of {"service_id", "staff_id", "slot_start"} —
-    exactly what create_booking receives, normally copied from a chosen
-    check_availability chain. A single leg reuses the existing single-staff
+    exactly what create_booking receives, normally copied from a slot the
+    webapp's availability search returned. A single leg reuses the existing single-staff
     create_appointment path unchanged; multiple legs go through
     create_appointment_chain.
 
@@ -352,55 +281,6 @@ async def modify_appointment(
         new_start_time=new_slot_start,
     )
     return result is not None
-
-
-async def any_staff_could_ever_serve(
-    *, shop_id: UUID, services: list[dict],
-) -> bool:
-    """Is there an active staff member who can do ALL these services **and**
-    works at all?
-
-    This exists to tell two very different empty results apart. `find_availability`
-    returns `[]` both for "the diary is full that fortnight" and for "nobody in
-    this shop can ever perform this service", and the agent cannot act on the
-    difference it cannot see: told only "no slots", it offers the customer another
-    day, and another, forever. Found 2026-09-24 on the demo shop, where four
-    services are mapped in `staff_services` only to a staff member with zero
-    `staff_schedules` rows — structurally unbookable, reported as a busy week.
-
-    "Works at all" is the second half on purpose. Eligibility in
-    `staff_services` without a single schedule row produces no candidate slot on
-    any date, so for this question it is the same as not being eligible.
-
-    Mirrors `get_available_slots`' own eligibility test — all requested services
-    covered by one person, and an explicit `staff_id` narrowing it to that person
-    — so the two cannot disagree about who is eligible.
-    """
-    service_ids = [s["service_id"] for s in services]
-    if not service_ids:
-        return False
-    # An explicit staff request narrows the question to that person; the tool
-    # schema allows a different staff_id per leg, so any of them constrains it.
-    named = [s["staff_id"] for s in services if s.get("staff_id")]
-
-    row = await connection.execute_one(
-        """
-        SELECT 1 AS ok
-        FROM business_app_core.staff st
-        WHERE st.shop_id = $1
-          AND st.is_active = true
-          AND ($4::uuid[] = '{}'::uuid[] OR st.id = ANY($4::uuid[]))
-          AND (SELECT COUNT(DISTINCT ss.service_id)
-                 FROM business_app_core.staff_services ss
-                WHERE ss.staff_id = st.id
-                  AND ss.service_id = ANY($2::uuid[])) = $3
-          AND EXISTS (SELECT 1 FROM business_app_core.staff_schedules sch
-                       WHERE sch.staff_id = st.id)
-        LIMIT 1
-        """,
-        shop_id, service_ids, len(set(service_ids)), named,
-    )
-    return row is not None
 
 
 async def service_belongs_to_shop(*, shop_id: UUID, service_id: UUID) -> bool:

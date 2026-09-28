@@ -18,8 +18,9 @@ def test_safety_prompt_mentions_key_rules():
     assert "inventare" in text  # no hallucination
 
 
-def test_default_allowlist_contains_12_tools():
-    assert len(DEFAULT_TOOL_ALLOWLIST) == 12
+def test_default_allowlist_contains_11_tools():
+    assert len(DEFAULT_TOOL_ALLOWLIST) == 11
+    assert "check_availability" not in DEFAULT_TOOL_ALLOWLIST
     assert "create_booking" in DEFAULT_TOOL_ALLOWLIST
     assert "escalate_to_merchant" in DEFAULT_TOOL_ALLOWLIST
 
@@ -43,12 +44,6 @@ def test_get_services_schema_has_include_price_param():
 def test_safety_prompt_mentions_multi_service_ordering_rule():
     text = SAFETY_PROMPT.lower()
     assert "servizi multipli" in text
-
-
-def test_check_availability_schema_requires_services_list():
-    schema = _TOOL_SCHEMAS["check_availability"]["parameters"]
-    assert schema["required"] == ["services"]
-    assert schema["properties"]["services"]["type"] == "array"
 
 
 def test_create_booking_schema_requires_legs_list():

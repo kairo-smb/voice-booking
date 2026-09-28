@@ -1,4 +1,4 @@
-"""Voice tool endpoints — availability + booking write/modify/cancel."""
+"""Voice tool endpoints — booking write/modify/cancel."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -10,49 +10,17 @@ from pydantic import BaseModel
 
 from booking_engine.api.deps import require_tool_token
 from booking_engine.api.voice_tool_models import (
-    AvailabilityChain, BookingOut, CancelBookingIn, CheckAvailabilityIn,
-    CreateBookingIn, Envelope, ModifyBookingIn,
+    BookingOut, CancelBookingIn, CreateBookingIn, Envelope, ModifyBookingIn,
 )
 from booking_engine.config import Settings, get_settings
 from booking_engine.db.voice_tool_queries import (
-    any_staff_could_ever_serve, attach_booking_to_call, find_availability,
-    insert_booking_locked, service_belongs_to_shop,
+    attach_booking_to_call, insert_booking_locked, service_belongs_to_shop,
 )
 from booking_engine.services.booking_constraints import (
     slot_in_past, within_lead_time,
 )
 
 router = APIRouter(prefix="/voice/tools", tags=["voice-tools-booking"])
-
-
-@router.post("/check_availability")
-async def check_availability(
-    body: CheckAvailabilityIn,
-    _auth: Annotated[bool, Depends(require_tool_token)],
-    x_shop_id: Annotated[UUID, Header(alias="X-Shop-Id")],
-) -> Envelope[list[AvailabilityChain]]:
-    services = [{"service_id": s.service_id, "staff_id": s.staff_id} for s in body.services]
-    rows = await find_availability(
-        shop_id=x_shop_id, services=services,
-        preferred_when=body.preferred_when, max_results=body.max_results,
-    )
-    # An empty result has two meanings and the agent can only act on one of them.
-    # "Busy that fortnight" is worth offering another date for; "nobody here can
-    # ever do this" is not, and an agent that cannot tell them apart walks the
-    # customer through Tuesday, Wednesday, Thursday and never stops. So the
-    # second one is a refusal, which the marketing-engine's loop counts against
-    # its refusal budget and escalates to a human — the honest end for a request
-    # the shop cannot serve.
-    #
-    # The extra query runs only when there were no slots, so the booking path
-    # pays nothing for it.
-    if not rows and not await any_staff_could_ever_serve(
-        shop_id=x_shop_id, services=services,
-    ):
-        return Envelope[list[AvailabilityChain]](ok=False, error="no_staff_for_service")
-
-    out = [AvailabilityChain(**r) for r in rows]
-    return Envelope[list[AvailabilityChain]](ok=True, data=out)
 
 
 @router.post("/create_booking")

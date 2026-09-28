@@ -31,7 +31,7 @@ Four distinct auth schemes across the surface — see [API overview](api/README.
 - `VOICE_AGENT_TOOL_SECRET` — the bearer for the agent-facing surface: OpenAI's Realtime tool/event calls (`/voice/tools/*`, `/voice/events/*`) and the MCP mount, and the marketing-engine booking agent reaching the same `/voice/tools/*` routes over HTTP. Renamed from `OPENAI_TOOL_SECRET` on 2026-09-22 — the old name read as a credential for authenticating *to* OpenAI, when it is the token OpenAI and the engine present *to us*.
 - Twilio request-signature verification (`TWILIO_AUTH_TOKEN`) — the TwiML webhook and, since 2026-08-12, the two SMS webhooks (`services/twilio_signature.py`, one verifier shared by all three routes).
 - The OpenAI `realtime.call.incoming` webhook (`/voice/openai/incoming`) currently verifies a signature **only if `OPENAI_WEBHOOK_SECRET` is set** — unset, it accepts unsigned requests (a known, flagged gap; see the `ponytail:` comment at the top of `voice_openai.py`).
-- The plain REST API (`shops`, `customers`, `services`, `availability`, `appointments`) has **no auth dependency at all** today.
+- The plain REST API (`shops`, `customers`, `services`, `appointments`; `availability` was removed on 2026-09-28, since the webapp is the only slot engine) has **no auth dependency at all** today.
 
 ## Self-service number provisioning (Path 2 onboarding)
 

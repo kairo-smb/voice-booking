@@ -22,11 +22,10 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="Virtual Assistant Booking Engine", version="1.0.0", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-    from booking_engine.api.routes import shops, customers, services, availability, appointments
+    from booking_engine.api.routes import shops, customers, services, appointments
     app.include_router(shops.router, prefix="/api/v1")
     app.include_router(customers.router, prefix="/api/v1")
     app.include_router(services.router, prefix="/api/v1")
-    app.include_router(availability.router, prefix="/api/v1")
     app.include_router(appointments.router, prefix="/api/v1")
     from booking_engine.api.routes import voice  # noqa: WPS433
     app.include_router(voice.router, prefix="/api/v1")

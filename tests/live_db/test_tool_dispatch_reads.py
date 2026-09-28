@@ -85,26 +85,6 @@ async def test_get_staff_for_service_returns_seeded_staff(
     assert any(s["staff_id"] == str(STAFF_MIRCO) for s in resp["data"])
 
 
-async def test_check_availability_returns_chain(
-    db_connection, tool_app, settings, cleanup_call_ids,
-):
-    call_id = await insert_call(shop_id=SHOP_ID, caller_phone=None, matched_customer_id=None)
-    cleanup_call_ids.append(call_id)
-    token = _token(SHOP_ID, call_id, settings)
-    preferred = datetime.combine(_next_weekday(), datetime.min.time(), tzinfo=timezone.utc)
-
-    resp = await execute_tool(
-        "check_availability",
-        {"services": [{"service_id": str(SVC_TAGLIO_UOMO), "staff_id": str(STAFF_MIRCO)}],
-         "preferred_when": preferred.isoformat()},
-        token=token, secret=settings.voice_agent_tool_secret, app=tool_app,
-    )
-
-    assert resp["ok"] is True
-    assert len(resp["data"]) > 0
-    assert resp["data"][0]["legs"][0]["staff_id"] == str(STAFF_MIRCO)
-
-
 async def test_get_booking_returns_customers_next_appointment(
     db_connection, tool_app, settings, cleanup_call_ids, cleanup_customer_ids,
     cleanup_appointment_ids,

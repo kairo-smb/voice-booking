@@ -73,34 +73,7 @@ class StaffOut(BaseModel):
     name: str
 
 
-# Availability + booking
-class BookingServiceIn(BaseModel):
-    """One requested leg of a (possibly multi-service) booking, in the
-    order the services should be performed."""
-    service_id: UUID
-    staff_id: OptionalUUID = None  # None = auto-assign an eligible, available staff member
-
-
-class CheckAvailabilityIn(BaseModel):
-    services: list[BookingServiceIn] = Field(..., min_length=1)
-    preferred_when: OptionalDatetime = None
-    max_results: int = 5
-
-
-class AvailabilityLeg(BaseModel):
-    service_id: UUID
-    staff_id: UUID
-    staff_name: str
-    slot_start: datetime
-    slot_end: datetime
-
-
-class AvailabilityChain(BaseModel):
-    slot_start: datetime
-    slot_end: datetime
-    legs: list[AvailabilityLeg]
-
-
+# Booking
 class CreateBookingLeg(BaseModel):
     service_id: UUID
     staff_id: UUID

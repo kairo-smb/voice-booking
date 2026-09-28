@@ -90,7 +90,7 @@ async def test_assemble_returns_tool_descriptions():
     names = {t["name"] for t in out.tools}
     assert "lookup_customer" in names
     assert "create_booking" in names
-    assert len(out.tools) == 12
+    assert len(out.tools) == 11
 
 
 @pytest.mark.asyncio
