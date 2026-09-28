@@ -160,7 +160,7 @@ are just silently incorrect — so two tests in `test_whatsapp.py` pin it.
 
 `daily_cap` is deliberately the *effective* number, not the raw column — showing our 5000 when Meta allows 250 would promise throughput we refuse to deliver. The raw value is `configured_daily_cap`. See [Meta's limits are a floor](#metas-limits-are-a-floor-nothing-may-cross).
 
-`sent_today` is the calendar-day counter the owner reads; `sent_last_24h` is the rolling one the Meta tier is checked against. They are not interchangeable.
+`sent_today` is the calendar-day counter the owner reads — the **salon's** day, from midnight in `shops.timezone`, not UTC midnight; `sent_last_24h` is the rolling one the Meta tier is checked against. They are not interchangeable.
 
 `pricing` is an estimate from `services/messaging/whatsapp_pricing.py` — Meta's Italian per-category rate, and nothing else. `service` is genuinely **$0** now that Twilio's flat per-message fee is out of the path. No `credits` field: see [Billing](#billing).
 

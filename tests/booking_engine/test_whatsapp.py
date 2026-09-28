@@ -1858,6 +1858,31 @@ def test_owner_counters_and_the_cooldown_count_marketing_only():
     assert "t.name = om.template_name" in q._MARKETING_JOIN
 
 
+@pytest.mark.asyncio
+async def test_sent_today_counts_the_salons_day_not_utcs(monkeypatch):
+    """"Oggi" is the salon's calendar day. Truncating `now()` in UTC starts it
+    at 02:00 Rome in summer, so a campaign dripping at 01:00 would land in
+    yesterday's counter. The shop's own timezone, read from the shop row —
+    nothing new is bound."""
+    from booking_engine.db import whatsapp_queries as q
+
+    seen = {}
+
+    async def fake(sql, *args):
+        seen["sql"] = " ".join(sql.split())
+        seen["args"] = args
+        return {"n": 3}
+
+    monkeypatch.setattr(q, "execute_one", fake)
+    assert await q.sent_today(SHOP) == 3
+    sql = seen["sql"]
+    assert ("date_trunc('day', now() AT TIME ZONE s.timezone) "
+            "AT TIME ZONE s.timezone") in sql
+    assert "JOIN business_app_core.shops s ON s.id = om.shop_id" in sql
+    assert "date_trunc('day', now())" not in sql
+    assert seen["args"] == (SHOP,)
+
+
 def test_metas_tier_window_counts_every_business_initiated_message():
     """The other half, and the one that must NOT be narrowed.
 
