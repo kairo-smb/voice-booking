@@ -52,12 +52,14 @@ async def _post(path, json, headers=AUTH):
 async def test_session_of_another_shop_is_unknown(path, body):
     with patch(f"{_MOD}.get_call", new=AsyncMock(return_value=_call(uuid4()))), \
          patch(f"{_MOD}.set_call_outcome", new=AsyncMock()) as outcome, \
+         patch(f"{_MOD}.record_session_outcome", new=AsyncMock()) as recorded, \
          patch(f"{_MOD}.insert_callback_memo", new=AsyncMock()) as memo, \
          patch(f"{_MOD}.link_customer", new=AsyncMock()) as link:
         r = await _post(path, body)
     assert r.status_code == 404
     assert r.json() == {"ok": False, "data": None, "error": "unknown_session"}
     outcome.assert_not_awaited()
+    recorded.assert_not_awaited()
     memo.assert_not_awaited()
     link.assert_not_awaited()
 
@@ -151,7 +153,7 @@ async def test_escalation_writes_memo_marks_session_and_pushes():
 @pytest.mark.asyncio
 async def test_outcome_is_recorded():
     with patch(f"{_MOD}.get_call", new=AsyncMock(return_value=_call())), \
-         patch(f"{_MOD}.set_call_outcome", new=AsyncMock()) as outcome:
+         patch(f"{_MOD}.record_session_outcome", new=AsyncMock()) as outcome:
         r = await _post("outcome", {"outcome": "booked",
                                     "summary": "Maria ha prenotato."})
     assert r.json() == {"ok": True, "data": {"marked": True}, "error": None}
@@ -163,7 +165,7 @@ async def test_outcome_is_recorded():
 @pytest.mark.asyncio
 async def test_outcome_info_only_is_stored_as_info():
     with patch(f"{_MOD}.get_call", new=AsyncMock(return_value=_call())), \
-         patch(f"{_MOD}.set_call_outcome", new=AsyncMock()) as outcome:
+         patch(f"{_MOD}.record_session_outcome", new=AsyncMock()) as outcome:
         r = await _post("outcome", {"outcome": "info_only"})
     assert r.status_code == 200
     assert outcome.await_args.kwargs["outcome"] == "info"
@@ -172,7 +174,7 @@ async def test_outcome_info_only_is_stored_as_info():
 @pytest.mark.asyncio
 async def test_outcome_outside_the_check_is_rejected():
     with patch(f"{_MOD}.get_call", new=AsyncMock(return_value=_call())), \
-         patch(f"{_MOD}.set_call_outcome", new=AsyncMock()) as outcome:
+         patch(f"{_MOD}.record_session_outcome", new=AsyncMock()) as outcome:
         r = await _post("outcome", {"outcome": "whatever"})
     assert r.status_code == 422
     outcome.assert_not_awaited()
@@ -190,7 +192,7 @@ async def test_outcome_records_the_sessions_appointment(outcome_name, created):
     with patch(f"{_MOD}.get_call", new=AsyncMock(return_value=_call())), \
          patch(f"{_MOD}.get_appointment_shop_id",
                new=AsyncMock(return_value=SHOP)) as owner, \
-         patch(f"{_MOD}.set_call_outcome", new=AsyncMock()) as outcome, \
+         patch(f"{_MOD}.record_session_outcome", new=AsyncMock()) as outcome, \
          patch(f"{_MOD}.attach_appointment_to_call", new=AsyncMock()) as attach:
         r = await _post("outcome", {"outcome": outcome_name,
                                     "appointment_id": str(appt)})
@@ -209,7 +211,7 @@ async def test_outcome_with_another_shops_appointment_is_refused(owner_shop):
     with patch(f"{_MOD}.get_call", new=AsyncMock(return_value=_call())), \
          patch(f"{_MOD}.get_appointment_shop_id",
                new=AsyncMock(return_value=owner_shop)), \
-         patch(f"{_MOD}.set_call_outcome", new=AsyncMock()) as outcome, \
+         patch(f"{_MOD}.record_session_outcome", new=AsyncMock()) as outcome, \
          patch(f"{_MOD}.attach_appointment_to_call", new=AsyncMock()) as attach:
         r = await _post("outcome", {"outcome": "booked",
                                     "appointment_id": str(uuid4())})
@@ -224,9 +226,31 @@ async def test_outcome_with_another_shops_appointment_is_refused(owner_shop):
 async def test_outcome_without_appointment_touches_no_appointment():
     with patch(f"{_MOD}.get_call", new=AsyncMock(return_value=_call())), \
          patch(f"{_MOD}.get_appointment_shop_id", new=AsyncMock()) as owner, \
-         patch(f"{_MOD}.set_call_outcome", new=AsyncMock()), \
+         patch(f"{_MOD}.record_session_outcome", new=AsyncMock()), \
          patch(f"{_MOD}.attach_appointment_to_call", new=AsyncMock()) as attach:
         r = await _post("outcome", {"outcome": "info_only"})
     assert r.status_code == 200
     owner.assert_not_awaited()
     attach.assert_not_awaited()
+
+
+# ── outcome never undoes an escalation (review I1/I2, 2026-09-28) ─────────
+
+
+@pytest.mark.asyncio
+async def test_record_session_outcome_keeps_an_escalation_and_a_written_summary(monkeypatch):
+    """An automatic 'booked' can land after the owner took the thread over;
+    `outcome = 'escalated'` is that takeover flag, and an empty summary must
+    not erase the escalation's customer message."""
+    from booking_engine.db import voice_calls_queries as q
+    seen = {}
+
+    async def fake(sql, *args):
+        seen["sql"], seen["args"] = sql, args
+    monkeypatch.setattr(q.connection, "execute_void", fake)
+
+    await q.record_session_outcome(call_id=CALL, outcome="booked", summary="")
+    sql = " ".join(seen["sql"].split())
+    assert "CASE WHEN outcome = 'escalated' THEN outcome ELSE $2 END" in sql
+    assert "coalesce(nullif($3, ''), summary)" in sql
+    assert "outcome_reason" not in sql

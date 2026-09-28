@@ -76,8 +76,8 @@ async def create_customer(
     # assistant made rather than something the owner typed. The webapp's
     # anagrafiche badge is driven by `verified = false` ALONE — a row created
     # here without it is indistinguishable from a hand-typed one and no human
-    # will ever be prompted to look at it. insert_customer_from_call() has set
-    # both since it was written; this path was left on the column defaults
+    # will ever be prompted to look at it. The assistants' creation path (now the webapp's
+    # /agent/customers, formerly insert_customer_from_call) sets both; this path was left on the column defaults
     # (`manual` / `true`) and quietly wasn't.
     await execute_void(
         "INSERT INTO business_app_core.customers "

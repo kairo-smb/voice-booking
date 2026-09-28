@@ -68,7 +68,10 @@ async def fetch_instructions(
                 params={"shop_id": str(shop_id), "call_id": str(call_id)},
                 headers={"Authorization": f"Bearer {token}"},
             )
-    except httpx.HTTPError as exc:
+    # Not just httpx.HTTPError: a malformed MARKET_INTEL_API_URL raises
+    # httpx.InvalidURL, which isn't one, and would escape into the SIP accept —
+    # the call would never be answered instead of answering persona-only.
+    except Exception as exc:  # noqa: BLE001
         logger.error("voice.instructions_unreachable shop=%s call=%s err=%s",
                      shop_id, call_id, exc)
         return None

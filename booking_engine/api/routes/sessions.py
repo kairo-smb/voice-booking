@@ -34,7 +34,7 @@ from booking_engine.api.voice_tool_models import EscalateIn, Envelope
 from booking_engine.clients.push_notifications import send_push
 from booking_engine.db.voice_calls_queries import (
     attach_appointment_to_call, get_appointment_shop_id, get_call,
-    insert_callback_memo, set_call_outcome,
+    insert_callback_memo, record_session_outcome, set_call_outcome,
 )
 from booking_engine.db.voice_queries import link_customer
 from booking_engine.db.voice_tool_queries import get_customer_shop_id
@@ -142,10 +142,10 @@ async def set_session_outcome(
         appointment_id=body.appointment_id,
     ) != x_shop_id:
         return _refuse("unknown_appointment")
-    await set_call_outcome(
+    await record_session_outcome(
         call_id=call_id,
         outcome="info" if body.outcome == "info_only" else body.outcome,
-        summary=body.summary, callback_window=None,
+        summary=body.summary or "",
     )
     if body.appointment_id is not None:
         await attach_appointment_to_call(

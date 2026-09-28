@@ -44,6 +44,29 @@ async def set_call_outcome(
     )
 
 
+async def record_session_outcome(*, call_id: UUID, outcome: str, summary: str) -> None:
+    """The outcome of a session's work — never a step down from escalated.
+
+    marketing-engine posts this automatically after every successful booking
+    write, so it can land after the owner took the thread over mid-turn
+    (`mark_escalated` via an echo). `outcome = 'escalated'` IS that thread's
+    takeover flag: overwriting it with 'booked' would hand the conversation
+    back to the agent, which then talks over the owner. So an escalated row
+    keeps its outcome and its `outcome_reason` (the takeover reason or the
+    callback window), and an empty summary never erases a written one — the
+    escalation's customer message is what the owner reads in the Inbox.
+    """
+    await connection.execute_void(
+        """
+        UPDATE voice_agent.calls
+        SET outcome = CASE WHEN outcome = 'escalated' THEN outcome ELSE $2 END,
+            summary = coalesce(nullif($3, ''), summary)
+        WHERE id = $1
+        """,
+        call_id, outcome, summary,
+    )
+
+
 async def get_appointment_shop_id(*, appointment_id: UUID) -> UUID | None:
     """Which shop owns this appointment. None when there is no such appointment."""
     row = await connection.execute_one(

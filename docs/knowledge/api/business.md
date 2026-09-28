@@ -31,8 +31,7 @@ the profile in the webapp clears it. So a row we create without it is
 indistinguishable from one the owner typed by hand, and no human is ever prompted
 to check a name the assistant only heard over a phone line.
 
-`insert_customer_from_call` (`voice_tool_queries.py`, the tool path the agent
-actually uses) has always set it. `create_customer` (`queries.py`, behind the
+The assistants' own customer creation (formerly `insert_customer_from_call`) now lives in the webapp's `/agent/customers` route (2026-09-28) and sets it too. `create_customer` (`queries.py`, behind the
 REST route above) did not — it ran on the column defaults, `'manual'` / `true` —
 and was fixed on 2026-09-16. Both are pinned by tests. If a third creation path
 ever appears, it sets both columns too.
