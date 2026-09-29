@@ -185,15 +185,18 @@ async def test_the_thread_falls_back_to_the_customer_the_session_identified(
 # --- the "In valutazione" flag -----------------------------------------------
 
 @pytest.mark.asyncio
-async def test_needs_evaluation_is_derived_from_the_routed_cte(monkeypatch):
-    """A thread whose current session has inbound messages and no routed
-    intent — the classifier was unsure and nobody tapped, or there was no
-    credit to classify at all. Derived from the same `routed` CTE the intent
-    comes from, so the badge and the intent cannot disagree.
+async def test_needs_evaluation_is_current_unrouted_and_unanswered(monkeypatch):
+    """"In valutazione" is three facts, not one:
 
-    Every row is keyed on inbound, and the session boundary is computed from
-    inbound alone, so the current session always has an inbound message: the
-    flag reduces to "the session has no intent"."""
+    - no routed intent in the current session (the same `routed` CTE the
+      intent comes from, so the badge and the intent cannot disagree);
+    - the session is still *current* — the last inbound is within
+      `wa_routing.SESSION_GAP`, bound as `$2` like the rest of this SQL. A
+      dormant thread's unrouted last session is history, not a pending
+      evaluation;
+    - nobody has answered it — no free-form owner reply ('kairo' from the
+      webapp or 'phone' from the Business App) since the session started. An
+      answered thread is being handled by a person."""
     seen = {}
 
     async def fake(sql, *args):
@@ -203,7 +206,17 @@ async def test_needs_evaluation_is_derived_from_the_routed_cte(monkeypatch):
 
     monkeypatch.setattr(th, "execute", fake)
     await th.thread_list(uuid4())
+    sql = seen["sql"]
 
-    assert "(r.intent IS NULL) AS needs_evaluation" in seen["sql"]
-    assert "LEFT JOIN routed r ON ltrim(r.from_phone, '+') = li.key" in seen["sql"]
+    i = sql.index("AS needs_evaluation")
+    expr = sql[sql.rindex("(r.intent IS NULL", 0, i):i]
+    assert "li.last_inbound >= now() - $2::interval" in expr
+    assert "NOT EXISTS" in expr
+    assert "o.origin IN ('kairo', 'phone')" in expr
+    assert "o.template_name IS NULL AND o.campaign_key IS NULL" in expr
+    assert ">= cs.started_at" in expr
+    # The current inbound session's start, per phone, from the same gapped CTE.
+    assert "min(received_at) AS first_at" in sql
+    assert "LEFT JOIN routed r ON ltrim(r.from_phone, '+') = li.key" in sql
+    assert seen["args"][1] is wa_routing.SESSION_GAP
     assert len(seen["args"]) == 3  # binds nothing new

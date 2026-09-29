@@ -99,7 +99,8 @@ _SESSION_INTENT_CTE = """
        WHERE shop_id = $1
     ), session_start AS (
       SELECT from_phone,
-             max(received_at) FILTER (WHERE gap > $2::interval) AS started_at
+             max(received_at) FILTER (WHERE gap > $2::interval) AS started_at,
+             min(received_at) AS first_at
         FROM gapped GROUP BY from_phone
     ), routed AS (
       SELECT DISTINCT ON (g.from_phone) g.from_phone, g.intent
@@ -176,6 +177,14 @@ async def thread_list(shop_id: UUID) -> list[dict]:
             FROM voice_agent.calls
            WHERE shop_id = $1 AND channel = 'whatsapp'
            ORDER BY ltrim(caller_number, '+'), started_at DESC
+        ), cur_session AS (
+          -- When the current inbound session began, per phone: the last
+          -- message after a gap longer than SESSION_GAP, or the first message
+          -- ever when there was no such gap. Keyed like `last_in`.
+          SELECT ltrim(from_phone, '+') AS key,
+                 coalesce(max(started_at), min(first_at)) AS started_at
+            FROM session_start
+           GROUP BY 1
         ), session_customer AS (
           -- Who the agent decided this is. Inbound rows carry the customer the
           -- phone matched *when the message landed*, so a first-time writer's
@@ -203,13 +212,28 @@ async def thread_list(shop_id: UUID) -> list[dict]:
                lo.last_outbound,
                li.last_inbound + $3::interval AS window_expires_at,
                r.intent,
-               -- "In valutazione": the current session has inbound messages
-               -- (every row here is keyed on inbound, and the session boundary
-               -- is computed from inbound alone, so it always does) and no
-               -- routed intent — the classifier was unsure and nobody tapped
-               -- the menu, or there was no credit to classify at all. Same
-               -- CTE as `intent`, so the badge and the intent cannot disagree.
-               (r.intent IS NULL) AS needs_evaluation,
+               -- "In valutazione": the current session has no routed intent
+               -- (the classifier was unsure and nobody tapped the menu, or
+               -- there was no credit to classify at all — same CTE as
+               -- `intent`, so the badge and the intent cannot disagree), AND
+               -- it is still current (last inbound within SESSION_GAP, `$2`:
+               -- a dormant thread is history, not a pending evaluation), AND
+               -- no person has answered it since the session began (a free-
+               -- form owner reply from the webapp or the phone — same
+               -- predicate as `human_replied_at` below, scoped to the inbound
+               -- session rather than the agent's, which may not exist).
+               (r.intent IS NULL
+                AND li.last_inbound >= now() - $2::interval
+                AND NOT EXISTS (
+                  SELECT 1
+                    FROM whatsapp.outbound_messages o
+                   WHERE o.shop_id = $1
+                     AND ltrim(o.to_phone, '+') = li.key
+                     AND o.origin IN ('kairo', 'phone')
+                     AND o.template_name IS NULL AND o.campaign_key IS NULL
+                     AND o.status NOT IN ('suppressed', 'cancelled')
+                     AND coalesce(o.sent_at, o.created_at) >= cs.started_at
+                )) AS needs_evaluation,
                coalesce(e.escalated, false) AS escalated,
                e.outcome_reason,
                -- No shop_config row is no opt-in: the LEFT JOIN yields NULL,
@@ -239,6 +263,7 @@ async def thread_list(shop_id: UUID) -> list[dict]:
           LEFT JOIN routed r ON ltrim(r.from_phone, '+') = li.key
           LEFT JOIN escalations e USING (key)
           LEFT JOIN session_customer sc USING (key)
+          LEFT JOIN cur_session cs USING (key)
           LEFT JOIN voice_agent.shop_config cfg ON cfg.shop_id = $1
          ORDER BY li.last_inbound DESC
         """,
