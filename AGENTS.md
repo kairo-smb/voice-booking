@@ -6,6 +6,63 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-29 — The WhatsApp responder pauses at the low-credit threshold
+
+**Owner decisions (2026-09-29), recorded as given.** One low-credit threshold
+per shop — `voice_agent.shop_config.auto_topup_threshold_tokens`, **10 000 when
+NULL** — read by every surface. At or below it the automatic responder
+disengages; the WABA stays connected and the Conversations tab stays usable,
+all manual. The classifier keeps naming requests while the balance is above
+zero, the fixed routing menu still goes out, a tap still labels the thread, and
+no agent answers. It resumes by itself after a top-up, but conversations that
+arrived during the pause stay manual. The owner gets one email per episode.
+(Plan: `docs/superpowers/plans/2026-09-29-credit-pause-and-owner-veil.md`,
+Part 1.)
+
+**One verdict, one module.** `services/credit_state.py::credit_state(shop_id)`
+→ `{balance, threshold, low}`, `low = balance <= threshold`, `balance` the
+basket's effective balance (`get_balance`, the same arithmetic as the webapp's
+`effectiveBalance`). `is None`, never `or`: an explicit 0 is a choice and must
+not fall back to 10 000. `GET /whatsapp/status` ships it as `credit` so the
+webapp never recomputes it.
+
+**The pause is a `may_speak` refusal, stamped like a takeover.** `low_credit`
+is checked after `open_session` (so there is a row to stamp) and after the
+escalation/takeover rules, so an automatic stamp never overwrites a person's —
+the invariant 701f59d established for session outcomes. The session becomes
+`outcome='escalated'`, `outcome_reason='low_credit'`, and that row is exactly
+what keeps the conversation manual after a top-up: only a *new* session (past
+`SESSION_GAP`) is answered again. `agent_status` renames it like
+`human_took_over`, so the owner reads "credit", not "the assistant gave up". No
+marketing-engine call is made while low; the engine's 402 → `no_credit` path is
+untouched and still catches a basket that empties between ticks. The 20h nudge
+skips low shops (an invitation to write to an agent that will not answer is a
+promise made on the owner's behalf).
+
+**"In valutazione" is derived, not stored.** Thread rows gain
+`needs_evaluation = (r.intent IS NULL)` off the existing `routed` CTE: every
+row is keyed on inbound and the session boundary is computed from inbound, so
+the current session always has an inbound message and the flag reduces to "no
+routed intent". It stays true on an old unrouted thread; that is literally
+correct and left as is.
+
+**The email episode.** Migration 28 adds `shop_config.credit_low_notified_at`.
+A new tick stage (`credit_notices`) mails through the webapp
+(`POST /api/v1/hair-salon/whatsapp/credit-low`, the token-expiring seam) for an
+opted-in shop **with an online sender** — the plan said opted-in only; a shop
+with no live WABA has no responder to pause, so it is not mailed — stamps, and
+clears the stamp on the first tick back above the threshold. Unlike the token
+reminder, a webapp that never answered leaves the shop unstamped (retry next
+tick): there is no cooldown to fall back on, and the stamp is the episode's one
+mail. `sent: false` (no owner mailbox) is stamped — a fact about the shop.
+
+**Verification.** `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **822 passed, 25 skipped** (baseline 792/25
+measured on this branch). Migration 28 applied twice on a scratch Postgres 15,
+both exit 0; the candidate/stamp queries exercised with real rows there. The
+thread-list SQL and the candidate query executed read-only against QA
+(`ep-noisy-dawn`, rolled back). No Meta call made.
+
 ## 2026-09-28 — Customer agents on one common layer: one engine, and this repo stops executing tools
 
 **The redesign, across all three repos in one day** (plan
