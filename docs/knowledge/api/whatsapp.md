@@ -119,6 +119,7 @@ The owner disconnects their WABA, in any state (added 2026-09-25). Unsubscribes 
           "recipient_cooldown_hours": 168,
           "offline_reason": null, "sent_today": 12, "sent_last_24h": 47,
           "sent_this_month": 87,
+          "credit": {"balance": 45372, "threshold": 10000, "low": false},
           "pricing": [{"kind": "marketing", "usd": 0.0691},
                       {"kind": "utility",   "usd": 0.0341},
                       {"kind": "service",   "usd": 0.0}],
@@ -127,6 +128,8 @@ The owner disconnects their WABA, in any state (added 2026-09-25). Unsubscribes 
 ```
 
 `status` is `not_started | pending_signup | verifying | online | offline | failed`. A salon can send only when `status == "online"` **and** the template is `approved`.
+
+`credit` is `services/credit_state.py`'s verdict — the basket's effective balance against `coalesce(shop_config.auto_topup_threshold_tokens, 10000)`, `low = balance <= threshold` — and is present in every state, `not_started` included. It is the **same** answer the booking agent stands down on (`low_credit`), so the webapp's Inbox banner and greyed agent toggle read it here rather than recomputing it.
 
 `pending_signup` is reported as `not_started` once the row has been untouched for 15 minutes (`ABANDONED_AFTER`): the webapp aborts explicitly when its popup closes, but an owner can walk away from or close the whole tab with nothing firing, and a permanent "verifying" box with no way back is worse than forgetting the attempt.
 

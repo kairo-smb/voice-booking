@@ -2648,6 +2648,44 @@ async def test_drift_is_deferred_not_dropped_once_meta_has_ruled(monkeypatch):
 
 
 
+async def _credit(shop_id):
+    return {"balance": 4_000, "threshold": 10_000, "low": True}
+
+
+@pytest.mark.parametrize("connected", [True, False])
+async def test_status_carries_the_low_credit_verdict(monkeypatch, connected):
+    """One source for the Inbox banner and the greyed agent toggle: the same
+    `credit_state` the responder stands down on. Present before onboarding
+    too — the webapp must not need a second call to learn it."""
+    from collections import defaultdict
+    from unittest.mock import MagicMock
+    from booking_engine.api.routes import whatsapp as wa_routes
+
+    async def _sender(shop_id):
+        return defaultdict(lambda: None, status="online") if connected else None
+
+    async def _none(*a, **kw):
+        return None
+
+    async def _zero(*a, **kw):
+        return 0
+
+    monkeypatch.setattr(wa_routes.wq, "get_sender", _sender)
+    monkeypatch.setattr(wa_routes.wq, "get_template", _none)
+    monkeypatch.setattr(wa_routes.wq, "get_shop_language", _zero)
+    for fn in ("sent_today", "sent_last_24h", "sent_this_month"):
+        monkeypatch.setattr(wa_routes.wq, fn, _zero)
+    monkeypatch.setattr(wa_routes.onboarding, "is_abandoned", lambda s: False)
+    monkeypatch.setattr(wa_routes.onboarding, "signup_config", lambda s: {})
+    monkeypatch.setattr(wa_routes.meta_limits, "effective_daily_cap", lambda s: 0)
+    monkeypatch.setattr(wa_routes.meta_limits, "tier_daily_conversations", lambda t: 0)
+    monkeypatch.setattr(wa_routes.credit_state, "credit_state", _credit)
+
+    data = (await wa_routes.status(SHOP, settings=MagicMock(), _auth=True))["data"]
+
+    assert data["credit"] == {"balance": 4_000, "threshold": 10_000, "low": True}
+
+
 async def test_status_lists_the_receipt_with_its_meta_verdict(monkeypatch):
     """The receipt is pushed to Meta and its verdict tracked like the catalogue's,
     so the owner must see it in the same list — before this, /status iterated
@@ -2674,6 +2712,7 @@ async def test_status_lists_the_receipt_with_its_meta_verdict(monkeypatch):
     monkeypatch.setattr(wa_routes.onboarding, "is_abandoned", lambda s: False)
     monkeypatch.setattr(wa_routes.meta_limits, "effective_daily_cap", lambda s: 0)
     monkeypatch.setattr(wa_routes.meta_limits, "tier_daily_conversations", lambda t: 0)
+    monkeypatch.setattr(wa_routes.credit_state, "credit_state", _credit)
 
     data = (await wa_routes.status(SHOP, settings=MagicMock(), _auth=True))["data"]
 

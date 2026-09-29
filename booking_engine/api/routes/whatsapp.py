@@ -27,6 +27,7 @@ from booking_engine.db import whatsapp_automation_queries as aq
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.db import wa_session_queries as wsq
 from booking_engine.db import whatsapp_thread_queries as tq
+from booking_engine.services import credit_state
 from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging import wa_agent
 from booking_engine.services.messaging import wa_inbound
@@ -326,6 +327,10 @@ async def status(
     if sender and onboarding.is_abandoned(sender):
         sender["status"] = "not_started"
     language = resolve_language(await wq.get_shop_language(shop_id))
+    # `{balance, threshold, low}` — the one low-credit verdict the responder
+    # itself obeys (`wa_agent` stands down at `low`), so the Inbox banner and
+    # the greyed agent toggle cannot disagree with what the agent does.
+    credit = await credit_state.credit_state(shop_id)
     if not sender:
         # The price list is not a sender fact: the webapp shows "what this
         # would cost you" before onboarding starts.
@@ -339,6 +344,7 @@ async def status(
                 for key in DOCUMENT_TEMPLATES
             ],
             "sent_this_month": 0,
+            "credit": credit,
             "pricing": price_list(),
             "signup": onboarding.signup_config(settings),
         }}
@@ -384,6 +390,7 @@ async def status(
         # Marketing only, both of them: an appointment reminder is not a
         # promotion and must not show up in the owner's campaign counter.
         "sent_this_month": await wq.sent_this_month(shop_id),
+        "credit": credit,
         "pricing": price_list(),
         "templates": templates,
         "signup": onboarding.signup_config(settings),
