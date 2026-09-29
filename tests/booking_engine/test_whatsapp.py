@@ -2686,6 +2686,43 @@ async def test_status_carries_the_low_credit_verdict(monkeypatch, connected):
     assert data["credit"] == {"balance": 4_000, "threshold": 10_000, "low": True}
 
 
+@pytest.mark.parametrize("connected", [True, False])
+async def test_status_survives_a_failed_credit_read(monkeypatch, connected):
+    """The credit line is an overlay on the panel, not its foundation: a basket
+    read that fails must cost the banner, never the whole WhatsApp panel."""
+    from collections import defaultdict
+    from unittest.mock import MagicMock
+    from booking_engine.api.routes import whatsapp as wa_routes
+
+    async def _sender(shop_id):
+        return defaultdict(lambda: None, status="online") if connected else None
+
+    async def _none(*a, **kw):
+        return None
+
+    async def _zero(*a, **kw):
+        return 0
+
+    async def _boom(shop_id):
+        raise RuntimeError("basket read failed")
+
+    monkeypatch.setattr(wa_routes.wq, "get_sender", _sender)
+    monkeypatch.setattr(wa_routes.wq, "get_template", _none)
+    monkeypatch.setattr(wa_routes.wq, "get_shop_language", _zero)
+    for fn in ("sent_today", "sent_last_24h", "sent_this_month"):
+        monkeypatch.setattr(wa_routes.wq, fn, _zero)
+    monkeypatch.setattr(wa_routes.onboarding, "is_abandoned", lambda s: False)
+    monkeypatch.setattr(wa_routes.onboarding, "signup_config", lambda s: {})
+    monkeypatch.setattr(wa_routes.meta_limits, "effective_daily_cap", lambda s: 0)
+    monkeypatch.setattr(wa_routes.meta_limits, "tier_daily_conversations", lambda t: 0)
+    monkeypatch.setattr(wa_routes.credit_state, "credit_state", _boom)
+
+    data = (await wa_routes.status(SHOP, settings=MagicMock(), _auth=True))["data"]
+
+    assert data["credit"] is None
+    assert "templates" in data
+
+
 async def test_status_lists_the_receipt_with_its_meta_verdict(monkeypatch):
     """The receipt is pushed to Meta and its verdict tracked like the catalogue's,
     so the owner must see it in the same list — before this, /status iterated

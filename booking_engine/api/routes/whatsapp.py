@@ -330,7 +330,13 @@ async def status(
     # `{balance, threshold, low}` — the one low-credit verdict the responder
     # itself obeys (`wa_agent` stands down at `low`), so the Inbox banner and
     # the greyed agent toggle cannot disagree with what the agent does.
-    credit = await credit_state.credit_state(shop_id)
+    # An overlay, not the panel's foundation: a failed read is `credit: null`
+    # (the webapp renders no banner), never a 500 for the whole status.
+    try:
+        credit = await credit_state.credit_state(shop_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("whatsapp.status_credit_failed shop=%s", shop_id)
+        credit = None
     if not sender:
         # The price list is not a sender fact: the webapp shows "what this
         # would cost you" before onboarding starts.
