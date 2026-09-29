@@ -90,10 +90,13 @@ def sweep(monkeypatch, wired):
 
     notify = Spy(True)
     mark = Spy(None)
+    claim = Spy(True)
     monkeypatch.setattr(cs.config_q, "list_credit_notice_candidates", candidates)
     monkeypatch.setattr(cs.config_q, "set_credit_low_notified", mark)
+    monkeypatch.setattr(cs.config_q, "claim_credit_low_notice", claim)
     monkeypatch.setattr(cs.webapp_notify, "whatsapp_credit_low", notify)
-    return {"rows": rows, "notify": notify, "mark": mark, "state": wired}
+    return {"rows": rows, "notify": notify, "mark": mark, "claim": claim,
+            "state": wired}
 
 
 def _row(**kw):
@@ -109,7 +112,9 @@ async def test_a_low_shop_is_mailed_once_and_stamped(sweep):
     assert counts == {"notified": 1, "cleared": 0, "errors": 0}
     _, kw = sweep["notify"].calls[0]
     assert (kw["shop_id"], kw["balance"], kw["threshold"]) == (SHOP, 5_000, 10_000)
-    assert sweep["mark"].calls == [((SHOP,), {"notified": True})]
+    # Claimed (stamped) before the mail, and the stamp is kept.
+    assert sweep["claim"].calls == [((SHOP,), {})]
+    assert sweep["mark"].calls == []
 
 
 async def test_a_stamped_low_shop_is_not_mailed_again(sweep):
@@ -138,9 +143,11 @@ async def test_a_webapp_that_never_answered_is_retried_next_tick(sweep):
     sweep["notify"].result = None
     sweep["rows"].append(_row())
 
-    await cs.notify_sweep(settings=object())
+    counts = await cs.notify_sweep(settings=object())
 
-    assert sweep["mark"].calls == []
+    # The claim is released so the next tick tries again.
+    assert sweep["mark"].calls == [((SHOP,), {"notified": False})]
+    assert counts["notified"] == 0
 
 
 async def test_no_owner_mailbox_still_closes_the_attempt(sweep):
@@ -151,7 +158,66 @@ async def test_no_owner_mailbox_still_closes_the_attempt(sweep):
 
     await cs.notify_sweep(settings=object())
 
-    assert sweep["mark"].calls == [((SHOP,), {"notified": True})]
+    assert len(sweep["claim"].calls) == 1
+    assert sweep["mark"].calls == []
+
+
+async def test_a_claim_lost_to_a_concurrent_tick_sends_nothing(sweep):
+    """Two ticks both read the row unstamped; only the one whose UPDATE won
+    the `credit_low_notified_at IS NULL` race may mail."""
+    sweep["state"]["balance"] = 5_000
+    sweep["claim"].result = False
+    sweep["rows"].append(_row())
+
+    counts = await cs.notify_sweep(settings=object())
+
+    assert sweep["notify"].calls == []
+    assert sweep["mark"].calls == []
+    assert counts["notified"] == 0
+
+
+async def test_two_concurrent_sweeps_mail_once(sweep, monkeypatch):
+    """The real race, with a claim that behaves like the conditional UPDATE."""
+    import asyncio
+
+    sweep["state"]["balance"] = 5_000
+    sweep["rows"].append(_row())
+    stamped = {"at": None}
+
+    async def claim(shop_id):
+        await asyncio.sleep(0)          # let the other sweep interleave
+        if stamped["at"] is not None:
+            return False
+        stamped["at"] = "now"
+        return True
+
+    monkeypatch.setattr(cs.config_q, "claim_credit_low_notice", claim)
+    await asyncio.gather(cs.notify_sweep(settings=object()),
+                         cs.notify_sweep(settings=object()))
+
+    assert len(sweep["notify"].calls) == 1
+
+
+async def test_a_send_that_raises_releases_the_claim(sweep, monkeypatch):
+    sweep["state"]["balance"] = 5_000
+    sweep["rows"].append(_row())
+
+    async def boom(**kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cs.webapp_notify, "whatsapp_credit_low", boom)
+    counts = await cs.notify_sweep(settings=object())
+
+    assert sweep["mark"].calls == [((SHOP,), {"notified": False})]
+    assert counts["errors"] == 1
+
+
+def test_the_claim_is_one_conditional_update():
+    import inspect
+
+    src = " ".join(inspect.getsource(cs.config_q.claim_credit_low_notice).split())
+    assert ("SET credit_low_notified_at = now() WHERE shop_id = $1 "
+            "AND credit_low_notified_at IS NULL RETURNING 1") in src
 
 
 async def test_a_shop_whose_responder_is_off_is_not_mailed(sweep):

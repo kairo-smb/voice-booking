@@ -56,13 +56,15 @@ async def notify_sweep(*, settings: Settings) -> dict:
     """Hourly: email the owner once per low-credit episode, and close episodes.
 
     An episode opens on the first tick that finds an opted-in, online shop at
-    or below its threshold with no stamp: the webapp is asked to mail the owner
-    (`POST /api/v1/hair-salon/whatsapp/credit-low`) and the shop is stamped. It
-    closes on the first tick that finds the balance back above the threshold,
-    so the next dip mails again. A webapp that never answered (`None`) leaves
-    the shop unstamped and the next tick retries; one that answered "not sent"
-    (no owner mailbox) is stamped like a send, since that is a fact about the
-    shop and the banner still covers it.
+    or below its threshold with no stamp: the shop is **claimed** first (one
+    conditional UPDATE, `claim_credit_low_notice`, so two concurrent ticks can
+    never both mail), then the webapp is asked to mail the owner
+    (`POST /api/v1/hair-salon/whatsapp/credit-low`). It closes on the first
+    tick that finds the balance back above the threshold, so the next dip mails
+    again. A webapp that never answered (`None`) — or a send that raised —
+    releases the claim and the next tick retries; one that answered "not sent"
+    for a fact about the shop (no owner mailbox) keeps it, since the banner
+    still covers that salon.
 
     One shop's failure must not abort the sweep: each is wrapped and counted
     under 'errors', the same shape as `wa_nudge.sweep`.
@@ -74,13 +76,21 @@ async def notify_sweep(*, settings: Settings) -> dict:
             state = await credit_state(shop_id)
             stamped = row.get("credit_low_notified_at") is not None
             if state["low"] and not stamped and row.get("eligible"):
-                sent = await webapp_notify.whatsapp_credit_low(
-                    shop_id=shop_id, balance=state["balance"],
-                    threshold=state["threshold"], settings=settings,
-                )
-                if sent is None:
+                # Claim, then mail: a concurrent tick that lost the claim
+                # sends nothing. Released on no answer so the next tick retries.
+                if not await config_q.claim_credit_low_notice(shop_id):
                     continue
-                await config_q.set_credit_low_notified(shop_id, notified=True)
+                try:
+                    sent = await webapp_notify.whatsapp_credit_low(
+                        shop_id=shop_id, balance=state["balance"],
+                        threshold=state["threshold"], settings=settings,
+                    )
+                except Exception:
+                    await config_q.set_credit_low_notified(shop_id, notified=False)
+                    raise
+                if sent is None:
+                    await config_q.set_credit_low_notified(shop_id, notified=False)
+                    continue
                 counts["notified"] += 1
                 logger.info("credit.low_notified shop=%s balance=%s threshold=%s sent=%s",
                             shop_id, state["balance"], state["threshold"], sent)

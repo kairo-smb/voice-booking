@@ -59,6 +59,29 @@ async def list_credit_notice_candidates() -> list[dict]:
     )
 
 
+async def claim_credit_low_notice(shop_id: UUID) -> bool:
+    """Open the episode atomically. True only for the caller whose UPDATE won.
+
+    Claim first, mail second: two ticks (two Fly machines, or an overlapping
+    cron) that both read the row unstamped must never both mail. The
+    conditional UPDATE is the lock — Postgres re-checks `IS NULL` on the row
+    the second writer waits on, so exactly one gets a row back. A mail that
+    then fails to get an answer releases the claim (`set_credit_low_notified`
+    with notified=False) so the next tick retries.
+    """
+    row = await execute_one(
+        """
+        UPDATE voice_agent.shop_config
+           SET credit_low_notified_at = now()
+         WHERE shop_id = $1
+           AND credit_low_notified_at IS NULL
+        RETURNING 1
+        """,
+        shop_id,
+    )
+    return row is not None
+
+
 async def set_credit_low_notified(shop_id: UUID, *, notified: bool) -> None:
     """Open the episode (stamp now) or close it (NULL)."""
     await execute_void(
