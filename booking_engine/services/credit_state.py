@@ -41,8 +41,11 @@ def is_low(*, balance: int, threshold: int) -> bool:
 async def credit_state(shop_id: UUID) -> dict:
     """`{"balance", "threshold", "low"}` for one shop.
 
-    `is None`, never `or`: an explicit threshold of 0 is an owner choice
-    ("only when empty") and must not fall back to the default.
+    The threshold is fixed at 10 000 by owner decision (2026-09-29) — policy,
+    not a per-shop preference; the webapp settings tab normalises the column to
+    it on load. The column is still read (rather than hard-coding the constant)
+    so the two sides can never disagree about a row; any other stored value is
+    a stale row awaiting that normalisation, not an owner choice.
     """
     config = await config_q.get_config(shop_id)
     raw = (config or {}).get("auto_topup_threshold_tokens")

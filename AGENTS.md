@@ -116,6 +116,13 @@ current inbound session began. Suite **840 passed, 25 skipped** (from 822/25).
 The thread-list SQL ran read-only on QA; the claim `UPDATE` could not — QA does
 not have migration 28's column yet — so it was checked on the scratch Postgres.
 
+
+**Correction (owner, same day): the threshold is fixed at 10 000**, not a
+per-shop choice. The sentence above about "an explicit 0 is a choice" no longer
+holds: the webapp settings tab normalises `auto_topup_threshold_tokens` to
+10 000 on load, and a different stored value is a stale row, not a decision.
+The code still reads the column, so both sides always agree about a row.
+
 ## 2026-09-28 — Customer agents on one common layer: one engine, and this repo stops executing tools
 
 **The redesign, across all three repos in one day** (plan
