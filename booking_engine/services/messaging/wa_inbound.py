@@ -89,6 +89,15 @@ async def _process(sender: dict, row: dict) -> None:
 
     history = await tq.inbound_history(shop_id, phone)
 
+    # 1b. A conversation that begins during a credit pause stays the owner's,
+    #     routed or not — see `wa_agent.hold_for_low_credit`. Individually
+    #     tolerant: a failed credit read must not cost the customer the menu.
+    try:
+        await wa_agent.hold_for_low_credit(sender, row)
+    except Exception:  # noqa: BLE001
+        logger.exception("whatsapp.credit_hold_failed shop=%s phone=%s",
+                         shop_id, phone)
+
     # 2. Naming a request is a phase of the conversation, not a property of
     #    each message. Once this session has a verdict the handler owns it and
     #    the classifier must never run on it again — that is the rule the

@@ -70,6 +70,15 @@ def a_turn(text="Certo! Che giorno preferisci?", escalate=False, reason=None):
                                 tool_calls=0, cost_usd=0.0004)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_config(monkeypatch):
+    """The inbound worker now reads the shop's config for the credit hold; a
+    test that drives `wa_inbound.process` without `wired` must not reach a
+    database for it. `wired` overrides this."""
+    monkeypatch.setattr(wa_agent.config_q, "get_config",
+                        Spy({"whatsapp_agent_enabled": False}))
+
+
 @pytest.fixture
 def wired(monkeypatch):
     """Every collaborator replaced. Any real network or DB call is a bug.
@@ -614,6 +623,136 @@ async def test_a_shop_that_has_not_opted_in_never_reads_its_credit(wired):
     await run(wired)
 
     assert wired.credit.count == 0
+
+
+# --- the pause reaches conversations that were never routed ------------------
+#
+# `handle` only runs on a whitelisted intent. A message the classifier was
+# unsure of gets the menu and an intent of NULL, so without the inbound worker
+# stamping it, a session that *began* during the pause would be answered by
+# the agent the moment the owner topped up and the customer tapped "Prenotare".
+
+@pytest.fixture
+def stateful(wired, monkeypatch):
+    """`mark_escalated` really escalates, so a later message reads it back —
+    the stamp is only worth anything if the next turn sees it."""
+    async def mark(*, call_id, reason):
+        wired.mark_escalated.calls.append({"call_id": call_id, "reason": reason})
+        wired.state.result = {**wired.state.result, "escalated": True,
+                              "outcome_reason": reason}
+    monkeypatch.setattr(wa_agent.wsq, "mark_escalated", mark)
+    monkeypatch.setattr(wa_inbound.tq, "inbound_history", wired.history)
+    monkeypatch.setattr(wa_inbound.tq, "set_transcript", Spy(None))
+    monkeypatch.setattr(wa_inbound.tq, "set_verdict", Spy(None))
+    wired.menu = Spy("wamid.menu")
+    monkeypatch.setattr(wa_inbound.meta, "send_interactive", wired.menu)
+    return wired
+
+
+async def test_an_unrouted_message_while_low_stamps_the_session(stateful,
+                                                               monkeypatch):
+    stateful.credit.result = {"balance": 9_000, "threshold": 10_000, "low": True}
+    monkeypatch.setattr(wa_inbound.triage, "classify",
+                        Spy({"intent": "booking", "confidence": 0.3}))
+    r = row(body="boh")
+    stateful.history.result = [hist(r["id"])]
+
+    await wa_inbound.process(SENDER, r)
+
+    assert stateful.mark_escalated.calls == [{"call_id": CALL,
+                                              "reason": "low_credit"}]
+    # The normal flow still runs: the menu goes out, the classifier ran.
+    assert stateful.menu.count == 1
+
+
+async def test_an_unconfident_session_opened_while_low_stays_manual_after_top_up(
+        stateful, monkeypatch):
+    """The review's scenario, end to end: menu while low, owner tops up,
+    customer taps "Prenotare" in the same session — the agent stays quiet."""
+    stateful.credit.result = {"balance": 9_000, "threshold": 10_000, "low": True}
+    monkeypatch.setattr(wa_inbound.triage, "classify",
+                        Spy({"intent": "booking", "confidence": 0.3}))
+    first = row(body="boh")
+    stateful.history.result = [hist(first["id"])]
+    await wa_inbound.process(SENDER, first)
+
+    stateful.credit.result = {"balance": 90_000, "threshold": 10_000, "low": False}
+    tap = row(body="Prenotare", intent="booking", confidence=1.0)
+    stateful.history.result = [hist(first["id"]), hist(tap["id"], intent="booking")]
+    await wa_inbound.process(SENDER, tap)
+
+    assert stateful.turn.count == 0
+    assert stateful.send_text.count == 0
+
+
+async def test_a_new_session_after_the_top_up_is_answered_from_the_worker(
+        stateful, monkeypatch):
+    stateful.credit.result = {"balance": 90_000, "threshold": 10_000, "low": False}
+    monkeypatch.setattr(wa_inbound.triage, "classify",
+                        Spy({"intent": "booking", "confidence": 0.9}))
+    r = row()
+    stateful.history.result = [hist(r["id"])]
+
+    await wa_inbound.process(SENDER, r)
+
+    assert stateful.mark_escalated.calls == []
+    assert stateful.turn.count == 1
+    assert stateful.send_text.count == 1
+
+
+async def test_the_worker_stamp_never_overwrites_a_takeover(stateful, monkeypatch):
+    stateful.state.result = {**stateful.state.result, "escalated": True,
+                             "outcome_reason": "human_took_over"}
+    stateful.credit.result = {"balance": 0, "threshold": 10_000, "low": True}
+    monkeypatch.setattr(wa_inbound.triage, "classify",
+                        Spy({"intent": "booking", "confidence": 0.3}))
+    r = row(body="boh")
+    stateful.history.result = [hist(r["id"])]
+
+    await wa_inbound.process(SENDER, r)
+
+    assert stateful.mark_escalated.calls == []
+
+
+async def test_the_worker_stamp_skips_a_thread_a_human_is_answering(stateful,
+                                                                   monkeypatch):
+    stateful.state.result = {**stateful.state.result, "human_replied_at": NOW}
+    stateful.credit.result = {"balance": 0, "threshold": 10_000, "low": True}
+    monkeypatch.setattr(wa_inbound.triage, "classify", Spy(None))
+    r = row(body="boh")
+    stateful.history.result = [hist(r["id"])]
+
+    await wa_inbound.process(SENDER, r)
+
+    assert stateful.mark_escalated.calls == []
+
+
+async def test_the_worker_stamp_needs_the_shop_to_have_opted_in(stateful,
+                                                               monkeypatch):
+    stateful.config.result = {"whatsapp_agent_enabled": False}
+    stateful.credit.result = {"balance": 0, "threshold": 10_000, "low": True}
+    monkeypatch.setattr(wa_inbound.triage, "classify", Spy(None))
+    r = row(body="boh")
+    stateful.history.result = [hist(r["id"])]
+
+    await wa_inbound.process(SENDER, r)
+
+    assert stateful.open_session.count == 0
+    assert stateful.credit.count == 0
+
+
+async def test_a_failed_credit_read_does_not_stop_the_message(stateful,
+                                                             monkeypatch):
+    stateful.credit.raises = RuntimeError("db down")
+    classify = Spy({"intent": "booking", "confidence": 0.3})
+    monkeypatch.setattr(wa_inbound.triage, "classify", classify)
+    r = row(body="boh")
+    stateful.history.result = [hist(r["id"])]
+
+    await wa_inbound.process(SENDER, r)
+
+    assert classify.count == 1
+    assert stateful.menu.count == 1
 
 
 # --- the payload the engine is handed ---------------------------------------

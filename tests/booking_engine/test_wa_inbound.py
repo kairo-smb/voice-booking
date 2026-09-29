@@ -103,8 +103,10 @@ def wired(monkeypatch):
         # may then speak have their own file (test_wa_agent.py). Letting the
         # real one run would also drag a database into every test below.
         agent=Spy(None),
+        hold=Spy(None),
     )
     monkeypatch.setattr(wa_inbound.wa_agent, "handle", fakes.agent)
+    monkeypatch.setattr(wa_inbound.wa_agent, "hold_for_low_credit", fakes.hold)
     monkeypatch.setattr(wa_inbound.tq, "inbound_history", fakes.history)
     monkeypatch.setattr(wa_inbound.tq, "set_transcript", fakes.set_transcript)
     monkeypatch.setattr(wa_inbound.tq, "set_verdict", fakes.set_verdict)
@@ -294,6 +296,26 @@ async def test_a_confident_route_hands_the_thread_to_the_agent(wired):
     assert wired.set_verdict.args[-1][2] == ("route", "booking")
     assert wired.agent.count == 1
     assert wired.agent.last["intent"] == "booking"
+
+
+async def test_every_message_passes_the_credit_hold_before_routing(wired):
+    """Even one that never reaches the agent (a menu): a conversation that
+    begins during a credit pause must stay the owner's after a top-up."""
+    wired.classify.result = {"intent": "booking", "confidence": 0.3}
+
+    await wa_inbound.process(SENDER, text_row(body="boh"))
+
+    assert wired.hold.count == 1
+    assert wired.send_interactive.count == 1
+
+
+async def test_a_failing_credit_hold_does_not_stop_the_flow(wired):
+    wired.hold.raises = RuntimeError("db down")
+    wired.classify.result = {"intent": "booking", "confidence": 0.3}
+
+    await wa_inbound.process(SENDER, text_row(body="boh"))
+
+    assert wired.send_interactive.count == 1
 
 
 async def test_a_human_decision_never_reaches_the_agent(wired):
