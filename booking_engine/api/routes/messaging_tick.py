@@ -18,6 +18,7 @@ from booking_engine.api.deps import require_control_plane_token
 from booking_engine.clients.twilio_regulatory import get_bundle_status
 from booking_engine.config import Settings, get_settings
 from booking_engine.db.number_request_queries import list_pending_review, set_status
+from booking_engine.services.credit_state import notify_sweep as credit_notify_sweep
 from booking_engine.services.number_health import check_all
 from booking_engine.services.number_provisioning import provision_approved
 from booking_engine.services.number_release import sweep as release_sweep
@@ -134,6 +135,15 @@ async def run_tick(settings: Settings) -> dict:
         whatsapp_nudges = {"errors": 1}
         errors += 1
 
+    # The low-credit email, once per episode (owner decision 2026-09-29). The
+    # responder pauses on its own at the threshold; this only tells the owner.
+    try:
+        credit_notices = await credit_notify_sweep(settings=settings)
+    except Exception:  # noqa: BLE001 — see comment above
+        logger.exception("messaging_tick.credit_notify_failed")
+        credit_notices = {"errors": 1}
+        errors += 1
+
     # Six-month retention. Last of the WhatsApp stages on purpose: it is the
     # only destructive one, and nothing above it should ever be skipped because
     # a delete had a bad minute. It counts its own errors rather than raising —
@@ -156,5 +166,6 @@ async def run_tick(settings: Settings) -> dict:
         "whatsapp_sends": whatsapp_sends,
         "whatsapp_automations": whatsapp_automations,
         "whatsapp_nudges": whatsapp_nudges,
+        "credit_notices": credit_notices,
         "whatsapp_retention": whatsapp_retention,
     }
