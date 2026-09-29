@@ -77,6 +77,32 @@ fly secrets unset ENABLE_CALL_SUPERVISOR CALL_SUPERVISOR_VERBOSE_LOGGING --app k
 ```
 `CALL_SUPERVISOR_VERBOSE_LOGGING` also turns on caller-speech transcription (normally off) — keep it off outside a deliberate debug session, since it puts full conversation content into `fly logs`.
 
+## Testing WhatsApp automations end-to-end
+
+`scripts/seed_automation_test.sql` and `scripts/cleanup_automation_test.sql` seed and remove one run of the automation rules on the QA demo shop, so a single `POST /api/v1/messaging/tick` fires a real template send. **They can be run from any machine**, not just the QA one: a local `psql` connecting to the QA Neon branch writes the same database the QA app reads, so the tick sees the seeded rows.
+
+1. **Prerequisites on the QA demo shop** — the sender must be `online` and both templates `approved`. Attaching the sender is machine-bound: `scripts/seed_test_sender.py` asserts `SENTRY_ENVIRONMENT == 'qa'`, so run it on the QA machine. The seed script prints the sender row and both template rows, so the gates are visible before the tick runs.
+2. **Seed:**
+   ```bash
+   psql "$QA_DATABASE_URL" -v confirm_qa=yes -v recipient='+39…' \
+     -f scripts/seed_automation_test.sql
+   ```
+   Enables both rules and creates a due reminder (`scheduled`, start +2h) and a due feedback (`completed`, end −24h30m). `-v shop='…'` overrides the demo shop.
+3. **Trigger:** `POST https://kairo-booking-engine-qa.fly.dev/api/v1/messaging/tick` with the control-plane bearer, or let the QA hourly scheduler fire it, then wait ≤60s for the drain — the automations stage enqueues and `whatsapp_sends` delivers on the next pass.
+4. **Verify:** `whatsapp.outbound_messages WHERE campaign_key LIKE 'automation:%'` reaches `sent`/`delivered`/`read`, and both messages arrive.
+5. **Re-run the tick → nothing new.** `whatsapp.automation_sends` dedupes on the same appointment.
+6. **Clean up:**
+   ```bash
+   psql "$QA_DATABASE_URL" -v confirm_qa=yes -f scripts/cleanup_automation_test.sql
+   ```
+   Removes the seeded rows and disables the rules.
+
+**Both scripts refuse production, twice:** an in-transaction guard checks psql's automatic `:HOST` variable against the production branch fragment (`ep-weathered-term-agsfwl6w`) and exits non-zero, and both require `-v confirm_qa=yes` (a missing or wrong value, or a missing `recipient`, refuses too). They run **committed**, not rolled back — that is the point: the tick stage must write real `outbound_messages` and `automation_sends` rows to prove the send path is wired. Only the scripts' own iterative validation used rolled-back transactions.
+
+**Scope warning:** `run_automations` processes the **whole shop**, not just the seeded rows. Enabling a rule makes the next tick message *every* due appointment of that shop — the seed prints an `other_due_reminder`/`other_due_feedback` visibility query so the blast radius is known before triggering (the QA demo shop currently has two other due reminders). `min_no_shows = 0` in the seed means the reminder's no-show filter is inert, so the seeded run reaches everyone due.
+
+**Automations debit no credits.** The salon's card is billed by Meta directly, unlike voice and SMS — see [Billing](api/whatsapp.md#billing).
+
 ## Running tests locally
 
 ```bash

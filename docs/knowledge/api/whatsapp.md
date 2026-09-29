@@ -209,7 +209,7 @@ Pinned by `test_template_names_compose_the_locale_with_the_key`, `test_a_shop_on
 
 **The marketing trio was re-voiced on 2026-09-02** (never live, so bodies were rewritten in place with keys kept): `promo_v1`/`winback_v1`/`rebook_v1` are now signed by the stylist of the customer's last visit (`{{2}}`, the shop moving to `{{3}}`) and close with the shared soft CTA «Se ti va, scrivimi pure.» `promo_v1`'s generated slot (now `{{4}}`) is a gentle check-in *observation* about the last visit, not an offer; `rebook_v1` never mentions money (owner rule, pinned by a test). `receipt_v1` (UTILITY, itemised visit + total) joined for a not-yet-built receipt feature — inert until a sender references it, but it enters the push list like any catalogue entry.
 
-**The automation pair was shortened on 2026-09-01, and Meta split its categories (2026-09-23).** `feedback_v2` = name + visit date + where to review, `reminder_v6` = name + appointment date and time + salon. Meta reclassified the review request as **MARKETING** — asking a customer for a public review is promotion by its definition — while `reminder_v6` stays **UTILITY**. The split is deliberate and load-bearing: the feedback rule is now consent-gated, cooldown-suppressed and paused on YELLOW/RED quality, and it counts in the owner's marketing counters; the reminder rule is none of those, because an appointment reminder that last week's offer could delay or suppress would be a defect, not a compliance win. `feedback_v2` carries the module's one named exemption from the "MARKETING generates a slot" invariant (`MARKETING_WITHOUT_GENERATED_SLOT` in `whatsapp_templates.py`): every variable is still a fact, so there is nothing for a model to write and nothing that could hallucinate. The service list is gone from both bodies, and the salon name from the review request — coexistence means that one arrives from the salon's own number under its own display name, so repeating it read like a mailshot. The reminder keeps the salon name: it may reach a number the customer never saved, and without it nothing in the message says who is waiting for them. `reminder_v6` is named for the copy actually approved on Kairo's WABA — **the catalogue key tracks Meta's template name, never the reverse**, because Meta locks an approved body and a key that drifts addresses a template that does not exist. The **visit date stays** — it is the anchor to the customer's own transaction. The review **link is no longer sent**: `render_variables` still accepts `link=` and ignores it, so the `link` field on the automation rule is inert until the webapp drops it. `feedback_v1` was deleted from the catalogue the same day — no sender had ever received it, so there was nothing to retire downstream.
+**The automation pair was shortened on 2026-09-01, and Meta split its categories (2026-09-23).** `feedback_v2` = name + visit date + where to review, `reminder_v6` = name + appointment date and time + salon. Meta reclassified the review request as **MARKETING** — asking a customer for a public review is promotion by its definition — while `reminder_v6` stays **UTILITY**. The split is deliberate and load-bearing: the feedback rule is now consent-gated, cooldown-suppressed and paused on YELLOW/RED quality, and it counts in the owner's marketing counters; the reminder rule is none of those, because an appointment reminder that last week's offer could delay or suppress would be a defect, not a compliance win. `feedback_v2` carries the module's one named exemption from the "MARKETING generates a slot" invariant (`MARKETING_WITHOUT_GENERATED_SLOT` in `whatsapp_templates.py`): every variable is still a fact, so there is nothing for a model to write and nothing that could hallucinate. The service list is gone from both bodies, and the salon name from the review request — coexistence means that one arrives from the salon's own number under its own display name, so repeating it read like a mailshot. The reminder keeps the salon name: it may reach a number the customer never saved, and without it nothing in the message says who is waiting for them. `reminder_v6` is named for the copy actually approved on Kairo's WABA — **the catalogue key tracks Meta's template name, never the reverse**, because Meta locks an approved body and a key that drifts addresses a template that does not exist. The **visit date stays** — it is the anchor to the customer's own transaction. The review **link is now sent**: when the rule carries one, `render_variables` puts it in `{{3}}` (where to review); only when `link` is empty does `{{3}}` fall back to the platform label, so `platform` is now the no-link fallback rather than the only value. `feedback_v1` was deleted from the catalogue the same day — no sender had ever received it, so there was nothing to retire downstream.
 
 **A `not_ready` key is retried by the hourly tick (2026-08-31).** Approval lands later, on *Kairo's* WABA, with no per-shop event attached — so without that retry a salon that onboarded while a template was pending could never send, permanently and silently. See [The hourly tick](#the-hourly-tick).
 
@@ -291,6 +291,59 @@ Each row: `message_id` (null for holdout), `campaign_key`, `goal`,
 `sent_at`, `suppressed_reason`, `error_code` (Meta's error on a `failed` row),
 `scheduled_at` (when a `queued` row will leave; null on holdout/inbound),
 `arm` (`send`/`holdout`), `created_at`.
+
+---
+
+## Automations
+
+The only place the product messages a customer with **nobody** in the loop. Two
+owner-configured rules, `rule_key IN ('feedback','reminder')`; an **absent row
+means off**, so a shop that never opened the tile sends nothing — the
+deliberate default for a feature that sends by itself.
+`whatsapp.automation_rules` holds the per-shop `enabled` and `params`;
+`whatsapp.automation_sends` is the tick's idempotency record
+([Database](database.md#whatsapp-schema--authoritative-here)). Firing is the
+`whatsapp_automations` stage of [the hourly tick](#the-hourly-tick).
+
+The two rules are the two sides of the automation pair documented under
+[Template propagation](#post-whatsapptemplatesensureshop_id):
+`feedback` → `feedback_v2`, **MARKETING**, so it is consent-gated,
+cooldown-suppressed, paused on a YELLOW/RED quality rating, and counts in the
+owner's marketing counters; `reminder` → `reminder_v6`, **UTILITY**, so none of
+those apply — an appointment reminder that last week's offer could delay would
+be a defect, not a compliance win.
+
+### `GET /whatsapp/automations/{shop_id}`
+
+Returns **both** rules always, with defaults, not only the rows that exist — the
+tile needs a switch for a rule a shop has never configured:
+
+```json
+{"data":{"feedback":{"rule_key":"feedback","enabled":false,
+                    "params":{"hours_after":24,"platform":"general","link":""}},
+         "reminder":{"rule_key":"reminder","enabled":false,
+                     "params":{"min_no_shows":0}}}}
+```
+
+### `PUT /whatsapp/automations/{shop_id}`
+
+Upserts one rule:
+
+```json
+{"shop_id": "…", "requested_by": "…", "rule_key": "feedback",
+ "enabled": true, "params": {"hours_after": 24, "platform": "google", "link": ""}}
+```
+
+`422` if `shop_id` does not match the path or `rule_key` is unknown. Audited as
+`automation.config` (fail-open, like every `whatsapp.audit_events` insert).
+Returns `{rule_key, enabled, params}`.
+
+**Params.** `feedback`: `hours_after` (default 24), `platform`
+(`google`/`facebook`/`instagram`/`general`), `link` — used as `{{3}}` when
+non-empty (the review URL; `platform` is only the fallback label when there is
+no link, which is why an empty `link` still sends "Google"/"Facebook"/
+"Instagram"/"un canale a tua scelta"). `reminder`:
+`min_no_shows` (0 = everyone; the 24h lead is fixed, not a per-shop setting).
 
 ---
 
@@ -679,10 +732,11 @@ New `suppressed_reason` values: `recently_contacted`,
 
 ## The hourly tick
 
-`POST /messaging/tick` ([Number Provisioning](number-provisioning.md)) has four WhatsApp stages, each independently wrapped so one failure can't suppress the others:
+`POST /messaging/tick` ([Number Provisioning](number-provisioning.md)) has five WhatsApp stages, each independently wrapped so one failure can't suppress the others:
 
 - `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver, and carries the **only retry of the propagation gate**: live senders missing part of the catalogue — the receipt included since 2026-09-23 (`propagation_fingerprints()` = catalogue + document fingerprints) — **or holding an outdated body** are pushed once Kairo's own copy of that exact text turns `approved`. The worklist (`list_senders_needing_templates`) is keyed on `template_key|body_hash` pairs rather than on a count of rows, which fixed two things at once: a count could not see a body that changed under an unchanged name, and it was inflated by non-pushed templates, so a shop could look complete while missing something. The receipt flipped sides in 2026-09-23: it used to be the padding to exclude, and is now one of the fingerprints a shop must hold. Kairo's WABA is asked once per run, not once per shop — the answer is identical for everyone. An empty gate (unconfigured, or a Graph error) skips the stage entirely rather than pushing on a guess. Counts add `propagated`, `edited` and `approved_on_kairo`.
 - `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed` (`no_consent`, `opted_out`, `recently_contacted`), `failed`, `deferred` (over daily cap, retried in an hour), `rate_capped` (Meta 131049, retried in 24h), `requeued` (claimed but never sent, recovered from a crashed tick).
+- `whatsapp_automations` — fires each shop's enabled rules against what is due ([Automations](#automations)). It runs **after** `whatsapp_sends`, so a row it enqueues this tick goes out on the **next** drain (≤60s), not this pass. Per enabled rule: an offline sender skips the shop (`skipped_shops`); the rule's template row must be `approved` or it is skipped silently (the automations tile disables the toggle on that same signal); and a **MARKETING** rule is held while the sender's quality rating is YELLOW/RED — `feedback_v2` is MARKETING, so a red sender pauses the review request while the UTILITY reminder continues. Then `feedback_v2` is due for a **completed** appointment whose `end_time` falls in `(now − (hours_after+1)h, now − hours_after h]` (default 24), with a phone and no prior `automation_sends` row; `reminder_v6` is due for a `scheduled`/`confirmed` appointment starting in `(now, now+24h]`, with a phone, the optional `min_no_shows` filter and no prior send. Every variable is a database fact (Italian date/time formatting) — nothing is generated, which is what keeps the reminder UTILITY and lets the MARKETING feedback carry its [one named slot exemption](#post-whatsapptemplatesensureshop_id). Each due row is enqueued (`campaign_key = automation:{rule}:{appointment_id}`) and then recorded in `whatsapp.automation_sends` (PK `(rule_key, appointment_id)`) — **enqueue first**, so a crash between the two re-sends once rather than dropping a message forever, and a `None` from `enqueue` means a crashed tick already queued it, so it records anyway. `outbound_messages.initiated_by` stays NULL: no human configured this send. Counts: `feedback`, `reminder`, `skipped_shops`, `errors`. `reminder_v6` being UTILITY is load-bearing: `send_due` re-checks consent and the 7-day cooldown only for non-UTILITY rows.
 - `whatsapp_nudges` — **the 20h nudge**. Meta's service window permits free-form messages only within 24h of the customer's *last* message, and it resets every time they write — so the only thing truly forbidden is speaking first after 24h of silence, which needs an approved template. One last free message inside the window (`NUDGE_AFTER_HOURS = 20`, `wa_nudge.NUDGE_BODY`) invites the customer to write back, and their reply is what reopens it. `should_nudge` is pure, `now` an argument, and refuses on every one of: shop not opted in, thread escalated, the shop at or below its low-credit threshold (`credit_low`, read once per shop per sweep from `credit_state`), the owner already replied (webapp or phone echo), the customer replied after the agent (the thread is waiting on *us*), the agent never spoke, already nudged since their last message, and the window already closed. "At most once" is **derived from a row**, not a column: the nudge is recorded like any other agent reply (`origin='agent'`, `preview = NUDGE_BODY`) and `list_nudge_candidates` reads that back — so it survives a restart, and there is no second fact about the same send to keep true. Counts: `nudged`, `errors`.
 - `credit_notices` — **the low-credit email, once per episode** (`credit_state.notify_sweep`). For an opted-in shop with an online sender that is at or below its threshold and not yet stamped, it POSTs `{shop_id, balance, threshold}` to the webapp's `POST /api/v1/hair-salon/whatsapp/credit-low` (engine bearer `MARKET_INTEL_SECRET`, as for token-expiring) and stamps `shop_config.credit_low_notified_at` — also when the webapp answers `sent: false` (no owner mailbox is a fact about the shop). A webapp that never answered leaves the shop unstamped, so the next tick retries. The first tick that finds the balance back above the threshold clears the stamp, so the next episode mails again. Counts: `notified`, `cleared`, `errors`.
 

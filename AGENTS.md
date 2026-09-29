@@ -6,6 +6,21 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-29 — The feedback rule's review link is now actually sent
+
+**Owner-driven fix.** The WhatsApp `feedback` automation carried a `link` param
+that was accepted and silently dropped: `render_variables` ignored it, and the
+2026-09-01 shortening note recorded the field as inert — so an owner who
+deposited their Google review URL watched it never arrive. Now `render_variables`
+uses `link` as `{{3}}` (the "where to review" slot) when it is set, and only falls
+back to the platform label ("Google"/"Facebook"/"Instagram"/"un canale a tua
+scelta") when `link` is empty; `platform` is now solely the no-link fallback.
+**No template change and no re-approval:** `{{3}}` is a send-time value rendered
+against the already-approved `feedback_v2`, so nothing needs re-approval or
+propagation. `link` may be scheme-less (an owner can paste `instagram.com/…`),
+and is passed through as given rather than normalised. Not verified live — no
+real send was made as part of this change.
+
 ## 2026-09-29 — The WhatsApp responder pauses at the low-credit threshold
 
 **Owner decisions (2026-09-29), recorded as given.** One low-credit threshold

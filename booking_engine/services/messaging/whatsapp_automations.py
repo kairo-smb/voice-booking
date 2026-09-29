@@ -101,15 +101,19 @@ def render_variables(
     salon name from the review request — that one already arrives from the
     salon's own number. The reminder keeps the salon name, because a reminder
     from a number the customer never saved otherwise says who is waiting for
-    them nowhere. `link` is accepted and ignored: the body names the platform.
+    them nowhere. For the feedback {{3}}, the owner's review `link` wins when
+    non-empty; the platform label is the fallback when no link was deposited.
     """
     when = row["appointment_at"]
     name = clean_variable(row["first_name"] or "")
     if template_key.startswith("feedback"):
+        review_target = clean_variable(link) or _PLATFORM_LABELS.get(
+            platform, _GENERAL_PLATFORM,
+        )
         return {
             "1": name,
             "2": clean_variable(_feedback_date(when)),
-            "3": _PLATFORM_LABELS.get(platform, _GENERAL_PLATFORM),
+            "3": review_target,
         }
     return {
         "1": name,
@@ -171,7 +175,7 @@ async def run_automations(*, settings) -> dict:
                 variables = render_variables(
                     template_key, row,
                     platform=str(rule["params"].get("platform", "general")),
-                    link=str(rule["params"].get("link", "")),
+                    link=str(rule["params"].get("link") or ""),
                 )
                 try:
                     message_id = await wq.enqueue(

@@ -634,8 +634,21 @@ def test_render_variables_formats_facts_not_generated_copy():
         "feedback_v2", row, platform="google", link="https://g.page/r/x",
     )
     # Exact, not a subset: a leftover {{4}} would be a parameter Meta rejects
-    # against the shortened body, and `link` is no longer sent at all.
-    assert fb == {"1": "Giulia", "2": "12 agosto", "3": "Google"}
+    # against the shortened body, and the owner's review link fills {{3}}.
+    assert fb == {"1": "Giulia", "2": "12 agosto", "3": "https://g.page/r/x"}
+
+    # A scheme-less link is passed through as given, no normalisation — real
+    # rules may store "instagram.com/kairo_aidesk" without the https://.
+    schemeless = wa.render_variables(
+        "feedback_v2", row, platform="instagram", link="instagram.com/kairo_aidesk",
+    )
+    assert schemeless == {
+        "1": "Giulia", "2": "12 agosto", "3": "instagram.com/kairo_aidesk",
+    }
+
+    # No link deposited: the platform label is the fallback for {{3}}.
+    google = wa.render_variables("feedback_v2", row, platform="google")
+    assert google == {"1": "Giulia", "2": "12 agosto", "3": "Google"}
 
     general = wa.render_variables("feedback_v2", row)
     assert general["3"] == "un canale a tua scelta"
