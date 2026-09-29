@@ -355,7 +355,9 @@ assistant is off" — see the refusal table above for why.
 
 `turn_limit` never appears here: it is the refusal that marks the session
 escalated, so by read time it presents as `escalated`, which is the true thing
-to say. Four reasons reach the owner, not five.
+to say. Five reasons reach the owner: the four above plus `low_credit` — an
+escalated session whose `outcome_reason = 'low_credit'` is renamed exactly like
+a takeover, because a credit pause is the basket, not the agent giving up.
 
 ### `POST /whatsapp/threads/{shop_id}/{phone}/takeover`
 
@@ -408,7 +410,17 @@ switch it off:
 | `intent_not_whitelisted` | the session's intent is outside `wa_routing.WHITELIST`. Opted in is not enough; a complaint is a person's |
 | `escalated` | the session was handed to a human and stays handed over — the *next* message does not run a turn either |
 | `human_took_over` | the owner replied, from the webapp (`kairo`) or their phone (`phone`). Not marked escalated: they are already handling it |
-| `turn_limit` | `MAX_SESSION_TURNS` (12) reached **in this session**. A booking is four or five exchanges; twelve means the conversation is not going where the agent thinks it is, and the honest move is a person. The one refusal here that is escalated, because it is something happening rather than a thread that was never the agent's |
+| `turn_limit` | `MAX_SESSION_TURNS` (12) reached **in this session**. A booking is four or five exchanges; twelve means the conversation is not going where the agent thinks it is, and the honest move is a person. Escalated, because it is something happening rather than a thread that was never the agent's |
+| `low_credit` | the basket is at or below the shop's low-credit threshold (`services/credit_state.py`: `balance <= coalesce(shop_config.auto_topup_threshold_tokens, 10000)`). Checked **after** `open_session` and after the escalation/takeover rules, then stamped `outcome = 'escalated'`, `outcome_reason = 'low_credit'` — never over a takeover. No marketing-engine call is made. The stamp is what keeps the conversation manual after a top-up; the *next* session (past `SESSION_GAP`) is answered again automatically |
+
+**The credit pause (owner decision, 2026-09-29).** One threshold per shop, read
+by every surface. Below it the responder stands down but nothing else changes:
+the WABA stays connected, the classifier keeps naming requests while the
+balance is above zero, the routing menu still goes out, and a tap still labels
+the conversation — no agent answers it. `whatsapp_agent_enabled` is not
+touched, so the owner's preference survives the pause. The 20h nudge skips
+low shops too (`wa_nudge.should_nudge` reads `credit_low`). The empty basket
+keeps its own later path: marketing-engine's 402 → `no_credit`.
 
 **The debounce is a sleep plus a re-read, not a per-thread timer.**
 `DEBOUNCE_SECONDS = 2.0`: people send "ciao" / "volevo prenotare" / "per

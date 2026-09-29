@@ -35,6 +35,7 @@ from booking_engine.config import get_settings
 from booking_engine.db import voice_config_queries as config_q
 from booking_engine.db import wa_session_queries as wsq
 from booking_engine.db import whatsapp_thread_queries as tq
+from booking_engine.services import credit_state
 from booking_engine.services.messaging import wa_routing
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,11 @@ def may_speak(thread: dict) -> tuple[bool, str]:
         return False, "human_took_over"     # echo or webapp, same rule
     if int(thread.get("agent_turns") or 0) >= MAX_SESSION_TURNS:
         return False, "turn_limit"
+    # The basket is at or below the shop's threshold (`credit_state`). Last on
+    # purpose: a thread that is already a person's keeps saying so, and this
+    # refusal escalates — it must never overwrite a takeover's reason.
+    if thread.get("credit_low"):
+        return False, LOW_CREDIT_REASON
     return True, "ok"
 
 
@@ -90,6 +96,18 @@ def may_speak(thread: dict) -> tuple[bool, str]:
 # both are `outcome = 'escalated'`, and "hai preso tu questa conversazione" and
 # "l'assistente ti ha passato la conversazione" are not the same sentence.
 TAKEOVER_REASON = "human_took_over"
+
+# The basket fell to the shop's low-credit threshold (owner decision,
+# 2026-09-29): the responder pauses and the conversation becomes the owner's.
+# Stamped on the session like a takeover, and for the same reason — the row is
+# what keeps it manual after a top-up. Only a *new* session is answered again;
+# the customer who wrote during the pause is mid-conversation with a person.
+LOW_CREDIT_REASON = "low_credit"
+
+
+# Escalations whose `outcome_reason` is its own sentence to the owner rather
+# than "the assistant handed it back".
+_RENAMED_ESCALATIONS = (TAKEOVER_REASON, LOW_CREDIT_REASON)
 
 
 def agent_status(thread: dict) -> tuple[bool, str | None]:
@@ -100,20 +118,22 @@ def agent_status(thread: dict) -> tuple[bool, str | None]:
     would be worse than no status line, because the owner would trust it.
 
     Returns `(active, reason)`, with `reason` None while the agent is speaking.
-    Four reasons reach the Inbox — `not_opted_in`, `intent_not_whitelisted`,
-    `escalated`, `human_took_over` — and `turn_limit` is not one of them: it is
-    the refusal that escalates the session, so by the time anyone reads the
-    thread back it presents as `escalated`, which is the true thing to say.
+    Five reasons reach the Inbox — `not_opted_in`, `intent_not_whitelisted`,
+    `escalated`, `human_took_over`, `low_credit` — and `turn_limit` is not one
+    of them: it is the refusal that escalates the session, so by the time
+    anyone reads the thread back it presents as `escalated`, which is the true
+    thing to say.
 
-    The rename: an explicit takeover is a *person taking the thread*, which is
-    what `human_took_over` means, and it arrives as an escalation only because
-    that is the durable row we already had to write it on.
+    The renames: an explicit takeover is a *person taking the thread*, which is
+    what `human_took_over` means, and a credit pause is the *basket*, not the
+    agent giving up. Both arrive as an escalation only because that is the
+    durable row we already had to write them on.
     """
     ok, reason = may_speak(thread)
     if ok:
         return True, None
-    if reason == "escalated" and thread.get("outcome_reason") == TAKEOVER_REASON:
-        return False, TAKEOVER_REASON
+    if reason == "escalated" and thread.get("outcome_reason") in _RENAMED_ESCALATIONS:
+        return False, thread["outcome_reason"]
     return False, reason
 
 
@@ -160,19 +180,26 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
     # 4. The authoritative check, on real state. Re-run after the debounce
     #    rather than before it: the owner picking up their phone during those
     #    two seconds is precisely the race this exists to lose gracefully.
+    #    Credit is read here, after `open_session`, so a pause has a session
+    #    row to be stamped on — that stamp is what keeps this conversation
+    #    manual after the owner tops up.
+    credit = await credit_state.credit_state(shop_id)
     thread = {
         "agent_enabled": agent_enabled,
         "intent": intent,
         "escalated": state.get("escalated"),
         "human_replied_at": state.get("human_replied_at"),
         "agent_turns": state.get("agent_turns"),
+        "credit_low": credit["low"],
     }
     ok, reason = may_speak(thread)
     if not ok:
-        # `turn_limit` is the one refusal here that is something *happening*
-        # rather than a thread that was never the agent's: the conversation ran
-        # long and a person now has to finish it, so it goes in the owner's
-        # queue. The others are already where they belong.
+        # `turn_limit` and `low_credit` are the refusals here that are
+        # something *happening* rather than a thread that was never the
+        # agent's: the conversation ran long, or the basket ran low, and a
+        # person now has to finish it, so it goes in the owner's queue. The
+        # others are already where they belong — and since `may_speak` checks
+        # escalation and takeover first, a stamp here never overwrites one.
         await _stand_down(call_id, shop_id, phone, reason,
                           escalate=reason in _ESCALATING_REASONS)
         return
@@ -217,8 +244,9 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
 # Refusals that mean "a person is needed on this thread", as opposed to "this
 # was never the agent's to answer". Only these are written to the session row:
 # marking a not-opted-in shop's every thread escalated would fill the owner's
-# queue with threads nothing went wrong on.
-_ESCALATING_REASONS = ("turn_limit",)
+# queue with threads nothing went wrong on. `low_credit` is here because the
+# stamp is what keeps the paused conversation manual after a top-up.
+_ESCALATING_REASONS = ("turn_limit", LOW_CREDIT_REASON)
 
 
 async def _stand_down(

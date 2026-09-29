@@ -91,8 +91,10 @@ def wired(monkeypatch):
         turn=Spy(a_turn()),
         send_text=Spy("wamid.out"),
         record_reply=Spy({}),
+        credit=Spy({"balance": 50_000, "threshold": 10_000, "low": False}),
     )
     monkeypatch.setattr(wa_agent.config_q, "get_config", fakes.config)
+    monkeypatch.setattr(wa_agent.credit_state, "credit_state", fakes.credit)
     monkeypatch.setattr(wa_agent.tq, "inbound_history", fakes.history)
     monkeypatch.setattr(wa_agent.wsq, "open_session", fakes.open_session)
     monkeypatch.setattr(wa_agent.wsq, "session_state", fakes.state)
@@ -151,9 +153,11 @@ def test_every_refusal_reason_is_a_distinct_string():
                             "human_replied_at": NOW})[1],
         wa_agent.may_speak({"agent_enabled": True, "intent": "booking",
                             "agent_turns": wa_agent.MAX_SESSION_TURNS})[1],
+        wa_agent.may_speak({"agent_enabled": True, "intent": "booking",
+                            "credit_low": True})[1],
     ]
     assert reasons == ["not_opted_in", "intent_not_whitelisted", "escalated",
-                       "human_took_over", "turn_limit"]
+                       "human_took_over", "turn_limit", "low_credit"]
     assert len(set(reasons)) == len(reasons)
 
 
@@ -191,6 +195,15 @@ def test_agent_status_names_the_four_silences_the_inbox_renders():
     assert wa_agent.agent_status({"agent_enabled": True, "intent": "booking",
                                   "human_replied_at": NOW}) \
         == (False, "human_took_over")
+
+
+def test_a_credit_pause_reads_as_the_basket_not_as_the_agent_giving_up():
+    """Stamped as an escalation so the conversation stays manual after a
+    top-up, but the owner must read "credito sotto soglia", not a failure."""
+    assert wa_agent.agent_status({
+        "agent_enabled": True, "intent": "booking", "escalated": True,
+        "outcome_reason": wa_agent.LOW_CREDIT_REASON,
+    }) == (False, "low_credit")
 
 
 def test_a_speaking_agent_has_no_reason_to_report():
@@ -536,6 +549,71 @@ async def test_the_agent_stands_down_silently_on_an_empty_basket(wired):
 
 
 
+
+
+# --- the credit pause (owner decision 2026-09-29) ---------------------------
+
+async def test_low_credit_stands_down_and_stamps_the_session(wired):
+    """No marketing-engine call at all, and the session carries the reason:
+    the stamp is what keeps this conversation manual after a top-up."""
+    wired.credit.result = {"balance": 9_000, "threshold": 10_000, "low": True}
+
+    await run(wired)
+
+    assert wired.turn.count == 0
+    assert wired.send_text.count == 0
+    assert wired.open_session.count == 1
+    assert wired.mark_escalated.last == {"call_id": CALL, "reason": "low_credit"}
+
+
+async def test_a_paused_session_stays_manual_after_the_top_up(wired):
+    """Credit is back, but this conversation was stamped during the pause."""
+    wired.state.result = {**wired.state.result, "escalated": True}
+    wired.credit.result = {"balance": 90_000, "threshold": 10_000, "low": False}
+
+    await run(wired)
+
+    assert wired.turn.count == 0
+    assert wired.send_text.count == 0
+
+
+async def test_a_new_session_after_the_top_up_is_answered(wired):
+    wired.credit.result = {"balance": 90_000, "threshold": 10_000, "low": False}
+
+    await run(wired)
+
+    assert wired.turn.count == 1
+    assert wired.send_text.count == 1
+    assert wired.mark_escalated.count == 0
+
+
+async def test_low_credit_never_overwrites_an_owner_takeover(wired):
+    """An automatic reason never replaces a person's (see 701f59d): the owner
+    pressed "rispondo io", and that is what the Inbox must keep saying."""
+    wired.state.result = {**wired.state.result, "escalated": True}
+    wired.credit.result = {"balance": 0, "threshold": 10_000, "low": True}
+
+    await run(wired)
+
+    assert wired.mark_escalated.count == 0
+
+
+async def test_low_credit_does_not_escalate_a_thread_a_human_is_answering(wired):
+    wired.state.result = {**wired.state.result, "human_replied_at": NOW}
+    wired.credit.result = {"balance": 0, "threshold": 10_000, "low": True}
+
+    await run(wired)
+
+    assert wired.mark_escalated.count == 0
+    assert wired.turn.count == 0
+
+
+async def test_a_shop_that_has_not_opted_in_never_reads_its_credit(wired):
+    wired.config.result = {"whatsapp_agent_enabled": False}
+
+    await run(wired)
+
+    assert wired.credit.count == 0
 
 
 # --- the payload the engine is handed ---------------------------------------
