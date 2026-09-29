@@ -147,13 +147,14 @@ async def test_accept_payload_registers_the_customer_agents_mcp_server():
     assert mcp["allowed_tools"] == list(CUSTOMER_AGENT_TOOLS)
 
 
-def test_allowed_tools_are_the_eleven_customer_agent_names():
-    # The approved naming table (plan 2026-09-28). An old name here would make
-    # OpenAI filter every marketing-engine tool out of the session.
+def test_allowed_tools_are_the_twelve_customer_agent_names():
+    # The approved naming table (plan 2026-09-28) plus customer_history
+    # (2026-09-29, "il solito"). A name missing here makes OpenAI filter that
+    # marketing-engine tool out of every call.
     assert set(CUSTOMER_AGENT_TOOLS) == {
-        "customers_identify", "services_catalog", "availability_search",
+        "customers_identify", "customer_history", "services_catalog", "availability_search",
         "create_customer", "update_customer", "create_appointment",
         "appointments_upcoming", "reschedule_appointment", "cancel_appointment",
         "escalate_to_owner", "set_conversation_outcome",
     }
-    assert len(CUSTOMER_AGENT_TOOLS) == 11
+    assert len(CUSTOMER_AGENT_TOOLS) == 12

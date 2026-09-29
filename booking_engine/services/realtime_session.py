@@ -41,6 +41,7 @@ _VOICE_MAP = {
 # a tool from every call; an unknown one is harmless.
 CUSTOMER_AGENT_TOOLS: tuple[str, ...] = (
     "customers_identify",
+    "customer_history",
     "services_catalog",
     "availability_search",
     "create_customer",

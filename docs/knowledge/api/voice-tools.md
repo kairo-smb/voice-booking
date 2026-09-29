@@ -8,7 +8,7 @@
 
 ## What this repo still does for a call
 
-- **Points the session at the tools.** `realtime_session.py::build_accept_payload` sets one `mcp` tool: `server_url` from `MARKET_INTEL_API_URL`, `authorization` = the per-call token (`services/call_token.py`, HMAC-signed `{shop_id, call_id}` with `VOICE_AGENT_TOOL_SECRET`, which marketing-engine verifies with the same value), `allowed_tools` = `CUSTOMER_AGENT_TOOLS` (the 11 names below). A stale name in that list silently filters a tool out of every call.
+- **Points the session at the tools.** `realtime_session.py::build_accept_payload` sets one `mcp` tool: `server_url` from `MARKET_INTEL_API_URL`, `authorization` = the per-call token (`services/call_token.py`, HMAC-signed `{shop_id, call_id}` with `VOICE_AGENT_TOOL_SECRET`, which marketing-engine verifies with the same value), `allowed_tools` = `CUSTOMER_AGENT_TOOLS` (the 12 names below). A stale name in that list silently filters a tool out of every call.
 - **Owns the session row** the token names (`voice_agent.calls`) and its writes: marketing-engine calls back into [Sessions](sessions.md) for `escalate_to_owner`, `set_conversation_outcome` and the customer link.
 - **Owns the persona** (voice, tone, greeting) — see [Voice Agent Logic](../voice-agent-logic.md#prompt-assembly).
 
@@ -17,6 +17,7 @@
 | Old `/voice/tools/*` name (deleted) | Customer-agent name | Backed by |
 |---|---|---|
 | `lookup_customer` | `customers_identify` | marketing-engine SQL, by the session's caller number |
+| — (new, 2026-09-29) | `customer_history` | marketing-engine SQL, the session's linked customer only (`calls.customer_id`): past completed visits, usual services and stylist for "il solito" |
 | `create_customer_from_call` | `create_customer` | webapp `POST /api/v1/hair-salon/agent/customers` |
 | `update_customer_from_call` | `update_customer` | webapp `PATCH /api/v1/hair-salon/agent/customers/{id}` |
 | `get_services` + `get_staff_for_service` | `services_catalog` | marketing-engine SQL |
