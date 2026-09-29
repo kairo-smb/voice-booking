@@ -1,8 +1,9 @@
 """The owner-email seam: what the webapp is asked, and how its answer is read.
 
 The low-credit notice answers in three states rather than two, because the
-sweep's bookkeeping differs: an answer (sent or not) closes the attempt, while
-no answer at all leaves the episode unstamped for the next tick.
+sweep's bookkeeping differs: sent, or not sent for a standing reason (no owner
+mailbox, webapp mail unconfigured), closes the attempt; no answer at all, or a
+transient `send_failed`, leaves the episode unstamped for the next tick.
 """
 from __future__ import annotations
 
@@ -47,6 +48,34 @@ async def test_credit_low_not_sent_is_an_answer():
         200, json={"data": {"sent": False, "reason": "no_owner_email"}}))
     assert await webapp_notify.whatsapp_credit_low(
         shop_id=uuid4(), balance=0, threshold=10_000, settings=SETTINGS) is False
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_credit_low_not_configured_on_the_webapp_is_an_answer():
+    respx.post(CREDIT_URL).mock(return_value=httpx.Response(
+        200, json={"data": {"sent": False, "reason": "not_configured"}}))
+    assert await webapp_notify.whatsapp_credit_low(
+        shop_id=uuid4(), balance=0, threshold=10_000, settings=SETTINGS) is False
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_credit_low_send_failed_is_retried_not_answered():
+    """A transient Resend failure must not burn the episode's only email."""
+    respx.post(CREDIT_URL).mock(return_value=httpx.Response(
+        200, json={"data": {"sent": False, "reason": "send_failed"}}))
+    assert await webapp_notify.whatsapp_credit_low(
+        shop_id=uuid4(), balance=0, threshold=10_000, settings=SETTINGS) is None
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_credit_low_not_sent_without_a_known_reason_is_retried():
+    respx.post(CREDIT_URL).mock(return_value=httpx.Response(
+        200, json={"data": {"sent": False}}))
+    assert await webapp_notify.whatsapp_credit_low(
+        shop_id=uuid4(), balance=0, threshold=10_000, settings=SETTINGS) is None
 
 
 @respx.mock
