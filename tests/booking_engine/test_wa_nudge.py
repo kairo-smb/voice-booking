@@ -117,6 +117,12 @@ def test_an_escalated_thread_is_not_nudged():
     assert wa_nudge.should_nudge(thread(escalated=True), now=NOW) is False
 
 
+def test_a_shop_below_the_credit_threshold_is_not_nudged():
+    """The responder is paused; inviting a reply nobody will answer is worse
+    than the silence."""
+    assert wa_nudge.should_nudge(thread(credit_low=True), now=NOW) is False
+
+
 def test_a_shop_that_never_opted_in_is_not_nudged():
     """A nudge is agent behaviour. A manual inbox does not send unbidden."""
     assert wa_nudge.should_nudge(thread(agent_enabled=False), now=NOW) is False
@@ -196,8 +202,10 @@ def wired(monkeypatch):
     monkeypatch.setattr(wa_nudge.wq, "get_sender", get_sender)
     monkeypatch.setattr(wa_nudge.meta, "send_text", send_text)
     monkeypatch.setattr(wa_nudge.tq, "record_reply", record)
+    credit = Spy(result={"balance": 50_000, "threshold": 10_000, "low": False})
+    monkeypatch.setattr(wa_nudge.credit_state, "credit_state", credit)
 
-    return {"candidates": candidates, "sender": sender,
+    return {"candidates": candidates, "sender": sender, "credit": credit,
             "send_text": send_text, "record": record, "get_sender": get_sender}
 
 
@@ -275,3 +283,15 @@ async def test_one_failing_thread_does_not_abort_the_sweep(wired, monkeypatch):
     counts = await wa_nudge.sweep()
     assert counts == {"nudged": 1, "errors": 1}
     assert calls == [bad["phone"], good["phone"]]
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_skips_a_shop_low_on_credit(wired):
+    wired["credit"].result = {"balance": 900, "threshold": 10_000, "low": True}
+    wired["candidates"].extend([thread(anchor=live()),
+                                thread(anchor=live(), phone="+393339998888")])
+    counts = await wa_nudge.sweep()
+    assert counts["nudged"] == 0
+    assert wired["send_text"].count == 0
+    # One read per shop, not one per thread.
+    assert wired["credit"].count == 1

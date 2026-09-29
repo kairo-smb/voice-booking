@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.db import whatsapp_thread_queries as tq
+from booking_engine.services import credit_state
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,11 @@ def should_nudge(thread: dict, *, now: datetime) -> bool:
     if not thread.get("agent_enabled"):
         return False
     if thread.get("escalated"):
+        return False
+    # The responder is paused at the low-credit threshold (owner decision,
+    # 2026-09-29). An invitation to write back to an agent that will not
+    # answer is a promise made on the owner's behalf.
+    if thread.get("credit_low"):
         return False
 
     last_inbound = thread.get("last_inbound")
@@ -128,11 +134,17 @@ async def sweep() -> dict:
     """
     counts = {"nudged": 0, "errors": 0}
     now = datetime.now(timezone.utc)
+    # One credit read per shop per sweep, not per thread: the answer is a fact
+    # about the basket, and a busy salon has many threads in the window.
+    low: dict = {}
 
     for thread in await tq.list_nudge_candidates(NUDGE_BODY):
         phone = str(thread.get("phone") or "")
         try:
-            if not should_nudge(thread, now=now):
+            shop_id = thread.get("shop_id")
+            if shop_id not in low:
+                low[shop_id] = (await credit_state.credit_state(shop_id))["low"]
+            if not should_nudge({**thread, "credit_low": low[shop_id]}, now=now):
                 continue
 
             sender = await wq.get_sender(thread["shop_id"])
