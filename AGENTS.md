@@ -96,6 +96,26 @@ both exit 0; the candidate/stamp queries exercised with real rows there. The
 thread-list SQL and the candidate query executed read-only against QA
 (`ep-noisy-dawn`, rolled back). No Meta call made.
 
+**Review fixes (same day, five commits).** (1) The pause missed conversations
+that were never routed: `handle` stamps only on a whitelisted intent, so an
+unconfident first message during the pause (menu, intent NULL) left an
+unstamped session and the tap after a top-up was answered. The inbound worker
+now calls `wa_agent.hold_for_low_credit` on every message for an opted-in, low
+shop — `open_session` + `mark_escalated('low_credit')`, same no-overwrite rule
+— and the flow continues unchanged. (2) The email episode is **claimed**
+atomically (conditional `UPDATE … IS NULL RETURNING 1`) before mailing, and
+released when there is no answer; the old read-mail-stamp let two concurrent
+ticks both mail (race checked on a scratch Postgres). (3) This supersedes the
+"`sent: false` is stamped" sentence above for one case: `send_failed` (or no
+reason) now retries — only `no_owner_email`/`not_configured` keep the stamp.
+(4) `GET /whatsapp/status` returns `credit: null` rather than 500 when the
+credit read fails. (5) This supersedes the "stays true on an old unrouted
+thread … left as is" paragraph above: `needs_evaluation` now also requires the
+last inbound within `SESSION_GAP` and no free-form owner reply since the
+current inbound session began. Suite **840 passed, 25 skipped** (from 822/25).
+The thread-list SQL ran read-only on QA; the claim `UPDATE` could not — QA does
+not have migration 28's column yet — so it was checked on the scratch Postgres.
+
 ## 2026-09-28 — Customer agents on one common layer: one engine, and this repo stops executing tools
 
 **The redesign, across all three repos in one day** (plan

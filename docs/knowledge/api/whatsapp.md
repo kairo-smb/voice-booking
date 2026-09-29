@@ -129,7 +129,7 @@ The owner disconnects their WABA, in any state (added 2026-09-25). Unsubscribes 
 
 `status` is `not_started | pending_signup | verifying | online | offline | failed`. A salon can send only when `status == "online"` **and** the template is `approved`.
 
-`credit` is `services/credit_state.py`'s verdict — the basket's effective balance against `coalesce(shop_config.auto_topup_threshold_tokens, 10000)`, `low = balance <= threshold` — and is present in every state, `not_started` included. It is the **same** answer the booking agent stands down on (`low_credit`), so the webapp's Inbox banner and greyed agent toggle read it here rather than recomputing it.
+`credit` is `services/credit_state.py`'s verdict — the basket's effective balance against `coalesce(shop_config.auto_topup_threshold_tokens, 10000)`, `low = balance <= threshold` — and is present in every state, `not_started` included. It is `null` when the credit read itself fails (logged with `whatsapp.status_credit_failed`): the verdict is an overlay on the panel, so a basket read error costs the banner, never the whole status. It is the **same** answer the booking agent stands down on (`low_credit`), so the webapp's Inbox banner and greyed agent toggle read it here rather than recomputing it.
 
 `pending_signup` is reported as `not_started` once the row has been untouched for 15 minutes (`ABANDONED_AFTER`): the webapp aborts explicitly when its popup closes, but an owner can walk away from or close the whole tab with nothing firing, and a permanent "verifying" box with no way back is worse than forgetting the attempt.
 
@@ -389,10 +389,14 @@ first-time writer shows up by name once the agent identifies or creates them),
 `last_inbound`, `last_message` (a voice note
 reads as its transcript), `message_type`, `unread`, `last_outbound`,
 `window_expires_at`, `intent` (the **session's** verdict, not the last
-message's), `needs_evaluation` (**"In valutazione"**: the current session has
-inbound messages but no routed intent — the classifier was unsure and nobody
-tapped the menu, or there was no credit to classify at all; `r.intent IS NULL`
-off the same `routed` CTE, so it cannot disagree with `intent`), `escalated`
+message's), `needs_evaluation` (**"In valutazione"**: the current session has no routed
+intent — the classifier was unsure and nobody tapped the menu, or there was no
+credit to classify at all; `r.intent IS NULL` off the same `routed` CTE, so it
+cannot disagree with `intent` — **and** it is still current, last inbound
+within `wa_routing.SESSION_GAP` (bound as `$2`), **and** no person has answered
+it: no free-form owner reply, `origin IN ('kairo','phone')` and not a
+template/campaign, since the current inbound session began. A dormant or
+already-answered thread is not "in valutazione"), `escalated`
 (the newest WhatsApp session's `outcome = 'escalated'` — see below), plus two
 fields computed per row from the pure helpers:
 
@@ -481,6 +485,17 @@ the conversation — no agent answers it. `whatsapp_agent_enabled` is not
 touched, so the owner's preference survives the pause. The 20h nudge skips
 low shops too (`wa_nudge.should_nudge` reads `credit_low`). The empty basket
 keeps its own later path: marketing-engine's 402 → `no_credit`.
+
+**A conversation that begins during the pause stays manual, routed or not.**
+`handle` only runs on a whitelisted intent, so the inbound worker also calls
+`wa_agent.hold_for_low_credit` on **every** message, before routing: for an
+opted-in shop that is low it opens the session and stamps
+`outcome_reason = 'low_credit'` (never over an existing escalation or a human
+reply), then the normal flow continues — the classifier still runs, the menu
+still goes out. Without it an unconfident first message (menu, intent NULL)
+would leave an unstamped session, and after a top-up the customer's tap on
+"Prenotare" in that same session would be answered. A failure in the hold is
+logged (`whatsapp.credit_hold_failed`) and never costs the customer the menu.
 
 **The debounce is a sleep plus a re-read, not a per-thread timer.**
 `DEBOUNCE_SECONDS = 2.0`: people send "ciao" / "volevo prenotare" / "per
@@ -738,7 +753,7 @@ New `suppressed_reason` values: `recently_contacted`,
 - `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed` (`no_consent`, `opted_out`, `recently_contacted`), `failed`, `deferred` (over daily cap, retried in an hour), `rate_capped` (Meta 131049, retried in 24h), `requeued` (claimed but never sent, recovered from a crashed tick).
 - `whatsapp_automations` — fires each shop's enabled rules against what is due ([Automations](#automations)). It runs **after** `whatsapp_sends`, so a row it enqueues this tick goes out on the **next** drain (≤60s), not this pass. Per enabled rule: an offline sender skips the shop (`skipped_shops`); the rule's template row must be `approved` or it is skipped silently (the automations tile disables the toggle on that same signal); and a **MARKETING** rule is held while the sender's quality rating is YELLOW/RED — `feedback_v2` is MARKETING, so a red sender pauses the review request while the UTILITY reminder continues. Then `feedback_v2` is due for a **completed** appointment whose `end_time` falls in `(now − (hours_after+1)h, now − hours_after h]` (default 24), with a phone and no prior `automation_sends` row; `reminder_v6` is due for a `scheduled`/`confirmed` appointment starting in `(now, now+24h]`, with a phone, the optional `min_no_shows` filter and no prior send. Every variable is a database fact (Italian date/time formatting) — nothing is generated, which is what keeps the reminder UTILITY and lets the MARKETING feedback carry its [one named slot exemption](#post-whatsapptemplatesensureshop_id). Each due row is enqueued (`campaign_key = automation:{rule}:{appointment_id}`) and then recorded in `whatsapp.automation_sends` (PK `(rule_key, appointment_id)`) — **enqueue first**, so a crash between the two re-sends once rather than dropping a message forever, and a `None` from `enqueue` means a crashed tick already queued it, so it records anyway. `outbound_messages.initiated_by` stays NULL: no human configured this send. Counts: `feedback`, `reminder`, `skipped_shops`, `errors`. `reminder_v6` being UTILITY is load-bearing: `send_due` re-checks consent and the 7-day cooldown only for non-UTILITY rows.
 - `whatsapp_nudges` — **the 20h nudge**. Meta's service window permits free-form messages only within 24h of the customer's *last* message, and it resets every time they write — so the only thing truly forbidden is speaking first after 24h of silence, which needs an approved template. One last free message inside the window (`NUDGE_AFTER_HOURS = 20`, `wa_nudge.NUDGE_BODY`) invites the customer to write back, and their reply is what reopens it. `should_nudge` is pure, `now` an argument, and refuses on every one of: shop not opted in, thread escalated, the shop at or below its low-credit threshold (`credit_low`, read once per shop per sweep from `credit_state`), the owner already replied (webapp or phone echo), the customer replied after the agent (the thread is waiting on *us*), the agent never spoke, already nudged since their last message, and the window already closed. "At most once" is **derived from a row**, not a column: the nudge is recorded like any other agent reply (`origin='agent'`, `preview = NUDGE_BODY`) and `list_nudge_candidates` reads that back — so it survives a restart, and there is no second fact about the same send to keep true. Counts: `nudged`, `errors`.
-- `credit_notices` — **the low-credit email, once per episode** (`credit_state.notify_sweep`). For an opted-in shop with an online sender that is at or below its threshold and not yet stamped, it POSTs `{shop_id, balance, threshold}` to the webapp's `POST /api/v1/hair-salon/whatsapp/credit-low` (engine bearer `MARKET_INTEL_SECRET`, as for token-expiring) and stamps `shop_config.credit_low_notified_at` — also when the webapp answers `sent: false` (no owner mailbox is a fact about the shop). A webapp that never answered leaves the shop unstamped, so the next tick retries. The first tick that finds the balance back above the threshold clears the stamp, so the next episode mails again. Counts: `notified`, `cleared`, `errors`.
+- `credit_notices` — **the low-credit email, once per episode** (`credit_state.notify_sweep`). For an opted-in shop with an online sender that is at or below its threshold and not yet stamped, it POSTs `{shop_id, balance, threshold}` to the webapp's `POST /api/v1/hair-salon/whatsapp/credit-low` (engine bearer `MARKET_INTEL_SECRET`, as for token-expiring) **claiming** the episode first — one conditional `UPDATE … SET credit_low_notified_at = now() WHERE shop_id = $1 AND credit_low_notified_at IS NULL RETURNING 1`, so two concurrent ticks can never both mail. The claim is kept when the webapp answers sent, or `sent: false` for a standing reason (`no_owner_email`, `not_configured` — facts about the shop). It is **released** (retry next tick) when the webapp never answered, when it answered `sent: false` with `send_failed` or no reason (a transient Resend failure must not burn the episode's only mail), or when the send raised. The first tick that finds the balance back above the threshold clears the stamp, so the next episode mails again. Counts: `notified`, `cleared`, `errors`.
 
 ---
 
