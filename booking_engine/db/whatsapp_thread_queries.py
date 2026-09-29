@@ -203,6 +203,13 @@ async def thread_list(shop_id: UUID) -> list[dict]:
                lo.last_outbound,
                li.last_inbound + $3::interval AS window_expires_at,
                r.intent,
+               -- "In valutazione": the current session has inbound messages
+               -- (every row here is keyed on inbound, and the session boundary
+               -- is computed from inbound alone, so it always does) and no
+               -- routed intent — the classifier was unsure and nobody tapped
+               -- the menu, or there was no credit to classify at all. Same
+               -- CTE as `intent`, so the badge and the intent cannot disagree.
+               (r.intent IS NULL) AS needs_evaluation,
                coalesce(e.escalated, false) AS escalated,
                e.outcome_reason,
                -- No shop_config row is no opt-in: the LEFT JOIN yields NULL,

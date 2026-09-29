@@ -333,8 +333,12 @@ first-time writer shows up by name once the agent identifies or creates them),
 `last_inbound`, `last_message` (a voice note
 reads as its transcript), `message_type`, `unread`, `last_outbound`,
 `window_expires_at`, `intent` (the **session's** verdict, not the last
-message's), `escalated` (the newest WhatsApp session's `outcome = 'escalated'`
-— see below), plus two fields computed per row from the pure helpers:
+message's), `needs_evaluation` (**"In valutazione"**: the current session has
+inbound messages but no routed intent — the classifier was unsure and nobody
+tapped the menu, or there was no credit to classify at all; `r.intent IS NULL`
+off the same `routed` CTE, so it cannot disagree with `intent`), `escalated`
+(the newest WhatsApp session's `outcome = 'escalated'` — see below), plus two
+fields computed per row from the pure helpers:
 
 | field | meaning |
 |---|---|

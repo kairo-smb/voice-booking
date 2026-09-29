@@ -180,3 +180,30 @@ async def test_the_thread_falls_back_to_the_customer_the_session_identified(
     assert "channel = 'whatsapp' AND customer_id IS NOT NULL" in sql
     assert "LEFT JOIN session_customer sc USING (key)" in sql
     assert len(seen["args"]) == 3  # binds nothing new
+
+
+# --- the "In valutazione" flag -----------------------------------------------
+
+@pytest.mark.asyncio
+async def test_needs_evaluation_is_derived_from_the_routed_cte(monkeypatch):
+    """A thread whose current session has inbound messages and no routed
+    intent — the classifier was unsure and nobody tapped, or there was no
+    credit to classify at all. Derived from the same `routed` CTE the intent
+    comes from, so the badge and the intent cannot disagree.
+
+    Every row is keyed on inbound, and the session boundary is computed from
+    inbound alone, so the current session always has an inbound message: the
+    flag reduces to "the session has no intent"."""
+    seen = {}
+
+    async def fake(sql, *args):
+        seen["sql"] = " ".join(sql.split())
+        seen["args"] = args
+        return []
+
+    monkeypatch.setattr(th, "execute", fake)
+    await th.thread_list(uuid4())
+
+    assert "(r.intent IS NULL) AS needs_evaluation" in seen["sql"]
+    assert "LEFT JOIN routed r ON ltrim(r.from_phone, '+') = li.key" in seen["sql"]
+    assert len(seen["args"]) == 3  # binds nothing new
