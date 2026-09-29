@@ -8,7 +8,7 @@ Deploy, migrations, CI, environment variables, and live-call testing.
 
 ## Branching & environments
 
-Two Fly.io apps from the same `booking_engine/Dockerfile.fly`: production (`fly.toml`, app `kairo-booking-engine`, `min_machines_running = 0`) and QA (`fly.qa.toml`, app `kairo-booking-engine-qa`, `min_machines_running = 1`). Deploys automatically via GitHub Actions on push to `main` (production, `deploy-fly-prod.yml`) or `QA` (`deploy-qa.yml`) — both run tests and migration checks against a throwaway Neon branch first (see [Providers → Neon](providers.md#neon-postgresql)), then hand the real migration off to the `webapp` repo (below) before deploying.
+Two Fly.io apps from the same `booking_engine/Dockerfile.fly`: production (`fly.toml`, app `kairo-booking-engine`, `min_machines_running = 1`) and QA (`fly.qa.toml`, app `kairo-booking-engine-qa`, `min_machines_running = 1`). Deploys automatically via GitHub Actions on push to `main` (production, `deploy-fly-prod.yml`) or `QA` (`deploy-qa.yml`) — both run tests and migration checks against a throwaway Neon branch first (see [Providers → Neon](providers.md#neon-postgresql)), then hand the real migration off to the `webapp` repo (below) before deploying.
 
 Manual deploy:
 ```bash
@@ -123,14 +123,14 @@ The remaining gap is deliberate: CI also runs `tests/live_db/` against an epheme
 
 There is no external cron. `services/scheduler.py` runs inside every machine, started from the `asgi.py` lifespan; the cadences are fleet-wide and set per app in the Fly config (`0`/unset = job off):
 
-| Job | Env | QA (`fly.qa.toml`) |
-|---|---|---|
-| WhatsApp queue drain (`send_due`) | `WHATSAPP_SEND_LOOP_SECONDS` | 60 |
-| Messaging tick (`run_tick`: bundles, health, release sweep, WA onboarding sweep, automations, nudges, retention) | `MESSAGING_TICK_SECONDS` | 3600 |
-| Forwarding heartbeat (push per silent shop, no dedupe — hence daily) | `FORWARDING_HEARTBEAT_SECONDS` | 86400 |
+| Job | Env | QA (`fly.qa.toml`) | Prod (`fly.toml`) |
+|---|---|---|---|
+| WhatsApp queue drain (`send_due`) | `WHATSAPP_SEND_LOOP_SECONDS` | 60 | 600 |
+| Messaging tick (`run_tick`: bundles, health, release sweep, WA onboarding sweep, automations, nudges, retention) | `MESSAGING_TICK_SECONDS` | 3600 | 3600 |
+| Forwarding heartbeat (push per silent shop, no dedupe — hence daily) | `FORWARDING_HEARTBEAT_SECONDS` | 86400 | 86400 |
 
-- **Production runs none of these yet** (still in testing): `fly.toml` sets no cadence and keeps `min_machines_running = 0`. To turn it on: the three env vars (planned drain 600s) **and** `min_machines_running = 1` — at 0 Fly stops the machine and the jobs stop with it. Nothing has ever run the tick on prod, so the first run does all pending work at once (provisioning, release sweep, automations, queued sends): check the backlog first.
-- **Needs a machine up.** QA keeps `min_machines_running = 1`.
+- **Production is configured but not deployed** (voice-booking is not on prod yet): `fly.toml` carries the same three cadences as QA — only the drain differs, at the planned 600s (slower than QA's 60) — **and** `min_machines_running = 1`, so the first prod deploy starts them. Nothing has ever run the tick on prod, so that first run does all pending work at once (provisioning, release sweep, template propagation, automations, queued sends): check the backlog before deploying.
+- **Needs a machine up.** Both apps keep `min_machines_running = 1` — at 0 Fly stops the machine and the jobs stop with it.
 - **Safe at N machines.** Each job runs under a Postgres advisory lock, so one machine works and the rest skip that round. Jobs are aligned to the wall clock (the hourly one fires at :00), so every machine tries in the same instant, not N times per interval. `send_due` has **one lock for every caller** (drain job, tick, the inline win-back send): two concurrent drains would each read the daily cap and the per-customer cooldown before the other wrote, and each pace at full rate against Meta's app-level limit.
 - **The lock is transaction-level on purpose.** `DATABASE_URL` goes through Neon's pgbouncer (transaction mode); a session-level `pg_try_advisory_lock` there excluded nothing when tested. `pg_try_advisory_xact_lock` inside an open transaction pins one server connection and dies with it. That transaction sets `idle_in_transaction_session_timeout = 0` locally: it idles for the whole job, and Neon's 5-minute default would otherwise kill the lock mid-drain. A QA restore-from-prod drops every connection — the running job fails, is logged, and the next slot retries.
 - **Deploys:** a stopped machine rolls back its lock transaction; rows it left in `sending` are recovered by `requeue_stuck` on the next drain.

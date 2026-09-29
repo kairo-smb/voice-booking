@@ -6,6 +6,24 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-29 — The prod scheduler is configured (deploy still pending)
+
+The in-process scheduler (`services/scheduler.py`) was **QA-only**: `fly.qa.toml`
+set the three cadences and `min_machines_running = 1`, while `fly.toml` set no
+cadence at all and kept `min_machines_running = 0` — so on production the
+scheduler started but every job was off, and at 0 Fly stops the machine anyway.
+The owner asked for the sweeps to be on in prod too, at least configured.
+`fly.toml` now carries `WHATSAPP_SEND_LOOP_SECONDS = 600` (the planned prod
+drain, deliberately slower than QA's 60), `MESSAGING_TICK_SECONDS = 3600` and
+`FORWARDING_HEARTBEAT_SECONDS = 86400`, plus `min_machines_running = 1` — at 0
+Fly stops the machine and the jobs stop with it. **Nothing is deployed**:
+voice-booking is not on prod yet, so this is configuration only and the first
+prod deploy is what starts them. That first run does all pending work at once
+(provisioning, release sweep, template propagation, automations, queued sends),
+so check the backlog before deploying. The 2026-07-18 warning still stands: any
+`fly secrets set` on `kairo-booking-engine` deploys the nine staged secrets as a
+side effect.
+
 ## 2026-09-29 — The feedback rule's review link is now actually sent
 
 **Owner-driven fix.** The WhatsApp `feedback` automation carried a `link` param
