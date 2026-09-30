@@ -94,45 +94,50 @@ CATALOGUE: dict[str, Template] = {
     # ── MARKETING ────────────────────────────────────────────────────────────
     # Exactly one generated slot each, always the last variable. Everything
     # before it is a fact: name, the stylist of the last visit, the salon, and
-    # a lookup from the visit record. Every body closes with the same soft CTA
-    # («Se ti va, scrivimi pure.») — a hard-sell imperative reads worse and is
-    # harder to get approved; an open invitation is enough, the observation
-    # alone invites a reply.
+    # a lookup from the visit record. Register (owner, 2026-09-30): warm, human,
+    # not wordy. No colon before the generated part, no stock scaffold shared by
+    # every template, the closing set off by a blank line rather than «. Se ti
+    # va…» (that full stop before an identical closing is what reads as a
+    # mailing), and a different closing per template, in the stylist's voice.
+    # A hard-sell imperative still reads worse and is harder to get approved.
     #
     # The message is signed by the stylist, not the salon: «sono {{2}} di {{3}}»
     # reads like the person who served them writing, not a mailing. {{2}} is the
     # primary staff of the customer's last visit (first if several).
     "promo_v1": Template(
         body=(
-            "Ciao {{1}}, sono {{2}} di {{3}}. A proposito della tua ultima visita: "
-            "{{4}} Se ti va, scrivimi pure."
+            "Ciao {{1}}, sono {{2}} di {{3}}. Stavo ripensando alla tua ultima "
+            "visita, {{4}}?\n\n"
+            "Scrivimi qui quando vuoi, mi fa sempre piacere sentirti"
         ),
         variables=4,
         sample={
             "1": "Giulia",
             "2": "Chiara",
             "3": "Salone Bellezza",
-            "4": "sono passate circa tre settimane dal tuo colore, com'è la ricrescita?",
+            "4": "come sta andando la ricrescita del colore",
         },
         generated_slot=4,
         filled_by="llm",
         max_chars=200,
         intent="promo",
         guidance=(
-            "Scrivi solo l'osservazione che segue i due punti: una frase di check-in "
-            "calda, ancorata a un servizio che il cliente ha fatto davvero nell'ultima "
-            "visita e al tempo passato. Mai venditivo: niente prezzi, niente urgenza, "
-            "niente «approfitta», nessun invito a prenotare o rispondere (la chiusura "
-            "è già nel testo fisso). Al massimo una domanda naturale, la ricrescita "
-            "per un colore, la forma per un taglio. Inizia in minuscolo (dopo i due "
-            "punti). Se il contesto non mostra un servizio recente, scrivi un "
-            "check-in generico: non inventare servizi."
+            "Scrivi solo la domanda che completa «Stavo ripensando alla tua ultima "
+            "visita, …?»: una domanda di check-in calda, ancorata a un servizio che "
+            "il cliente ha fatto davvero nell'ultima visita (la ricrescita per un "
+            "colore, la forma per un taglio). Minuscolo, SENZA punto interrogativo "
+            "né altra punteggiatura finale: il «?» è già nel testo fisso. Mai "
+            "venditivo: niente prezzi, niente urgenza, niente «approfitta», nessun "
+            "invito a prenotare o rispondere (la chiusura è già nel testo fisso). "
+            "Se il contesto non mostra un servizio recente, chiedi come sta, in "
+            "generale: non inventare servizi."
         ),
     ),
     "winback_v1": Template(
         body=(
-            "Ciao {{1}}, sono {{2}} di {{3}}. Pensavo a te: non ci vediamo da {{4}}, "
-            "quindi volevo proporti {{5}}. Se ti va, scrivimi pure."
+            "Ciao {{1}}, come va? Sono {{2}} di {{3}}, è da {{4}} che non ci "
+            "vediamo e mi manca un po' averti qui. Che ne dici di {{5}}?\n\n"
+            "Dimmi tu quando ti torna comodo, ti aspetto volentieri"
         ),
         variables=5,
         sample={
@@ -146,17 +151,18 @@ CATALOGUE: dict[str, Template] = {
         filled_by="llm",
         intent="winback",
         guidance=(
-            "Scrivi solo il complemento oggetto di «volevo proporti»: un sintagma "
-            "nominale con articolo (servizio ed eventuale prezzo), minuscolo, senza "
-            "punto finale. L'assenza è già nel testo fisso: non ripeterla. Nessun "
-            "invito a prenotare o rispondere: la chiusura è già nel testo fisso."
+            "Scrivi solo ciò che completa «Che ne dici di …?»: un sintagma nominale "
+            "con articolo (servizio ed eventuale prezzo), minuscolo, SENZA punto "
+            "interrogativo né altra punteggiatura finale: il «?» è già nel testo "
+            "fisso. L'assenza è già nel testo fisso: non ripeterla. Nessun invito a "
+            "prenotare o rispondere: la chiusura è già nel testo fisso."
         ),
     ),
     "rebook_v1": Template(
         body=(
             "Ciao {{1}}, sono {{2}} di {{3}}. Di solito passi da noi ogni {{4}}, "
-            "quindi potrebbe essere il momento giusto per {{5}}. "
-            "Se ti va, scrivimi pure."
+            "quindi direi che è il momento giusto per {{5}}\n\n"
+            "Vuoi che ti tenga un posto? Dimmi solo quando"
         ),
         variables=5,
         sample={
@@ -184,8 +190,9 @@ CATALOGUE: dict[str, Template] = {
     # reads as an announcement where promo_v1 expects a model observation.
     "promo_manual_v1": Template(
         body=(
-            "Ciao {{1}}, ti scriviamo da {{2}} con una novità: {{3}}. "
-            "Rispondi a questo messaggio o chiamaci per prenotare."
+            "Ciao {{1}}, ti scrivo da {{2}} perché c'è una novità che potrebbe "
+            "piacerti, {{3}}\n\n"
+            "Se ti incuriosisce scrivimi qui o chiamami, ti spiego volentieri"
         ),
         variables=3,
         sample={

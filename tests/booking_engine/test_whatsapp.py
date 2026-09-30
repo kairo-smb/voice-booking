@@ -157,7 +157,7 @@ def test_clean_variable_bounds_length():
 def test_render_produces_what_the_customer_reads():
     text = wt.render("promo_v1", {
         "1": "Giulia", "2": "Chiara", "3": "Salone X",
-        "4": "Sono passate circa tre settimane dal tuo colore: com'è la ricrescita?",
+        "4": "come sta andando la ricrescita del colore",
     })
     assert "Ciao Giulia," in text
     assert "sono Chiara di Salone X" in text
@@ -181,15 +181,24 @@ def test_rebook_never_mentions_money():
         assert token not in blob, f"rebook_v1 must not mention money: {token!r}"
 
 
-def test_marketing_templates_carry_the_soft_cta_tail():
-    """The shared low-pressure close is part of the approved body, not left to
-    the LLM — a hard-sell imperative reads worse and is harder to get Meta to
-    approve. promo_manual_v1 is owner copy with its own approved frame, so it
-    is deliberately excluded."""
-    for key in ("promo_v1", "winback_v1", "rebook_v1"):
-        assert "Se ti va, scrivimi pure." in wt.CATALOGUE[key].body, key
-    for key in ("promo_manual_v1", "feedback_v2", "reminder_v6"):
-        assert "Se ti va, scrivimi pure." not in wt.CATALOGUE[key].body, key
+def test_marketing_templates_read_like_a_person():
+    """Owner rule (2026-09-30): the tone must be human or the message loses its
+    effect. Three things read as a mailing and are pinned here: a colon before
+    the generated part, a full stop before the closing, and the same closing on
+    every template. Each closing is set off by a blank line and is the
+    template's own."""
+    closings = set()
+    for key in ("promo_v1", "winback_v1", "rebook_v1", "promo_manual_v1"):
+        body = wt.CATALOGUE[key].body
+        assert ":" not in body, f"{key}: no colon before the generated part"
+        head, _, closing = body.rpartition("\n\n")
+        assert head and closing, f"{key}: the closing must follow a blank line"
+        assert not head.rstrip().endswith("."), f"{key}: no full stop before the closing"
+        assert "Se ti va, scrivimi pure" not in body, key
+        closings.add(closing)
+    assert len(closings) == 4, "every template has its own closing"
+    # Not a stock scaffold: the openings differ.
+    assert len({wt.CATALOGUE[k].body.split("{{2}}")[0] for k in ("promo_v1", "winback_v1", "rebook_v1")}) >= 2
 
 
 # --------------------------------------------------------------------- gating
