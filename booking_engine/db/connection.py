@@ -18,20 +18,35 @@ def _get_pool() -> asyncpg.Pool:
     return _pool
 
 
+async def _retry_stale_plan(op):
+    """Run `op(conn)`, once more if a migration changed a cached statement's result type.
+
+    asyncpg caches prepared statements per connection; `RETURNING m.*` (or
+    `SELECT *`) then fails with InvalidCachedStatementError after a column is
+    added, on every pooled connection, until the process restarts. asyncpg
+    drops the stale statement when it raises, so one retry re-prepares it.
+    """
+    pool = _get_pool()
+    for attempt in (0, 1):
+        try:
+            async with pool.acquire() as conn:
+                return await op(conn)
+        except asyncpg.exceptions.InvalidCachedStatementError:
+            if attempt:
+                raise
+            logger.warning("stale cached statement after a schema change; retrying once")
+
+
 async def execute(sql: str, *args) -> list[dict]:
     """Execute SQL and return all rows as list of dicts."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, *args)
-        return [dict(row) for row in rows]
+    rows = await _retry_stale_plan(lambda c: c.fetch(sql, *args))
+    return [dict(row) for row in rows]
 
 
 async def execute_one(sql: str, *args) -> dict | None:
     """Execute SQL and return one row as dict, or None."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(sql, *args)
-        return dict(row) if row else None
+    row = await _retry_stale_plan(lambda c: c.fetchrow(sql, *args))
+    return dict(row) if row else None
 
 
 async def execute_void(sql: str, *args) -> None:
