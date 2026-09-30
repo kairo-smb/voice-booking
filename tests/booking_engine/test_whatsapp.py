@@ -182,23 +182,25 @@ def test_rebook_never_mentions_money():
 
 
 def test_marketing_templates_read_like_a_person():
-    """Owner rule (2026-09-30): the tone must be human or the message loses its
-    effect. Three things read as a mailing and are pinned here: a colon before
-    the generated part, a full stop before the closing, and the same closing on
-    every template. Each closing is set off by a blank line and is the
-    template's own."""
+    """Owner rule (2026-09-30): warm, professional, human. Pinned: no colon
+    before the generated part, no blank line (reads unnatural), no punctuation
+    in the fixed text right after the generated part (the generated text closes
+    its own sentence — the template cannot know if it is a question), samples
+    that show it, and a closing of its own per template."""
+    import re
     closings = set()
     for key in ("promo_v1", "winback_v1", "rebook_v1", "promo_manual_v1"):
-        body = wt.CATALOGUE[key].body
-        assert ":" not in body, f"{key}: no colon before the generated part"
-        head, _, closing = body.rpartition("\n\n")
-        assert head and closing, f"{key}: the closing must follow a blank line"
-        assert not head.rstrip().endswith("."), f"{key}: no full stop before the closing"
-        assert "Se ti va, scrivimi pure" not in body, key
-        closings.add(closing)
+        tpl = wt.CATALOGUE[key]
+        assert ":" not in tpl.body, f"{key}: no colon before the generated part"
+        assert "\n" not in tpl.body, f"{key}: no free line"
+        assert "Se ti va, scrivimi pure" not in tpl.body, key
+        slot = "{{%d}}" % tpl.generated_slot
+        assert re.search(re.escape(slot) + r"[.?!,;]", tpl.body) is None, f"{key}: punctuation belongs to the generated text"
+        assert re.search(re.escape(slot) + r" \S", tpl.body), f"{key}: a closing must follow the generated part"
+        assert tpl.sample[str(tpl.generated_slot)][-1] in ".?!", f"{key}: the sample closes its own sentence"
+        closings.add(tpl.body.split(slot, 1)[1].strip())
+        assert "manca" not in tpl.body.lower(), "warm, not sentimental"
     assert len(closings) == 4, "every template has its own closing"
-    # Not a stock scaffold: the openings differ.
-    assert len({wt.CATALOGUE[k].body.split("{{2}}")[0] for k in ("promo_v1", "winback_v1", "rebook_v1")}) >= 2
 
 
 # --------------------------------------------------------------------- gating

@@ -94,39 +94,41 @@ CATALOGUE: dict[str, Template] = {
     # ── MARKETING ────────────────────────────────────────────────────────────
     # Exactly one generated slot each, always the last variable. Everything
     # before it is a fact: name, the stylist of the last visit, the salon, and
-    # a lookup from the visit record. Register (owner, 2026-09-30): warm, human,
-    # not wordy. No colon before the generated part, no stock scaffold shared by
-    # every template, the closing set off by a blank line rather than «. Se ti
-    # va…» (that full stop before an identical closing is what reads as a
-    # mailing), and a different closing per template, in the stylist's voice.
-    # A hard-sell imperative still reads worse and is harder to get approved.
+    # a lookup from the visit record. Register (owner, 2026-09-30): warm but
+    # professional, never sentimental, not wordy. No colon before the generated
+    # part, no stock scaffold shared by every template, no free line (reads
+    # unnatural), a different closing per template. The full stop / question
+    # mark after the generated part is written BY the generated text — the fixed
+    # text cannot know which fits — and the engine guarantees one is there
+    # (guard.ts::endSentence). A hard-sell imperative reads worse and is harder
+    # to get approved.
     #
     # The message is signed by the stylist, not the salon: «sono {{2}} di {{3}}»
     # reads like the person who served them writing, not a mailing. {{2}} is the
     # primary staff of the customer's last visit (first if several).
     "promo_v1": Template(
         body=(
-            "Ciao {{1}}, sono {{2}} di {{3}}. Stavo ripensando alla tua ultima "
-            "visita, {{4}}?\n\n"
-            "Scrivimi qui quando vuoi, mi fa sempre piacere sentirti"
+            "Ciao {{1}}, sono {{2}} di {{3}}. Ho ripensato alla tua ultima "
+            "visita, {{4}} Se ti va di raccontarmelo, scrivimi pure qui"
         ),
         variables=4,
         sample={
             "1": "Giulia",
             "2": "Chiara",
             "3": "Salone Bellezza",
-            "4": "come sta andando la ricrescita del colore",
+            "4": "come sta andando la ricrescita del colore?",
         },
         generated_slot=4,
         filled_by="llm",
         max_chars=200,
         intent="promo",
         guidance=(
-            "Scrivi solo la domanda che completa «Stavo ripensando alla tua ultima "
-            "visita, …?»: una domanda di check-in calda, ancorata a un servizio che "
-            "il cliente ha fatto davvero nell'ultima visita (la ricrescita per un "
-            "colore, la forma per un taglio). Minuscolo, SENZA punto interrogativo "
-            "né altra punteggiatura finale: il «?» è già nel testo fisso. Mai "
+            "Scrivi solo la domanda che completa «Ho ripensato alla tua ultima "
+            "visita, …»: una domanda di check-in cordiale e professionale, ancorata "
+            "a un servizio che il cliente ha fatto davvero nell'ultima visita (la "
+            "ricrescita per un colore, la forma per un taglio). Minuscolo. Chiudi "
+            "TU la frase con la punteggiatura giusta («?» per una domanda): il "
+            "testo fisso non ne aggiunge. Mai "
             "venditivo: niente prezzi, niente urgenza, niente «approfitta», nessun "
             "invito a prenotare o rispondere (la chiusura è già nel testo fisso). "
             "Se il contesto non mostra un servizio recente, chiedi come sta, in "
@@ -135,9 +137,9 @@ CATALOGUE: dict[str, Template] = {
     ),
     "winback_v1": Template(
         body=(
-            "Ciao {{1}}, come va? Sono {{2}} di {{3}}, è da {{4}} che non ci "
-            "vediamo e mi manca un po' averti qui. Che ne dici di {{5}}?\n\n"
-            "Dimmi tu quando ti torna comodo, ti aspetto volentieri"
+            "Ciao {{1}}, sono {{2}} di {{3}}. È da {{4}} che non ci vediamo e "
+            "ho pensato di proporti {{5}} Se ti fa piacere, scrivimi pure e "
+            "troviamo insieme il momento giusto"
         ),
         variables=5,
         sample={
@@ -145,24 +147,25 @@ CATALOGUE: dict[str, Template] = {
             "2": "Chiara",
             "3": "Salone Bellezza",
             "4": "tre mesi",
-            "5": "un ritocco colore con piega a 45€",
+            "5": "un ritocco colore con piega a 45€.",
         },
         generated_slot=5,
         filled_by="llm",
         intent="winback",
         guidance=(
-            "Scrivi solo ciò che completa «Che ne dici di …?»: un sintagma nominale "
-            "con articolo (servizio ed eventuale prezzo), minuscolo, SENZA punto "
-            "interrogativo né altra punteggiatura finale: il «?» è già nel testo "
-            "fisso. L'assenza è già nel testo fisso: non ripeterla. Nessun invito a "
-            "prenotare o rispondere: la chiusura è già nel testo fisso."
+            "Scrivi solo ciò che completa «ho pensato di proporti …»: un sintagma "
+            "nominale con articolo (servizio ed eventuale prezzo), minuscolo. Chiudi "
+            "TU la frase con il punto: il testo fisso non ne aggiunge. Tono cordiale "
+            "e professionale, mai sentimentale (niente «mi manchi»). L'assenza è già "
+            "nel testo fisso: non ripeterla. Nessun invito a prenotare o rispondere: "
+            "la chiusura è già nel testo fisso."
         ),
     ),
     "rebook_v1": Template(
         body=(
             "Ciao {{1}}, sono {{2}} di {{3}}. Di solito passi da noi ogni {{4}}, "
-            "quindi direi che è il momento giusto per {{5}}\n\n"
-            "Vuoi che ti tenga un posto? Dimmi solo quando"
+            "quindi direi che è il momento giusto per {{5}} Se vuoi ti tengo "
+            "un posto, dimmi solo quando ti fa comodo"
         ),
         variables=5,
         sample={
@@ -170,7 +173,7 @@ CATALOGUE: dict[str, Template] = {
             "2": "Chiara",
             "3": "Salone Bellezza",
             "4": "sei settimane",
-            "5": "un taglio e piega",
+            "5": "un taglio e piega.",
         },
         generated_slot=5,
         filled_by="llm",
@@ -178,9 +181,10 @@ CATALOGUE: dict[str, Template] = {
         guidance=(
             "Il cliente è regolare: tono di continuità, non di recupero. Scrivi il "
             "complemento oggetto di «il momento giusto per»: sintagma nominale con "
-            "articolo, SOLO servizi — mai importi, mai prezzi, mai sconti. Minuscolo, "
-            "senza punteggiatura finale. Nessun invito a prenotare o rispondere: la "
-            "chiusura è già nel testo fisso."
+            "articolo, SOLO servizi — mai importi, mai prezzi, mai sconti. Minuscolo. "
+            "Chiudi TU la frase con il punto: il testo fisso non ne aggiunge. "
+            "Nessun invito a prenotare o rispondere: la chiusura è già nel testo "
+            "fisso."
         ),
     ),
 
@@ -191,14 +195,14 @@ CATALOGUE: dict[str, Template] = {
     "promo_manual_v1": Template(
         body=(
             "Ciao {{1}}, ti scrivo da {{2}} perché c'è una novità che potrebbe "
-            "piacerti, {{3}}\n\n"
-            "Se ti incuriosisce scrivimi qui o chiamami, ti spiego volentieri"
+            "interessarti, {{3}} Se vuoi saperne di più, scrivimi qui o "
+            "chiamaci"
         ),
         variables=3,
         sample={
             "1": "Giulia",
             "2": "Salone Bellezza",
-            "3": "da lunedì trovi la nuova linea di trattamenti ristrutturanti",
+            "3": "da lunedì trovi la nuova linea di trattamenti ristrutturanti.",
         },
         generated_slot=3,
         filled_by="owner",
