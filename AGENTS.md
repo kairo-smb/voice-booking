@@ -6,6 +6,64 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-09-30 — WhatsApp message writes bump the webapp's live-update counter
+
+New `booking_engine/db/sql/29_shop_changes_whatsapp.sql`: statement-level
+triggers on `whatsapp.outbound_messages` and `whatsapp.inbound_messages` —
+the send loop claiming/sending, Meta's delivered/read/failed status
+webhooks, inbound replies, enqueue/cancel — call the webapp's
+`business_app_core.bump_shop_changes('whatsapp')`, so an owner's open
+Anagrafiche/Touchpoint tab picks up a WhatsApp change within the webapp's 5s
+poll instead of needing a reload. The counter table, the polling mechanism,
+TanStack Query, the Agenda's own `appointments` domain, and the three review
+bugs found while building this all live in the webapp's own history — its
+AGENTS.md/`docs/knowledge/decisions.md`, 2026-09-30. This entry covers only
+what changed in this repo.
+
+**Guarded, because the function this migration wires into belongs to the
+webapp's migration, not this repo's.** `to_regprocedure('business_app_core.
+bump_shop_changes()')` is checked first; if it's NULL — this repo's CI
+branch, forked off production before the webapp's migration 73 has run
+there — the migration `RAISE NOTICE`s and returns, installing nothing.
+Every migration replays on every run, so the next replay after 73 lands
+installs the triggers for real. In `migrate-all` the webapp runs first, so
+production and QA never actually take the skip path; only an ephemeral CI
+branch can.
+
+**No Python changed.** The bump happens entirely inside Postgres — the
+trigger fires on whatever statement wrote the row, whether that was
+`send_due`, a Meta webhook handler, or the inbound worker. Nothing in this
+repo calls the webapp or has any reference to the counter existing.
+
+**Reviewed the transaction shape before wiring this in — a counter row is
+locked by the writing transaction from the end of its statement to commit,
+so a bad candidate write could deadlock two writers of the same shop+domain,
+or hold the lock across slow I/O.** Checked every write path into the two
+tables: each is a single autocommitted statement via `connection.py`'s
+helpers, and every Meta HTTP call (send, status fetch) happens outside any
+transaction — nothing here ever holds a row lock across network I/O. One
+thing worth recording rather than fixing: a bulk campaign's enqueue inserts
+one row per recipient (N statements → N bumps, not one), which is harmless
+because the webapp polls every 5s regardless of how many bumps land in
+between — a single multi-row `INSERT` would coalesce it to one bump, but
+nothing today needs that.
+
+**Verification.** No Python test exercises this — it's pure SQL wired at
+migrate time. `python -m pytest tests/ --ignore=tests/live_db
+--ignore=tests/live_twilio -q` — **842 passed, 25 skipped**, unchanged from
+before this migration (no test added or touched). Against a scratch
+Postgres 15: the guard fires its `NOTICE` and installs nothing on a bare DB
+(webapp's function absent); the full chain — this repo's `01`…`29` behind
+the webapp's `00_baseline.sql` + `01`…`73` — applied **twice**, exit 0 both
+times; a 3-row `whatsapp.outbound_messages` INSERT bumped `whatsapp` from
+unset to version 1 in one statement, and a follow-up UPDATE plus an
+`inbound_messages` INSERT brought it to version 3; `\d` on both tables
+confirmed all six triggers (`ins`/`upd`/`del` × 2 tables) present. **Not
+verified live** — no real Meta traffic or send-loop run has exercised this;
+the counter is only proven against hand-inserted rows on a scratch
+database, consistent with how every WhatsApp change in this repo has been
+verified so far.
+
 ## 2026-09-29 — The prod scheduler is configured (deploy still pending)
 
 The in-process scheduler (`services/scheduler.py`) was **QA-only**: `fly.qa.toml`
