@@ -156,6 +156,14 @@ Added 2026-08-21 (`14_whatsapp_schema.sql`), reshaped for Meta Cloud API on
 | `automation_rules` | per-shop rule config (migration `19_whatsapp_automations.sql`): PK `(shop_id, rule_key)` with `rule_key` CHECK `IN ('feedback','reminder')`, `enabled` (default false), `params` jsonb (feedback `{hours_after,platform,link}`, reminder `{min_no_shows}`), `created_at`/`updated_at`. **An absent row means off** — a shop that never opened the tile sends nothing — which is the deliberate default for a feature that messages customers with no human in the loop. |
 | `automation_sends` | the tick's idempotency ledger (same migration): PK `(rule_key, appointment_id)`, plus `shop_id`/`sent_at`. Written **after** the enqueue in `run_automations`, so a tick that crashes between sending and recording re-sends once — recoverable — where recording first would silently drop a message forever. Without it, a tick that crashes after sending but before committing would re-send on the next run: "we reminded you" twice is the complaint the feature exists to avoid. |
 
+**Live-update triggers (migration 29).** `outbound_messages` and `inbound_messages`
+carry statement-level `shop_changes_{ins,upd,del}` triggers that bump the webapp's
+`business_app_core.shop_changes` counter for domain `whatsapp` — one bump per
+statement, not per row. The webapp polls those counters to refresh open pages
+(its AGENTS.md, 2026-09-30). The migration is a no-op with a NOTICE on a database
+that lacks the webapp's `bump_shop_changes()` (its migration 73); the next replay
+installs them.
+
 **Three things in this schema are load-bearing and easy to undo by accident:**
 
 - **`senders.access_token` is the whole credential, and it can expire.**
