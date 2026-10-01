@@ -160,7 +160,7 @@ Added 2026-08-21 (`14_whatsapp_schema.sql`), reshaped for Meta Cloud API on
 carry statement-level `shop_changes_{ins,upd,del}` triggers that bump the webapp's
 `business_app_core.shop_changes` counter for domain `whatsapp` — one bump per
 statement, not per row. The webapp polls those counters to refresh open pages
-(its AGENTS.md, 2026-09-30). The migration is a no-op with a NOTICE on a database
+(its `docs/knowledge/decisions.md`, 2026-09-30). The migration is a no-op with a NOTICE on a database
 that lacks the webapp's `bump_shop_changes()` (its migration 73); the next replay
 installs them.
 
