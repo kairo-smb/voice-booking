@@ -17,8 +17,9 @@ Anagrafiche/Touchpoint tab picks up a WhatsApp change within the webapp's 5s
 poll instead of needing a reload. The counter table, the polling mechanism,
 TanStack Query, the Agenda's own `appointments` domain, and the three review
 bugs found while building this all live in the webapp's own history — its
-AGENTS.md/`docs/knowledge/decisions.md`, 2026-09-30. This entry covers only
-what changed in this repo.
+`docs/knowledge/decisions.md`, 2026-09-30 (the webapp's AGENTS.md is a
+conventions/gotchas guide, not a history log — unlike this repo's). This
+entry covers only what changed in this repo.
 
 **Guarded, because the function this migration wires into belongs to the
 webapp's migration, not this repo's.** `to_regprocedure('business_app_core.

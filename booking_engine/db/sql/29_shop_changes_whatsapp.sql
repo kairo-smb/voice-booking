@@ -2,7 +2,8 @@
 -- every write to the message tables — the send loop claiming/sending, Meta's
 -- status webhooks (delivered/read/failed), inbound messages, enqueue/cancel.
 -- The counters, the bump function and the polling live in the webapp
--- (its migration 73_shop_changes.sql, and AGENTS.md 2026-09-30 there).
+-- (its migration 73_shop_changes.sql, and docs/knowledge/decisions.md
+-- 2026-09-30 there).
 --
 -- Guarded: the function is created by the WEBAPP's migration 73. On a database
 -- that doesn't have it yet (this repo's CI branch off production, before the
