@@ -45,7 +45,7 @@ class TestCustomerCreationAndLookup:
 
 
 class TestFullBookingWorkflow:
-    """Check services → check availability → book → list → cancel."""
+    """List services → book → list → cancel."""
 
     def test_complete_booking_lifecycle(self, client, fake_db):
         # 1. List services
@@ -65,28 +65,9 @@ class TestFullBookingWorkflow:
         staff = resp.json()
         staff_id = staff[0]["id"]
 
-        # 3. Check availability
         start = datetime(2026, 4, 1, 10, 0, tzinfo=ROME)
-        slot = {
-            "staff_id": staff_id, "staff_name": "Maria Rossi",
-            "slot_start": start.isoformat(),
-            "slot_end": (start + timedelta(minutes=30)).isoformat(),
-        }
-        with patch("booking_engine.api.routes.availability.get_available_slots",
-                    new_callable=AsyncMock, return_value=[slot]):
-            resp = client.get(
-                f"/api/v1/shops/{SHOP_ID}/availability",
-                params={
-                    "service_ids": service_id,
-                    "start_date": "2026-04-01",
-                    "end_date": "2026-04-01",
-                },
-            )
-        assert resp.status_code == 200
-        slots = resp.json()["slots"]
-        assert len(slots) == 1
 
-        # 4. Create customer
+        # 3. Create customer
         cust_id = str(uuid4())
         cust = {"id": cust_id, "full_name": "Anna Verdi", "preferred_staff_id": None, "notes": None}
         with patch("booking_engine.api.routes.customers.create_customer",
@@ -98,7 +79,7 @@ class TestFullBookingWorkflow:
         assert resp.status_code == 201
         customer_id = resp.json()["id"]
 
-        # 5. Book appointment
+        # 4. Book appointment
         appt_id = str(uuid4())
         appt = {
             "id": appt_id, "customer_id": customer_id,
@@ -125,7 +106,7 @@ class TestFullBookingWorkflow:
         assert resp.json()["status"] == "scheduled"
         appointment_id = resp.json()["id"]
 
-        # 6. List appointments
+        # 5. List appointments
         with patch("booking_engine.api.routes.appointments.list_appointments",
                     new_callable=AsyncMock, return_value=[appt]):
             resp = client.get(
@@ -135,7 +116,7 @@ class TestFullBookingWorkflow:
         assert resp.status_code == 200
         assert len(resp.json()) == 1
 
-        # 7. Cancel appointment
+        # 6. Cancel appointment
         cancelled = {**appt, "status": "cancelled"}
         with patch("booking_engine.api.routes.appointments.cancel_appointment",
                     new_callable=AsyncMock, return_value=cancelled):

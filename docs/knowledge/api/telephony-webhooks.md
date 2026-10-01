@@ -14,6 +14,6 @@ The two entrypoints that start a call — see [Architecture → Call flow](../ar
 
 ## `POST /voice/openai/incoming`
 
-**File:** `voice_openai.py`. Note: **not** under `/api/v1` — mounted at the top level in `app.py`. OpenAI fires `realtime.call.incoming` here. Reads the shop id back out of the SIP headers (or `SIP_TEST_FALLBACK_SHOP_ID` on QA for a raw softphone test with no Twilio in the path), resolves the caller, assembles the session prompt, and calls `accept_sip_call()`.
+**File:** `voice_openai.py`. Note: **not** under `/api/v1` — mounted at the top level in `app.py`. OpenAI fires `realtime.call.incoming` here. Reads the shop id back out of the SIP headers (or `SIP_TEST_FALLBACK_SHOP_ID` on QA for a raw softphone test with no Twilio in the path), resolves the caller, inserts the call row, assembles the persona, appends the agent rules fetched from marketing-engine (`/customer-agents/voice/instructions`, per-call token), and calls `accept_sip_call()` with marketing-engine's MCP server (`/customer-agents/voice/mcp`) as the session's only tool. A failed rules fetch still accepts the call (persona only, `logger.error`).
 
 **Auth:** signature verified only when `OPENAI_WEBHOOK_SECRET` is set (see the `ponytail:` comment at the top of the file) — currently unwired, so this endpoint accepts unsigned requests. Known gap, not yet closed.

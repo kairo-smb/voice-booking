@@ -4,7 +4,7 @@
 -- one WABA per account. That whole model is gone: BYO WABA is impossible on
 -- Twilio (error 63103 — Twilio must attach the WABA to *its* Meta credit line,
 -- and Meta won't release an existing payment method), and Twilio's migration
--- path deletes the salon's WhatsApp Business App. See CLAUDE.md
+-- path deletes the salon's WhatsApp Business App. See AGENTS.md
 -- §2026-08-24 and docs/knowledge/api/whatsapp.md.
 --
 -- Nothing has ever been sent through migration 14's tables, so columns are

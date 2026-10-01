@@ -1505,7 +1505,7 @@ Expected: 3 passed.
 
 Run: `python -m pytest tests/ --ignore=tests/live_db -q`
 Expected: all pass except the 5 known pre-existing `test_voice_twiml_webhook.py`
-failures recorded in `CLAUDE.md` (2026-07-24). If any *other* test fails, stop
+failures recorded in `AGENTS.md` (2026-07-24). If any *other* test fails, stop
 and fix before continuing.
 
 - [ ] **Step 8: Commit**
@@ -2047,10 +2047,10 @@ git commit -m "feat(marketing): send generated win-back copy as SMS"
 
 ## Task 14: Documentation
 
-Required by both repos' `CLAUDE.md` **in the same change**, not as a follow-up.
+Required by both repos' `AGENTS.md` **in the same change**, not as a follow-up.
 
 **Files:**
-- Modify (voice-booking): `docs/knowledge/architecture.md`, `database.md`, `providers.md`, `api/`, `CLAUDE.md`
+- Modify (voice-booking): `docs/knowledge/architecture.md`, `database.md`, `providers.md`, `api/`, `AGENTS.md`
 - Modify (webapp): `docs/knowledge/features.md`, `providers.md`, `operations.md`, `decisions.md`
 
 - [ ] **Step 1: voice-booking `docs/knowledge/`**
@@ -2064,7 +2064,7 @@ Required by both repos' `CLAUDE.md` **in the same change**, not as a follow-up.
   automatic STOP handling does not cover non-US numbers, so we implement it.
 - `architecture.md` — the send path and the single-debit-path rule.
 
-- [ ] **Step 2: voice-booking `CLAUDE.md`**
+- [ ] **Step 2: voice-booking `AGENTS.md`**
 
 Add a dated entry at the top (newest first, never rewrite older ones) recording:
 SMS chosen for marketing because WhatsApp forbids free-form business-initiated
@@ -2087,7 +2087,7 @@ send is synchronous because the owner is watching a modal.
 
 ```bash
 cd ~/Documents/kairo/voice-booking
-git add docs/ CLAUDE.md && git commit -m "docs: SMS marketing send"
+git add docs/ AGENTS.md && git commit -m "docs: SMS marketing send"
 cd ~/Documents/kairo/webapp
 git add docs/ && git commit -m "docs: Touchpoint Clienti SMS send"
 ```
@@ -2096,7 +2096,7 @@ git add docs/ && git commit -m "docs: Touchpoint Clienti SMS send"
 
 ## Task 15: Live-DB verification
 
-Mocked tests never touch the real schema. `CLAUDE.md`'s 2026-07-21 entry records
+Mocked tests never touch the real schema. `AGENTS.md`'s 2026-07-21 entry records
 a migration that would have crashed on first use precisely because its only tests
 were live-DB ones that had been silently skipping.
 
@@ -2192,7 +2192,7 @@ git commit -m "test(sms): live-DB coverage for opt-out and shop scoping"
       opt-out footer; replying STOP flips `marketing_consent` to `false` and
       creates the `sms.opt_outs` row. **This is the only check that proves the
       Twilio path**; every test above fakes the provider.
-- [ ] Both repos' `docs/knowledge/` updated, voice-booking `CLAUDE.md` entry added.
+- [ ] Both repos' `docs/knowledge/` updated, voice-booking `AGENTS.md` entry added.
 
 ## Out of scope for Phase 1
 

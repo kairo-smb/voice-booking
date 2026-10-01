@@ -9,12 +9,12 @@ Human-oriented documentation for the voice-booking `booking_engine` service: wha
 - **[Voice Agent Logic](voice-agent-logic.md)** — the domain rules: safety prompt, booking authorization, lead-time/gap constraints, prompt assembly, the tone system
 - **[Providers](providers.md)** — every external service (Twilio, OpenAI Realtime, Neon, push notifications): purpose, auth, hard rules
 - **[Operations](operations.md)** — deploy, migrations, CI, env vars, secrets, live-call testing
-- **[Decisions](decisions.md)** — a short index into `CLAUDE.md`'s history log, organized for lookup rather than chronology
+- **[Decisions](decisions.md)** — a short index into `AGENTS.md`'s history log, organized for lookup rather than chronology
 - **[API](api/README.md)** — REST/webhook/tool contract docs for every route in `booking_engine/api/routes/`, grouped by who calls them
 
 ## Maintenance rule
 
-**Any change that adds, removes, or changes a REST/voice-tool endpoint, a database table (in either `business_app_core` or `voice_agent`), a provider integration, or a safety/authz/booking-constraint rule updates the matching file here in the same change — not as a follow-up.** This is enforced by whoever (human or agent) makes the change, not by tooling. `CLAUDE.md` points here.
+**Any change that adds, removes, or changes a REST/voice-tool endpoint, a database table (in either `business_app_core` or `voice_agent`), a provider integration, or a safety/authz/booking-constraint rule updates the matching file here in the same change — not as a follow-up.** This is enforced by whoever (human or agent) makes the change, not by tooling. `AGENTS.md` points here.
 
 If this rule stops being followed and the docs rot again, the next escalation is an automated staleness check (e.g. CI failing when a route exists with no matching `api/*.md` entry) — add that when manual discipline demonstrably fails, not before.
 

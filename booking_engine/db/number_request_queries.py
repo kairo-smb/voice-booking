@@ -151,7 +151,7 @@ async def list_provisioned_numbers() -> list[dict]:
 async def has_active_plan(shop_id: UUID) -> bool:
     """True if the shop currently holds a paid plan.
 
-    Free is the absence of a plan (shops.plan_id IS NULL) — see CLAUDE.md.
+    Free is the absence of a plan (shops.plan_id IS NULL) — see AGENTS.md.
     A shop row that can't be found at all (shouldn't happen for a shop that
     holds a number, but not impossible under concurrent deletion) is treated
     as no plan, not an error.

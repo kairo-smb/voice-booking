@@ -18,7 +18,7 @@ AUTH = {"Authorization": "Bearer tool-secret"}
 
 @pytest.fixture(autouse=True)
 def stub_secret(monkeypatch):
-    monkeypatch.setenv("OPENAI_TOOL_SECRET", "tool-secret")
+    monkeypatch.setenv("VOICE_AGENT_TOOL_SECRET", "tool-secret")
 
 
 @pytest.mark.asyncio
@@ -51,7 +51,7 @@ async def test_session_started_returns_assembled_prompt():
             )
     body = r.json()
     assert "prompt" in body["data"]
-    assert "tools" in body["data"]
+    assert "tools" not in body["data"]  # served by marketing-engine now
     assert body["data"]["call_id"] == str(call_id)
 
 

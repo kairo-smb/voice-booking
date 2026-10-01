@@ -4,7 +4,7 @@
 **Date:** 2026-08-13. Supersedes the first cut of the same day (shared-bundle,
 one-button model), which the Twilio ISV rules below invalidate.
 
-> Working document. When this ships the decisions land in `CLAUDE.md` and the
+> Working document. When this ships the decisions land in `AGENTS.md` and the
 > shipped reality in `docs/knowledge/*.md` (both repos); delete this then.
 
 Spans **webapp** (gate, form, UI) and **voice-booking** (Twilio, storage).
@@ -313,5 +313,5 @@ real the first time someone churns.
 Adds endpoints, a table and a hard constraint in both repos: voice-booking
 `docs/knowledge/{architecture,database,providers,api}.md`; webapp
 `docs/knowledge/{features,providers,architecture,decisions}.md`. Also a
-`CLAUDE.md` entry recording that the one-bundle-for-all model from 2026-07-16 is
+`AGENTS.md` entry recording that the one-bundle-for-all model from 2026-07-16 is
 superseded, and why.

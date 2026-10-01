@@ -4,8 +4,13 @@ The SIP accept path is fire-and-forget: OpenAI drives the call and, with hosted
 MCP tools, does NOT auto-speak tool results or greet first. This worker opens a
 control WS to the accepted call (wss://api.openai.com/v1/realtime?call_id=...)
 and sends `response.create` to greet on connect and again after each MCP tool
-completes, so the agent voices the result. See CLAUDE.md, "SIP call
+completes, so the agent voices the result. See AGENTS.md, "SIP call
 supervisor: production fix for the mute-after-MCP blocker".
+
+The tools it nudges after are marketing-engine's customer agents since
+2026-09-28 (the MCP server moved there), so the `tool` names in its telemetry
+are theirs (`availability_search`, `create_appointment`, ...). Nothing here
+depends on a tool name.
 """
 from __future__ import annotations
 

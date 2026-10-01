@@ -11,7 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from booking_engine.api.routes import shops, customers, services, availability, appointments
+from booking_engine.api.routes import shops, customers, services, appointments
 
 ROME = ZoneInfo("Europe/Rome")
 SHOP_ID = UUID("a0000000-0000-0000-0000-000000000001")
@@ -55,7 +55,6 @@ def app(fake_db) -> FastAPI:
     app.include_router(shops.router, prefix="/api/v1")
     app.include_router(customers.router, prefix="/api/v1")
     app.include_router(services.router, prefix="/api/v1")
-    app.include_router(availability.router, prefix="/api/v1")
     app.include_router(appointments.router, prefix="/api/v1")
     return app
 

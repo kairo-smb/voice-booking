@@ -36,12 +36,13 @@ def _policy():
 
 
 @pytest.mark.asyncio
-async def test_assemble_includes_safety_rules():
+async def test_assemble_is_persona_only_the_agent_rules_live_in_marketing_engine():
     resolution = ResolutionResult(is_anonymous=False, matches=[])
     out = await assemble_session_prompt(
         config=_config(), policy=_policy(), resolution=resolution,
     )
-    assert "REGOLE NON NEGOZIABILI" in out.prompt
+    assert "REGOLE NON NEGOZIABILI" not in out.prompt
+    assert not hasattr(out, "tools")
 
 
 @pytest.mark.asyncio
@@ -51,7 +52,7 @@ async def test_assemble_opens_with_self_introduction_no_disclosure_fluff():
         config=_config(), policy=_policy(), resolution=resolution,
     )
     assert "APERTURA CHIAMATA" in out.prompt
-    assert "presentarti" in out.prompt
+    assert "FRASE DI BENVENUTO" in out.prompt
     assert "assistente AI" not in out.prompt
 
 
@@ -78,19 +79,10 @@ async def test_assemble_anonymous_uses_neutral_greeting():
     out = await assemble_session_prompt(
         config=_config(), policy=_policy(), resolution=resolution,
     )
-    assert "anonimo" in out.prompt.lower() or "non ho il suo numero" in out.prompt.lower()
-
-
-@pytest.mark.asyncio
-async def test_assemble_returns_tool_descriptions():
-    resolution = ResolutionResult(is_anonymous=False, matches=[])
-    out = await assemble_session_prompt(
-        config=_config(), policy=_policy(), resolution=resolution,
-    )
-    names = {t["name"] for t in out.tools}
-    assert "lookup_customer" in names
-    assert "create_booking" in names
-    assert len(out.tools) == 12
+    assert "nascosto" in out.prompt.lower()
+    # No tool takes a phone: the session's caller number is the only identity,
+    # so an anonymous caller is handed to the owner, not booked on a spoken number.
+    assert "escalate_to_owner" in out.prompt
 
 
 @pytest.mark.asyncio

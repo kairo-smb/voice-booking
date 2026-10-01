@@ -1,10 +1,12 @@
-"""Local voice + MCP test harness — mint an OpenAI ephemeral Realtime session
-for a browser WebRTC test call against the QA Fly app's MCP server.
+"""Local voice test harness — mint an OpenAI ephemeral Realtime session for a
+browser WebRTC test call, with the same tools and rules a real call gets.
 
-The server itself never leaves your machine and executes no tools directly —
-OpenAI calls the QA Fly app's MCP server server-to-server for every tool
-invocation, exactly like a real Twilio call would. Write tools (create_booking,
-etc.) execute for real, but only against the QA Neon branch, not production.
+The server itself never leaves your machine and executes no tools — OpenAI
+calls marketing-engine's customer-agents MCP (`{MARKET_INTEL_API_URL}/
+customer-agents/voice/mcp`) server-to-server for every tool invocation, exactly
+like a real Twilio call would. Point `DATABASE_URL` and `MARKET_INTEL_API_URL`
+at the same environment (QA): the engine loads the call row this harness
+inserts. Write tools (create_appointment, ...) execute for real there.
 
 Usage:
     export PYTHONPATH=. ; set -a; source .env; set +a
@@ -23,6 +25,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+from booking_engine.clients.customer_agents_voice import fetch_instructions, mcp_url
 from booking_engine.clients.openai_realtime import create_ephemeral_session
 from booking_engine.config import Settings
 from booking_engine.db.connection import close_connection, init_connection
@@ -34,10 +37,6 @@ from booking_engine.services.realtime_session import build_accept_payload
 
 logger = logging.getLogger(__name__)
 
-# Trailing slash matters: /mcp 307-redirects to /mcp/ and OpenAI's Realtime MCP
-# client does not follow the redirect for tool calls (bare /mcp shows up in fly
-# logs as a 307 that never completes). Point straight at /mcp/.
-_QA_MCP_URL = "https://kairo-booking-engine-qa.fly.dev/mcp/"
 _STATIC_DIR = Path(__file__).parent / "voice_test_static"
 
 
@@ -77,12 +76,20 @@ async def create_session(body: SessionRequest) -> JSONResponse:
         matched_customer_id=(resolution.unique_match.customer_id
                               if resolution.unique_match else None),
     )
+    server_url = mcp_url(settings)
+    if not server_url or not settings.voice_agent_tool_secret:
+        return JSONResponse(
+            {"error": "set MARKET_INTEL_API_URL and VOICE_AGENT_TOOL_SECRET"},
+            status_code=400)
     mcp_token = mint_call_token(shop_id=shop_id, call_id=call_id,
-                                secret=settings.openai_tool_secret)
+                                secret=settings.voice_agent_tool_secret)
+    instructions = await fetch_instructions(
+        shop_id=shop_id, call_id=call_id, token=mcp_token, settings=settings)
     payload = await build_accept_payload(
         config=config, policy=policy, resolution=resolution,
         model=settings.openai_realtime_model,
-        mcp_server_url=_QA_MCP_URL, mcp_token=mcp_token,
+        mcp_server_url=server_url, mcp_token=mcp_token,
+        agent_instructions=instructions,
     )
     session = await create_ephemeral_session(
         session_config=payload, api_key=settings.openai_api_key,

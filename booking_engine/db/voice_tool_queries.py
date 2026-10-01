@@ -1,9 +1,15 @@
-"""DB access for voice agent tools — customers, services, appointments."""
+"""Customer and catalogue reads still served from here.
+
+Until 2026-09-28 this held the voice agent tools' SQL, customers, services and
+appointment writes. The tools moved to marketing-engine's customer agents
+(AGENTS.md, 2026-09-28) and their writes to the webapp's `/agent/*` routes;
+what is left are the three reads other code in this repo still uses:
+`identity_resolver` (caller lookup), `api/routes/sessions.py` (customer
+ownership) and the service lists behind `voice.py` and `voice_memos.py`.
+"""
 from __future__ import annotations
 
 from uuid import UUID
-
-import asyncpg
 
 from booking_engine.db import connection
 
@@ -27,73 +33,19 @@ async def find_customers_by_phone(*, shop_id: UUID, phone_digits: str) -> list[d
     )
 
 
-async def insert_customer_from_call(
-    *,
-    shop_id: UUID,
-    phone: str,
-    first_name: str,
-    last_name: str | None,
-    phone_verified: bool,
-    created_by_call_id: UUID,
-) -> UUID:
-    full_name = f"{first_name} {last_name}".strip() if last_name else first_name
+async def get_customer_shop_id(*, customer_id: UUID) -> UUID | None:
+    """Which shop owns this customer. None when there is no such customer.
+
+    The ownership side of an authorization check, kept separate from the
+    write so "no such customer" and "not yours" stay distinguishable —
+    folding `AND shop_id = $2` into the UPDATE would collapse both into an
+    unexplained zero-row result.
+    """
     row = await connection.execute_one(
-        """
-        INSERT INTO business_app_core.customers
-            (shop_id, phone, full_name,
-             source, created_by_call_id, verified, phone_verified,
-             tags, created_at)
-        VALUES
-            ($1, $2, $3,
-             'voice_agent', $4, false, $5,
-             ARRAY['nuovo da chiamata vocale']::text[], now())
-        RETURNING id
-        """,
-        shop_id, phone, full_name,
-        created_by_call_id, phone_verified,
+        "SELECT shop_id FROM business_app_core.customers WHERE id = $1",
+        customer_id,
     )
-    return row["id"]
-
-
-async def update_customer_field(
-    *, customer_id: UUID, field: str, value: str
-) -> bool:
-    # Ground-truth customers columns: email, tags (no last_name/notes_tags).
-    allowed = {"email", "notes_tags", "tags"}
-    if field not in allowed:
-        return False
-    if field in ("notes_tags", "tags"):
-        sql = (
-            "UPDATE business_app_core.customers "
-            "SET tags = array_append(coalesce(tags, ARRAY[]::text[]), $2), "
-            "    updated_at = now() "
-            "WHERE id = $1"
-        )
-    else:
-        sql = (
-            "UPDATE business_app_core.customers "
-            "SET email = $2, updated_at = now() WHERE id = $1"
-        )
-    await connection.execute_void(sql, customer_id, value)
-    return True
-
-
-async def attach_customer_to_call(
-    *, call_id: UUID, created_customer_id: UUID | None = None,
-    matched_customer_id: UUID | None = None,
-) -> None:
-    sets = []
-    args: list = [call_id]
-    if created_customer_id is not None:
-        args.append(created_customer_id)
-        sets.append(f"created_customer_id = ${len(args)}")
-    if matched_customer_id is not None:
-        args.append(matched_customer_id)
-        sets.append(f"matched_customer_id = ${len(args)}")
-    if not sets:
-        return
-    sql = f"UPDATE voice_agent.calls SET {', '.join(sets)} WHERE id = $1"
-    await connection.execute_void(sql, *args)
+    return row["shop_id"] if row else None
 
 
 async def list_services(*, shop_id: UUID, filter_q: str | None) -> list[dict]:
@@ -123,243 +75,3 @@ async def list_services(*, shop_id: UUID, filter_q: str | None) -> list[dict]:
         shop_id,
     )
 
-
-async def list_staff_for_service(*, shop_id: UUID, service_id: UUID) -> list[dict]:
-    return await connection.execute(
-        """
-        SELECT s.id, s.full_name AS name
-        FROM business_app_core.staff s
-        JOIN business_app_core.staff_services ss ON ss.staff_id = s.id
-        WHERE s.shop_id = $1 AND ss.service_id = $2 AND s.is_active = true
-        ORDER BY s.full_name
-        """,
-        shop_id, service_id,
-    )
-
-
-async def find_availability(
-    *, shop_id: UUID, services: list[dict],
-    preferred_when: datetime | None,
-    max_results: int,
-) -> list[dict]:
-    """Open slots for the ordered `services` list — delegates to the
-    ground-truth booking layer. A single-service request reuses the
-    existing single-staff slot search unchanged; multiple services go
-    through the chain search (different staff per leg, ordered, gapped).
-    """
-    from datetime import datetime, timedelta
-
-    from booking_engine.db import queries
-
-    start_date = (preferred_when or datetime.utcnow()).date()
-    end_date = start_date + timedelta(days=14)
-
-    if len(services) == 1:
-        leg = services[0]
-        slots = await queries.get_available_slots(
-            shop_id=shop_id, service_ids=[leg["service_id"]],
-            start_date=start_date, end_date=end_date, staff_id=leg.get("staff_id"),
-        )
-        return [
-            {
-                "slot_start": s["slot_start"], "slot_end": s["slot_end"],
-                "legs": [{
-                    "service_id": leg["service_id"], "staff_id": s["staff_id"],
-                    "staff_name": s["staff_name"],
-                    "slot_start": s["slot_start"], "slot_end": s["slot_end"],
-                }],
-            }
-            for s in slots[:max_results]
-        ]
-
-    return await queries.get_available_slot_chains(
-        shop_id=shop_id, services=services,
-        start_date=start_date, end_date=end_date, max_results=max_results,
-    )
-
-
-async def insert_booking_locked(
-    *, shop_id: UUID, customer_id: UUID, legs: list[dict],
-) -> dict:
-    """Create the appointment via the ground-truth layer. Raises on conflict.
-
-    `legs` is the ordered list of {"service_id", "staff_id", "slot_start"} —
-    exactly what create_booking receives, normally copied from a chosen
-    check_availability chain. A single leg reuses the existing single-staff
-    create_appointment path unchanged; multiple legs go through
-    create_appointment_chain.
-
-    ponytail: relies on the create_appointment*/_chain overlap check (no
-    advisory lock). Add one only if concurrent voice bookings for the same
-    staff+slot become a real problem.
-    """
-    from datetime import timedelta
-
-    from booking_engine.db import queries
-
-    try:
-        if len(legs) == 1:
-            leg = legs[0]
-            row = await queries.create_appointment(
-                shop_id=shop_id, customer_id=customer_id, staff_id=leg["staff_id"],
-                service_ids=[leg["service_id"]], start_time=leg["slot_start"],
-            )
-        else:
-            row = await queries.create_appointment_chain(
-                shop_id=shop_id, customer_id=customer_id, legs=legs,
-            )
-    except queries.SlotConflictError:
-        raise RuntimeError("slot_taken")
-    except asyncpg.exceptions.ForeignKeyViolationError as e:
-        # Both appointments.staff_id and appointment_services.staff_id FKs
-        # are named *_staff_id_fkey; anything else user-supplied and
-        # unvalidated before this call is the customer_id FK.
-        if "staff" in (e.constraint_name or ""):
-            raise RuntimeError("invalid_staff")
-        raise RuntimeError("invalid_customer")
-
-    if len(legs) == 1:
-        leg = legs[0]
-        out_legs = [{
-            "service_id": leg["service_id"], "staff_id": row["staff_id"],
-            "slot_start": row["start_time"], "slot_end": row["end_time"],
-        }]
-    else:
-        svc_ids = [leg["service_id"] for leg in legs]
-        durations = await connection.execute(
-            "SELECT id, duration_minutes FROM business_app_core.services "
-            "WHERE id = ANY($1::uuid[])",
-            svc_ids,
-        )
-        duration_by_id = {d["id"]: d["duration_minutes"] for d in durations}
-        # .get(..., 0) rather than a crashing [] lookup: the booking itself
-        # already succeeded (create_appointment_chain resolved durations
-        # correctly before the insert) — a service deleted in the narrow
-        # window between that insert and this re-fetch should degrade the
-        # reported slot_end for that one leg, not crash a response for an
-        # appointment that was already created.
-        out_legs = [
-            {
-                "service_id": leg["service_id"], "staff_id": leg["staff_id"],
-                "slot_start": leg["slot_start"],
-                "slot_end": leg["slot_start"] + timedelta(
-                    minutes=duration_by_id.get(leg["service_id"], 0)),
-            }
-            for leg in legs
-        ]
-    return {
-        "id": row["id"],
-        "slot_start": out_legs[0]["slot_start"],
-        "slot_end": out_legs[-1]["slot_end"],
-        "staff_id": row["staff_id"],
-        "confirmation_status": row.get("confirmation_status") or "confirmed",
-        "legs": out_legs,
-    }
-
-
-async def attach_booking_to_call(*, call_id: UUID, appointment_id: UUID) -> None:
-    await connection.execute_void(
-        "UPDATE voice_agent.calls SET created_booking_id = $2 WHERE id = $1",
-        call_id, appointment_id,
-    )
-    await connection.execute_void(
-        "UPDATE business_app_core.appointments SET voice_call_id = $1 WHERE id = $2",
-        call_id, appointment_id,
-    )
-
-
-async def get_next_booking_for_customer(
-    *, shop_id: UUID, customer_id: UUID,
-) -> dict | None:
-    return await connection.execute_one(
-        """
-        SELECT a.id, a.start_time, a.end_time, a.staff_id, a.status,
-               (SELECT s.service_name FROM business_app_core.services s
-                JOIN business_app_core.appointment_services aps ON aps.service_id = s.id
-                WHERE aps.appointment_id = a.id LIMIT 1) AS service_name
-        FROM business_app_core.appointments a
-        WHERE a.shop_id = $1 AND a.customer_id = $2
-          AND a.start_time > now() AND a.status NOT IN ('cancelled')
-        ORDER BY a.start_time
-        LIMIT 1
-        """,
-        shop_id, customer_id,
-    )
-
-
-async def modify_appointment(
-    *, shop_id: UUID, appointment_id: UUID,
-    new_slot_start: datetime | None,
-    new_service_id: UUID | None = None,
-) -> bool:
-    """Reschedule via the ground-truth layer (cancels + recreates, copies services).
-
-    ponytail: only time changes are supported for now; new_service_id is ignored.
-    Wire a service swap through appointment_services if the product needs it.
-    """
-    if new_slot_start is None:
-        return False
-    from booking_engine.db import queries
-
-    result = await queries.reschedule_appointment(
-        shop_id=shop_id, appointment_id=appointment_id,
-        new_start_time=new_slot_start,
-    )
-    return result is not None
-
-
-async def service_belongs_to_shop(*, shop_id: UUID, service_id: UUID) -> bool:
-    """True if the service exists in this shop's active catalog."""
-    row = await connection.execute_one(
-        "SELECT 1 AS ok FROM business_app_core.services "
-        "WHERE id = $1 AND shop_id = $2 AND is_active = true",
-        service_id, shop_id,
-    )
-    return row is not None
-
-
-async def get_appointment_owner(*, appointment_id: UUID) -> dict | None:
-    """Return {shop_id, customer_id, phones[]} for an appointment, or None.
-
-    Used to authorize reschedule/cancel: the caller must own this booking.
-    """
-    return await connection.execute_one(
-        """
-        SELECT a.shop_id, a.customer_id, a.start_time AS start_at,
-               coalesce(
-                 array_agg(pc.phone_number) FILTER (WHERE pc.phone_number IS NOT NULL),
-                 '{}'
-               ) AS phones
-        FROM business_app_core.appointments a
-        LEFT JOIN business_app_core.phone_contacts pc
-               ON pc.customer_id = a.customer_id
-        WHERE a.id = $1
-        GROUP BY a.shop_id, a.customer_id, a.start_time
-        """,
-        appointment_id,
-    )
-
-
-async def cancel_appointment(*, shop_id: UUID, appointment_id: UUID) -> bool:
-    """Cancel via the ground-truth layer (also guards shop ownership + status)."""
-    from booking_engine.db import queries
-
-    result = await queries.cancel_appointment(
-        shop_id=shop_id, appointment_id=appointment_id,
-    )
-    return result is not None
-
-
-async def log_auth_event(
-    *, call_id: UUID, customer_id: UUID | None,
-    verification_question: str, caller_answer_excerpt: str, passed: bool,
-) -> None:
-    await connection.execute_void(
-        """
-        INSERT INTO voice_agent.auth_events
-            (call_id, customer_id, verification_question,
-             caller_answer_excerpt, passed)
-        VALUES ($1, $2, $3, $4, $5)
-        """,
-        call_id, customer_id, verification_question, caller_answer_excerpt, passed,
-    )

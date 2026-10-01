@@ -88,16 +88,35 @@ def _try_connect() -> bool:
 
 _db_available = _try_connect()
 
+# `pytestmark` does nothing in a conftest — it is only collected from test
+# *modules*. So from the day this was written until 2026-09-24 the skip never
+# applied: the autouse fixture below ran anyway, `_get_db_settings()` returned
+# None, and every one of these 45 tests ended as `AttributeError: 'NoneType'
+# object has no attribute 'database_url'`. Errors, not skips, and enough of them
+# that a 46th — a real one — would have been invisible in the noise.
+#
+# Left in place because it is correct for any test module that imports it, and
+# removing it would read as "these tests are unconditional". The skip that
+# actually fires is in the fixture.
 pytestmark = pytest.mark.skipif(
     not _db_available,
-    reason="Neon PostgreSQL connection unavailable (set DATABASE_URL env var)",
+    reason="Neon PostgreSQL connection unavailable (set TEST_DATABASE_URL to the QA branch)",
 )
 
 
 @pytest.fixture(autouse=True)
 async def db_connection():
-    """Create a fresh connection pool for each test, close after."""
+    """Create a fresh connection pool for each test, close after.
+
+    Skips rather than errors when there is no reachable non-prod database. This
+    is the narrow exception to "fail loud, never skip": these tests are a live
+    integration suite and a developer without QA credentials is not a broken
+    build. What is NOT acceptable is the previous behaviour — the same absence
+    reported as 45 AttributeErrors, which is a skip wearing an outage's clothes.
+    """
     settings = _get_db_settings()
+    if settings is None:
+        pytest.skip("no non-prod database configured — set TEST_DATABASE_URL to the QA branch")
     await connection.init_connection(settings)
     yield connection
     await connection.close_connection()
@@ -137,65 +156,3 @@ async def cleanup_appointment_ids():
             )
         except Exception as e:
             logger.warning("Cleanup failed for appointment %s: %s", aid, e)
-
-
-@pytest.fixture
-def tool_app():
-    """Bare FastAPI app exposing only the voice tool routes exercised via
-    execute_tool() — mirrors the real dispatch path with no lifespan (the
-    autouse db_connection fixture above already owns the connection pool).
-    """
-    from fastapi import FastAPI
-
-    from booking_engine.api.routes import (
-        voice_tools_booking, voice_tools_catalog, voice_tools_identity,
-        voice_tools_lifecycle,
-    )
-
-    app = FastAPI()
-    app.include_router(voice_tools_catalog.router)
-    app.include_router(voice_tools_booking.router)
-    app.include_router(voice_tools_identity.router)
-    app.include_router(voice_tools_lifecycle.router)
-    return app
-
-
-@pytest.fixture
-def settings() -> Settings:
-    return Settings()
-
-
-@pytest.fixture
-async def cleanup_call_ids():
-    """Collect voice_agent.calls IDs created during tests for cleanup."""
-    ids: list = []
-    yield ids
-    for cid in ids:
-        uid = UUID(cid) if isinstance(cid, str) else cid
-        try:
-            await connection.execute_void(
-                "DELETE FROM voice_agent.auth_events WHERE call_id = $1", uid,
-            )
-            await connection.execute_void(
-                "DELETE FROM voice_agent.callback_memos WHERE call_id = $1", uid,
-            )
-            await connection.execute_void(
-                "DELETE FROM voice_agent.calls WHERE id = $1", uid,
-            )
-        except Exception as e:
-            logger.warning("Cleanup failed for call %s: %s", cid, e)
-
-
-@pytest.fixture
-async def cleanup_memo_ids():
-    """Collect voice_agent.callback_memos IDs created during tests for cleanup."""
-    ids: list = []
-    yield ids
-    for mid in ids:
-        uid = UUID(mid) if isinstance(mid, str) else mid
-        try:
-            await connection.execute_void(
-                "DELETE FROM voice_agent.callback_memos WHERE id = $1", uid,
-            )
-        except Exception as e:
-            logger.warning("Cleanup failed for memo %s: %s", mid, e)

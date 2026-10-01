@@ -1,8 +1,10 @@
 """Build the OpenAI Realtime session config to accept an inbound SIP call.
 
-OpenAI native SIP: Twilio dials sip:{project};X-Shop-Id=..@sip.api.openai.com,
+OpenAI native SIP: Twilio dials sip:{project}@sip.api.openai.com?X-Shop-Id=..,
 OpenAI fires a `realtime.call.incoming` webhook, and we POST the session config
-(prompt + the 12 authz'd tools) to /v1/realtime/calls/{call_id}/accept.
+to /v1/realtime/calls/{call_id}/accept: the salon's persona (this repo), the
+agent rules and the MCP tool server (both marketing-engine's customer agents,
+AGENTS.md 2026-09-28).
 """
 from __future__ import annotations
 
@@ -34,17 +36,23 @@ _VOICE_MAP = {
 }
 
 
-def to_realtime_tools(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Wrap safety-layer tool schemas in OpenAI Realtime function-tool shape."""
-    return [
-        {
-            "type": "function",
-            "name": s["name"],
-            "description": s.get("description", ""),
-            "parameters": s.get("parameters", {"type": "object", "properties": {}}),
-        }
-        for s in schemas
-    ]
+# The customer agents' names (plan 2026-09-28, naming table). OpenAI filters the
+# MCP server's `tools/list` by this list, so a stale name here silently removes
+# a tool from every call; an unknown one is harmless.
+CUSTOMER_AGENT_TOOLS: tuple[str, ...] = (
+    "customers_identify",
+    "customer_history",
+    "services_catalog",
+    "availability_search",
+    "create_customer",
+    "update_customer",
+    "create_appointment",
+    "appointments_upcoming",
+    "reschedule_appointment",
+    "cancel_appointment",
+    "escalate_to_owner",
+    "set_conversation_outcome",
+)
 
 
 def build_sip_uri(shop_id: object, project_id: str) -> str:
@@ -93,16 +101,19 @@ async def build_accept_payload(
     policy: dict[str, Any],
     resolution: ResolutionResult,
     model: str,
-    allowlist: list[str] | None = None,
     mcp_server_url: str | None = None,
     mcp_token: str | None = None,
+    agent_instructions: str | None = None,
     enable_input_transcription: bool = False,
 ) -> dict[str, Any]:
-    """Assemble the /accept body: prompt, mapped voice, and tools.
+    """Assemble the /accept body: persona + agent rules, mapped voice, tools.
 
-    When `mcp_server_url` is given, tools are served by our remote MCP server
-    (OpenAI calls it directly, passing `mcp_token` as the bearer). Otherwise the
-    12 function schemas are inlined (fallback / non-MCP path).
+    `agent_instructions` (marketing-engine's rules for this call) go after the
+    persona; None leaves the persona alone. The tools are marketing-engine's
+    MCP server, which OpenAI calls directly with `mcp_token` as the bearer —
+    and nothing when there is no server: this repo no longer executes any tool
+    itself, so inlining function schemas would give the model tools nobody
+    answers.
 
     `enable_input_transcription` asks OpenAI to also transcribe the caller's
     speech (off by default — debug/test use only, see
@@ -110,8 +121,12 @@ async def build_accept_payload(
     text transcript of the customer for anything today).
     """
     assembled = await assemble_session_prompt(
-        config=config, policy=policy, resolution=resolution, allowlist=allowlist,
+        config=config, policy=policy, resolution=resolution,
     )
+    instructions = assembled.prompt
+    if agent_instructions:
+        instructions = f"{instructions}\n\n{agent_instructions}"
+    tools: list[dict[str, Any]] = []
     if mcp_server_url:
         tools = [{
             "type": "mcp",
@@ -119,17 +134,15 @@ async def build_accept_payload(
             "server_url": mcp_server_url,
             "authorization": mcp_token,
             "require_approval": "never",
-            "allowed_tools": [s["name"] for s in assembled.tools],
+            "allowed_tools": list(CUSTOMER_AGENT_TOOLS),
         }]
-    else:
-        tools = to_realtime_tools(assembled.tools)
     audio_input: dict[str, Any] = {"turn_detection": _TURN_DETECTION}
     if enable_input_transcription:
         audio_input["transcription"] = {"model": _TRANSCRIPTION_MODEL}
     return {
         "type": "realtime",
         "model": model,
-        "instructions": assembled.prompt,
+        "instructions": instructions,
         "audio": {
             "input": audio_input,
             "output": {"voice": _VOICE_MAP.get(assembled.voice, "verse")},

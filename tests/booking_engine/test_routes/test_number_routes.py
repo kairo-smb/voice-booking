@@ -39,6 +39,18 @@ async def test_request_number_requires_auth():
         assert r.status_code in (401, 403, 503)
 
 
+
+@pytest.fixture(autouse=True)
+def _tick_lock_always_free(monkeypatch):
+    """The tick's advisory lock needs a real pool; these tests have none."""
+    from contextlib import asynccontextmanager
+    from booking_engine.api.routes import messaging_tick
+
+    @asynccontextmanager
+    async def _free(key):
+        yield True
+    monkeypatch.setattr(messaging_tick, "singleton", _free)
+
 @pytest.mark.asyncio
 async def test_tick_requires_auth():
     app = create_app()
@@ -222,6 +234,26 @@ async def test_tick_with_approved_bundle_calls_provision_approved():
         "booking_engine.api.routes.messaging_tick.release_sweep",
         new_callable=AsyncMock,
         return_value={"scheduled": 0, "cleared": 0, "released": 0, "errors": 0},
+    ), patch(
+        # The WhatsApp stages are stubbed rather than left to a DB that is not
+        # there: this test is about bundle provisioning, and an unrelated stage
+        # failing for want of a connection pool would be counted under the very
+        # `errors` the assertions below are reading.
+        "booking_engine.api.routes.messaging_tick.whatsapp_sweep",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_send_due",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_run_automations",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_nudge_sweep",
+        new_callable=AsyncMock, return_value={"nudged": 0, "errors": 0},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_retention_sweep",
+        new_callable=AsyncMock,
+        return_value={"threads": 0, "inbound": 0, "outbound": 0, "errors": 0},
     ):
         app = create_app()
         transport = ASGITransport(app=app)
@@ -271,6 +303,26 @@ async def test_tick_one_bad_shop_does_not_stop_the_sweep_or_health_check():
         "booking_engine.api.routes.messaging_tick.release_sweep",
         new_callable=AsyncMock,
         return_value={"scheduled": 0, "cleared": 0, "released": 0, "errors": 0},
+    ), patch(
+        # The WhatsApp stages are stubbed rather than left to a DB that is not
+        # there: this test is about bundle provisioning, and an unrelated stage
+        # failing for want of a connection pool would be counted under the very
+        # `errors` the assertions below are reading.
+        "booking_engine.api.routes.messaging_tick.whatsapp_sweep",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_send_due",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_run_automations",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_nudge_sweep",
+        new_callable=AsyncMock, return_value={"nudged": 0, "errors": 0},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_retention_sweep",
+        new_callable=AsyncMock,
+        return_value={"threads": 0, "inbound": 0, "outbound": 0, "errors": 0},
     ):
         app = create_app()
         transport = ASGITransport(app=app)
@@ -375,7 +427,26 @@ async def test_tick_includes_release_block():
         "booking_engine.api.routes.messaging_tick.release_sweep",
         new_callable=AsyncMock,
         return_value={"scheduled": 1, "cleared": 0, "released": 2, "errors": 0},
-    ) as mock_sweep:
+    ) as mock_sweep, patch(
+        # See the comment on the provisioning tick test above: the WhatsApp
+        # stages are stubbed so a missing connection pool cannot leak into
+        # this test's counters.
+        "booking_engine.api.routes.messaging_tick.whatsapp_sweep",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_send_due",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_run_automations",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_nudge_sweep",
+        new_callable=AsyncMock, return_value={"nudged": 0, "errors": 0},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_retention_sweep",
+        new_callable=AsyncMock,
+        return_value={"threads": 0, "inbound": 0, "outbound": 0, "errors": 0},
+    ):
         app = create_app()
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
@@ -402,6 +473,25 @@ async def test_tick_release_sweep_failure_does_not_fail_tick_or_hide_health():
         "booking_engine.api.routes.messaging_tick.release_sweep",
         new_callable=AsyncMock,
         side_effect=RuntimeError("twilio blew up"),
+    ), patch(
+        # See the comment on the provisioning tick test above: the WhatsApp
+        # stages are stubbed so a missing connection pool cannot leak into
+        # this test's counters.
+        "booking_engine.api.routes.messaging_tick.whatsapp_sweep",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_send_due",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_run_automations",
+        new_callable=AsyncMock, return_value={},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_nudge_sweep",
+        new_callable=AsyncMock, return_value={"nudged": 0, "errors": 0},
+    ), patch(
+        "booking_engine.api.routes.messaging_tick.whatsapp_retention_sweep",
+        new_callable=AsyncMock,
+        return_value={"threads": 0, "inbound": 0, "outbound": 0, "errors": 0},
     ):
         app = create_app()
         transport = ASGITransport(app=app)
