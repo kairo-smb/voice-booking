@@ -21,10 +21,9 @@ def _get_pool() -> asyncpg.Pool:
 async def _retry_stale_plan(op):
     """Run `op(conn)`, once more if a migration changed a cached statement's result type.
 
-    asyncpg caches prepared statements per connection; `RETURNING m.*` (or
-    `SELECT *`) then fails with InvalidCachedStatementError after a column is
-    added, on every pooled connection, until the process restarts. asyncpg
-    drops the stale statement when it raises, so one retry re-prepares it.
+    Belt and braces only: with `statement_cache_size=0` (see init_connection)
+    nothing is cached client-side any more, so this should never fire. Kept
+    because it costs nothing when it doesn't.
     """
     pool = _get_pool()
     for attempt in (0, 1):
@@ -66,6 +65,17 @@ async def init_connection(settings: Settings) -> None:
         # Live Neon DB keeps base tables in business_app_core; set search_path
         # so unqualified table references in queries.py resolve correctly.
         server_settings={"search_path": "business_app_core, public"},
+        # DATABASE_URL is Neon's pgbouncer in transaction mode. pgbouncer keeps
+        # named prepared statements on its server connections keyed by SQL
+        # text, so after a migration changes what `RETURNING m.*` / `SELECT *`
+        # returns, asyncpg's re-prepare lands on the same stale server-side
+        # statement and fails again ("cached plan must not change result
+        # type") until pgbouncer recycles that server connection. The retry in
+        # _retry_stale_plan could not get past it: whatsapp_drain kept failing
+        # ~5% of ticks for a week after it shipped. Unnamed statements are
+        # re-parsed every time and never go stale — asyncpg's documented
+        # setting behind pgbouncer.
+        statement_cache_size=0,
     )
     logger.info("PostgreSQL connection pool initialized (min=%d, max=%d)",
                 settings.pool_min_size, settings.pool_max_size)

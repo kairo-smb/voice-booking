@@ -6,6 +6,27 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-10-03 — asyncpg statement cache off: the stale-plan retry never worked behind pgbouncer
+
+GlitchTip VOICE-BOOKING-2 (`InvalidCachedStatementError: cached plan must
+not change result type`, from `claim_due`'s `RETURNING m.*` in
+`whatsapp_drain`) kept firing after the 2026-09-30 retry shipped: 347 of its
+597 events came afterwards, every one already through `_retry_stale_plan` —
+the second attempt failed too, on roughly 5% of the 60s ticks.
+
+Why the retry couldn't help: `DATABASE_URL` is Neon's pgbouncer in
+transaction mode, and pgbouncer tracks named prepared statements on its
+server connections by SQL text. asyncpg dropping its own cache entry and
+re-preparing under a new name just maps back onto the same stale server-side
+statement, which stays broken until pgbouncer recycles that server
+connection.
+
+Fix: `statement_cache_size=0` on the pool. asyncpg then uses unnamed
+statements, which are parsed every time and cannot go stale — the setting
+asyncpg documents for pgbouncer. Cost: one extra round trip per query (no
+cached Parse/Describe); no new queries, no new scheduled work. The retry
+stays as a no-op safety net.
+
 ## 2026-09-30 — WhatsApp message writes bump the webapp's live-update counter
 
 New `booking_engine/db/sql/29_shop_changes_whatsapp.sql`: statement-level
