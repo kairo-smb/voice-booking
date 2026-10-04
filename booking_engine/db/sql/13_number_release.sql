@@ -1,5 +1,5 @@
 -- Number release: grace period after a subscription lapses, then hand the
--- number back to Twilio. See CLAUDE.md 2026-08-15.
+-- number back to Twilio. See AGENTS.md 2026-08-15.
 
 -- Set by the tick the first time it sees a shop that holds a number but has no
 -- active plan; cleared if the plan returns before the deadline. Deliberately

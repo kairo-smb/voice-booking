@@ -26,12 +26,12 @@ state refuses it — with `{"detail": "<reason>"}`. Reasons:
 `insufficient_credits`, `provider_error`.
 
 **No in-message opt-out.** STOP handling (footer + inbound webhook) was
-removed — see `CLAUDE.md`'s STOP-removal entry. The body sent is the
+removed — see `AGENTS.md`'s STOP-removal entry. The body sent is the
 sanitised text alone; suppression is `business_app_core.customers.
 marketing_consent` alone, cleared in-store by staff, not by a customer
 reply. Credits are computed off the resulting segment count and checked
 against the shop's balance before Twilio is called; the debit itself only
-happens after Twilio accepts the send (see `CLAUDE.md` §2026-08-12). The
+happens after Twilio accepts the send (see `AGENTS.md` §2026-08-12). The
 send now also passes Twilio a `status_callback` (built from
 `public_base_url` + this file's own `/webhook/status` path below) so
 delivery status/price actually come back — previously omitted, so

@@ -12,6 +12,7 @@ PHONE = "+393331112222"
 
 
 class Settings:
+    meta_app_id = "app"
     meta_kairo_waba_id = "KAIRO_WABA"
     meta_kairo_token = "kairo-token"
     meta_receipt_sample_url = "https://example.test/sample.pdf"
@@ -168,3 +169,41 @@ async def test_ensure_receipt_template_refuses_a_body_kairo_never_approved(monke
 
     result = await wr.ensure_receipt_template(shop_id=SHOP, settings=Settings())
     assert result == {"ok": False, "error": "not_ready"}
+
+
+async def test_document_template_sends_an_upload_handle_never_the_url(monkeypatch):
+    """Meta refuses a URL in `header_handle` (code 100); it wants the handle
+    from a Resumable Upload of the sample. Pins the three-call contract."""
+    import httpx
+
+    seen = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append((req.method, req.url.path, req))
+        if req.url.host == "example.test":
+            return httpx.Response(200, content=b"%PDF-sample")
+        if req.url.path.endswith("/APP/uploads"):
+            assert req.url.params["file_length"] == "11"
+            return httpx.Response(200, json={"id": "upload:XYZ"})
+        if req.url.path.endswith("/upload:XYZ"):
+            assert req.headers["authorization"] == "OAuth tok"
+            assert req.headers["file_offset"] == "0"
+            assert req.content == b"%PDF-sample"
+            return httpx.Response(200, json={"h": "4::HANDLE"})
+        if req.url.path.endswith("/W/message_templates"):
+            return httpx.Response(200, json={"id": "T1", "status": "PENDING"})
+        return httpx.Response(404)
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(meta, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+
+    tid, status = await meta.create_document_template(
+        waba_id="W", token="tok", name="purchase_receipt_1", language="it",
+        category="UTILITY", body_text="b", app_id="APP",
+        example_url="https://example.test/sample.pdf",
+    )
+    assert (tid, status) == ("T1", "pending")
+    import json
+    payload = json.loads(seen[-1][2].content)
+    assert payload["components"][0]["example"]["header_handle"] == ["4::HANDLE"]

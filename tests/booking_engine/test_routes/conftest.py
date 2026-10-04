@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from booking_engine.api.routes import shops, customers, services, availability, appointments
+from booking_engine.api.routes import shops, customers, services, appointments
 
 
 @pytest.fixture
@@ -17,7 +17,6 @@ def app() -> FastAPI:
     app.include_router(shops.router, prefix="/api/v1")
     app.include_router(customers.router, prefix="/api/v1")
     app.include_router(services.router, prefix="/api/v1")
-    app.include_router(availability.router, prefix="/api/v1")
     app.include_router(appointments.router, prefix="/api/v1")
     return app
 

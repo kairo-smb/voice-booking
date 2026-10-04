@@ -1,8 +1,10 @@
-"""3-layer system-prompt assembler.
+"""The salon's persona for a voice call.
 
-Composes the session prompt sent to OpenAI on session.started:
-  Layer 3 (safety, immutable) → caller context → Layer 1 (personality,
-  display, tone) → Layer 2 (disclosure) → tool descriptions.
+Caller context → who the agent speaks for, the greeting, the opening → tone.
+This is shop configuration (voice preset, tone, greeting, overflow text), and
+it is all this repo still puts into a call's instructions. The agent rules and
+the tools come from marketing-engine's customer agents and are appended after
+this at accept time (`services/realtime_session.py`, AGENTS.md 2026-09-28).
 
 The tone instruction is fetched from voice_agent.voice_tones via tone_id;
 unknown / missing / lookup failures fall back to DEFAULT_TONE_INSTRUCTION.
@@ -17,11 +19,6 @@ from uuid import UUID
 
 from booking_engine.db.voice_tone_queries import get_tone_by_id
 from booking_engine.services.identity_resolver import ResolutionResult
-from booking_engine.services.safety_layer import (
-    DEFAULT_TOOL_ALLOWLIST,
-    SAFETY_PROMPT,
-    tool_descriptions,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +26,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AssembledPrompt:
     prompt: str
-    tools: list[dict[str, Any]]
     voice: str
 
 
@@ -58,10 +54,13 @@ def _greeting(config: dict[str, Any]) -> str:
 
 def _caller_context(resolution: ResolutionResult) -> str:
     if resolution.is_anonymous:
+        # No tool takes a phone number: the session's caller number is the
+        # only identity writes are authorized on, and a hidden number has none.
         return (
-            "Il chiamante ha il numero anonimo. Per prenotare avrai bisogno del "
-            "nome e di un numero di telefono pronunciato dal chiamante. "
-            "Saluta in modo neutro."
+            "Il chiamante ha il numero nascosto: non puoi ritrovare i suoi "
+            "appuntamenti né prenotarne di nuovi. Saluta in modo neutro; se "
+            "chiede di prenotare, spostare o annullare, raccogli nome e "
+            "richiesta e usa escalate_to_owner."
         )
     if resolution.unique_match:
         m = resolution.unique_match
@@ -106,27 +105,22 @@ async def assemble_session_prompt(
     config: dict[str, Any],
     policy: dict[str, Any],
     resolution: ResolutionResult,
-    allowlist: list[str] | None = None,
 ) -> AssembledPrompt:
-    allowlist = allowlist or DEFAULT_TOOL_ALLOWLIST
     tone_text = await _resolve_tone_instruction(config.get("tone_id"))
 
     parts = [
-        SAFETY_PROMPT,
-        "",
         "CONTESTO CHIAMANTE:",
         _caller_context(resolution),
         "",
         f"SEI L'ASSISTENTE DI: {config.get('display_name', '')}.",
         f"FRASE DI BENVENUTO: \"{_greeting(config)}\"",
-        "APERTURA CHIAMATA: al primo turno usa subito la FRASE DI BENVENUTO per "
-        "presentarti, poi chiedi come puoi aiutare. Vai dritto al punto: niente "
+        "APERTURA CHIAMATA: il tuo primo turno è la FRASE DI BENVENUTO, detta "
+        "così com'è, poi chiedi come puoi aiutare. Vai dritto al punto: niente "
         "menzioni di registrazioni, trattamento dati o consensi.",
         tone_text,
     ]
 
     return AssembledPrompt(
         prompt="\n".join(parts),
-        tools=tool_descriptions(allowlist=allowlist),
         voice=config.get("voice_preset", "verse"),
     )

@@ -1,13 +1,18 @@
 # Decisions
 
-A short index into `CLAUDE.md`'s full history log — enough to find the relevant entry without reading the whole file. `CLAUDE.md` is the source of truth; this page is a lookup aid, not a duplicate, and is kept in sync by hand when `CLAUDE.md` gains a new entry worth indexing.
+A short index into `AGENTS.md`'s full history log — enough to find the relevant entry without reading the whole file. `AGENTS.md` is the source of truth; this page is a lookup aid, not a duplicate, and is kept in sync by hand when `AGENTS.md` gains a new entry worth indexing.
 
-> **Maintenance rule:** a new `CLAUDE.md` entry that a future reader would plausibly search for gets a one-line pointer added here in the same change. See [README](README.md#maintenance-rule).
+> **Maintenance rule:** a new `AGENTS.md` entry that a future reader would plausibly search for gets a one-line pointer added here in the same change. See [README](README.md#maintenance-rule).
 
 ---
 
-| Date | Decision | CLAUDE.md section |
+| Date | Decision | AGENTS.md section |
 |---|---|---|
+| 2026-09-30 | WhatsApp message writes (send loop, Meta webhooks, inbound replies) bump the webapp's live-update counter via a guarded migration (29); no Python changed, transaction review found no lock held across Meta HTTP calls | §"WhatsApp message writes bump the webapp's live-update counter" |
+| 2026-09-29 | The WhatsApp responder pauses at the shop's low-credit threshold (`auto_topup_threshold_tokens`, 10 000 when NULL): `credit_state` is the one verdict, `low_credit` a `may_speak` refusal stamped on the session so paused conversations stay manual after a top-up; `needs_evaluation` on thread rows; one owner email per episode (migration 28) | §"The WhatsApp responder pauses at the low-credit threshold" |
+| 2026-09-28 | Customer agents on one common layer (marketing-engine `runTool`, per-surface allow-list); the webapp is the only slot-search and booking-write engine (absences, hours and reschedule checks this repo never did); voice's tools and rules move to marketing-engine and this repo's voice tool layer, MCP server and slot engine are deleted; `/sessions/*` keeps the session writes | §"Customer agents on one common layer..." |
+| 2026-09-28 | QA sends from Meta's test number (seeded, no Embedded Signup); first real Graph traffic found the receipt template needs an upload handle not a URL, and the tier now lives on the WABA (portfolio, `TIER_2K`) and is refreshed hourly; availability ranked by the requested hour; the agent no longer introduces itself as an AI (owner decision, AI Act risk accepted) | §"First real Graph traffic: Meta's test number in QA..." |
+| 2026-09-22 | WhatsApp becomes two-way and an agent books through it: `voice_agent.calls` was already a session table, so the booking tools were reused untouched; session-scoped routing with a button menu to disambiguate; echoes from the owner's phone suspend the agent; the ZDR waiver, scoped to the classifier alone | §"WhatsApp becomes a conversation, and an agent books through it" |
 | 2026-08-24 | Meta's platform limits become a floor nothing may cross (`meta_limits.py`): `min(Meta, ours)`, rolling-24h tier window, per-recipient cooldown, clamped send rate, onboarding cap | §"Meta's limits become a floor nothing may cross..." |
 | 2026-08-24 | WhatsApp leaves Twilio for Meta Cloud API direct (Tech Provider): BYO WABA + coexistence, templates injected into the salon's own WABA, no credit debit, multi-day bulk drip with a paced scheduler | §"WhatsApp leaves Twilio: Meta Cloud API direct..." |
 | 2026-08-22 | WhatsApp monthly allowance lives on the subscription plan row; free-form messages are not free (Twilio's fee applies to every category) | §"WhatsApp sends are capped by the subscription plan..." |

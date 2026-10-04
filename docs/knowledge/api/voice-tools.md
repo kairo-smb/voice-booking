@@ -1,34 +1,40 @@
 # Voice Tools
 
-The 12 tools OpenAI calls during a live session, over MCP (`/mcp`, dispatched in-process — see [Architecture](../architecture.md#call-flow)) or directly via their own `/voice/tools/*` routes. All require `Authorization: Bearer <OPENAI_TOOL_SECRET>` (`require_tool_token`). Tool semantics/rules: [Voice Agent Logic](../voice-agent-logic.md).
+**The voice agent's tools no longer live in this repo.** Since 2026-09-28 they are marketing-engine's **customer agents** (`kairo-market-intel/src/lib/customer-agents/`), the same layer the WhatsApp agent runs on: one set of schemas, one per-session dispatch through `runTool`, one allow-list per surface. OpenAI Realtime reaches them over MCP at `{MARKET_INTEL_API_URL}/customer-agents/voice/mcp` (`src/routes/customer-agents-voice.ts`), and the rules the model follows come from `/customer-agents/voice/instructions`. See `AGENTS.md` §2026-09-28 for the why.
 
-> **Maintenance rule:** a tool added/removed/changed (in `safety_layer.py` or its route file) updates this file in the same change. See [../README](../README.md#maintenance-rule).
+> **Maintenance rule:** a change to how the accept path points a call at those tools (`services/realtime_session.py`, `clients/customer_agents_voice.py`) updates this file in the same change. See [../README](../README.md#maintenance-rule).
 
 ---
 
-| Tool | Route | File |
-|---|---|---|
-| `get_services` | `POST /voice/tools/get_services` | `voice_tools_catalog.py` |
-| `get_staff_for_service` | `POST /voice/tools/get_staff_for_service` | `voice_tools_catalog.py` |
-| `check_availability` | `POST /voice/tools/check_availability` | `voice_tools_booking.py` |
-| `create_booking` | `POST /voice/tools/create_booking` | `voice_tools_booking.py` |
-| `get_booking` | `POST /voice/tools/get_booking` | `voice_tools_booking.py` |
-| `modify_booking` | `POST /voice/tools/modify_booking` | `voice_tools_booking.py` |
-| `cancel_booking` | `POST /voice/tools/cancel_booking` | `voice_tools_booking.py` |
-| `lookup_customer` | `POST /voice/tools/lookup_customer` | `voice_tools_identity.py` |
-| `create_customer_from_call` | `POST /voice/tools/create_customer_from_call` | `voice_tools_identity.py` |
-| `update_customer_from_call` | `POST /voice/tools/update_customer_from_call` | `voice_tools_identity.py` |
-| `mark_outcome` | `POST /voice/tools/mark_outcome` | `voice_tools_lifecycle.py` |
-| `escalate_to_merchant` | `POST /voice/tools/escalate_to_merchant` | `voice_tools_lifecycle.py` |
+## What this repo still does for a call
 
-Session lifecycle webhooks (same auth, same "in-process, not agent-facing tools" category):
+- **Points the session at the tools.** `realtime_session.py::build_accept_payload` sets one `mcp` tool: `server_url` from `MARKET_INTEL_API_URL`, `authorization` = the per-call token (`services/call_token.py`, HMAC-signed `{shop_id, call_id}` with `VOICE_AGENT_TOOL_SECRET`, which marketing-engine verifies with the same value), `allowed_tools` = `CUSTOMER_AGENT_TOOLS` (the 12 names below). A stale name in that list silently filters a tool out of every call.
+- **Owns the session row** the token names (`voice_agent.calls`) and its writes: marketing-engine calls back into [Sessions](sessions.md) for `escalate_to_owner`, `set_conversation_outcome` and the customer link.
+- **Owns the persona** (voice, tone, greeting) — see [Voice Agent Logic](../voice-agent-logic.md#prompt-assembly).
+
+## The tools (marketing-engine)
+
+| Old `/voice/tools/*` name (deleted) | Customer-agent name | Backed by |
+|---|---|---|
+| `lookup_customer` | `customers_identify` | marketing-engine SQL, by the session's caller number |
+| — (new, 2026-09-29) | `customer_history` | marketing-engine SQL, the session's linked customer only (`calls.customer_id`): past completed visits, usual services and stylist for "il solito" |
+| `create_customer_from_call` | `create_customer` | webapp `POST /api/v1/hair-salon/agent/customers` |
+| `update_customer_from_call` | `update_customer` | webapp `PATCH /api/v1/hair-salon/agent/customers/{id}` |
+| `get_services` + `get_staff_for_service` | `services_catalog` | marketing-engine SQL |
+| `check_availability` | `availability_search` | webapp `/availability` (the only slot engine) |
+| `create_booking` | `create_appointment` | webapp `POST /api/v1/hair-salon/agent/appointments` |
+| `get_booking` | `appointments_upcoming` | marketing-engine SQL, by the session's caller number |
+| `modify_booking` | `reschedule_appointment` | webapp `POST …/agent/appointments/{id}/reschedule` |
+| `cancel_booking` | `cancel_appointment` | webapp `POST …/agent/appointments/{id}/cancel` |
+| `escalate_to_merchant` | `escalate_to_owner` | this repo, `POST /sessions/{call_id}/escalation` |
+| `mark_outcome` | `set_conversation_outcome` | this repo, `POST /sessions/{call_id}/outcome` |
+
+## Session lifecycle webhooks (still here)
+
+Auth `require_tool_token`.
 
 | Endpoint | File | Purpose |
 |---|---|---|
-| `POST /voice/events/session.started` | `voice_events.py` | assembles and returns the session prompt + tools (see [Voice Agent Logic](../voice-agent-logic.md#prompt-assembly)) |
+| `POST /voice/events/session.started` | `voice_events.py` | inserts the call row, returns the persona prompt + voice (no tools — they are marketing-engine's) |
 | `POST /voice/events/session.turn` | `voice_events.py` | persists a transcript turn |
-| `POST /voice/events/session.ended` | `voice_events.py` | finalizes the call row |
-
-Outcome enum (`mark_outcome`): `booked \| rescheduled \| cancelled \| info \| abandoned \| escalated \| failed`.
-
-Exact request/response JSON schemas: `_TOOL_SCHEMAS` in `booking_engine/services/safety_layer.py` (what OpenAI sees) and `booking_engine/api/voice_tool_models.py` (the Pydantic request/response models each route actually validates against).
+| `POST /voice/events/session.ended` | `voice_events.py` | finalizes the call row, charges the call |

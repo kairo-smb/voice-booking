@@ -16,8 +16,6 @@ from booking_engine.api.models import (
     ServiceResponse,
     CustomerResponse,
     AppointmentResponse,
-    AvailableSlotResponse,
-    AvailabilityResponse,
     AppointmentServiceDetail,
     ErrorResponse,
 )
@@ -109,23 +107,6 @@ class TestServiceResponse:
             price_eur=Decimal("25.50"),
         )
         assert svc.price_eur == Decimal("25.50")
-
-
-class TestAvailabilityResponse:
-    def test_empty_slots(self):
-        resp = AvailabilityResponse(slots=[])
-        assert resp.slots == []
-        assert resp.suggestions is None
-
-    def test_with_suggestions(self):
-        slot = AvailableSlotResponse(
-            staff_id=uuid4(),
-            staff_name="Maria",
-            slot_start=datetime(2026, 4, 1, 10, 0),
-            slot_end=datetime(2026, 4, 1, 10, 30),
-        )
-        resp = AvailabilityResponse(slots=[], suggestions=[slot])
-        assert len(resp.suggestions) == 1
 
 
 class TestAppointmentResponse:

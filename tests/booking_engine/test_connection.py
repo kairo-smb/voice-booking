@@ -37,6 +37,7 @@ class TestInitConnection:
             min_size=settings.pool_min_size,
             max_size=settings.pool_max_size,
             server_settings={"search_path": "business_app_core, public"},
+            statement_cache_size=0,
         )
 
 

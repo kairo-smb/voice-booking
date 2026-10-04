@@ -3,7 +3,7 @@
 **Status:** working design. Cross-repo (voice-booking, webapp, marketing-engine).
 Nothing here is live on Meta yet (no template body has ever been approved — verified
 with the owner), so the marketing templates are **rewritten in place, keys unchanged**.
-On ship, this working doc is superseded by the CLAUDE.md entry + `docs/knowledge/*`
+On ship, this working doc is superseded by the AGENTS.md entry + `docs/knowledge/*`
 updates; delete it then.
 
 ## Goal
@@ -125,7 +125,7 @@ cost. `receipt_v1` has no generated slot → never touches the basket.
    marketing bodies carry the shared CTA tail. Catalogue-wide sample test already
    iterates `CATALOGUE` → covers `receipt_v1` for free.
 3. Docs: `docs/knowledge/providers.md` + `docs/knowledge/api/whatsapp.md` updated in
-   the same change (repo rule); CLAUDE.md entry appended on merge.
+   the same change (repo rule); AGENTS.md entry appended on merge.
 4. Operator step after merge (not automatable here): owner runs
    `kairo_waba.py push-templates` and gets Meta approval for the new bodies on
    Kairo's WABA; the hourly sweep then propagates them to every customer WABA.

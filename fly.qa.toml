@@ -4,6 +4,13 @@ primary_region = 'fra'
 [build]
   dockerfile = 'booking_engine/Dockerfile.fly'
 
+[env]
+  SENTRY_ENVIRONMENT = 'qa' # GlitchTip; SENTRY_DSN is a fly secret
+  # In-process scheduler (services/scheduler.py), fleet-wide cadences.
+  WHATSAPP_SEND_LOOP_SECONDS = '60'
+  MESSAGING_TICK_SECONDS = '3600'
+  FORWARDING_HEARTBEAT_SECONDS = '86400'
+
 [http_service]
   internal_port = 8080
   force_https = true

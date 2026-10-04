@@ -18,7 +18,7 @@ Tech Provider talking to `graph.facebook.com` directly. The billing model in
 §5 inverted too: the salon's own card is on the salon's own WABA and Meta
 charges it directly, so nothing debits AI credits on this channel.
 
-**Read instead:** `CLAUDE.md` §2026-08-24 (both entries),
+**Read instead:** `AGENTS.md` §2026-08-24 (both entries),
 [api/whatsapp.md](knowledge/api/whatsapp.md),
 [providers.md](knowledge/providers.md#whatsapp-meta-cloud-api-tech-provider).
 
@@ -571,5 +571,5 @@ template and session mechanics on top.
 
 **webapp** — adds a feature and a provider integration, and changes a hard
 constraint (the first subscription gate): `docs/knowledge/features.md`,
-`providers.md`, `architecture.md`, `decisions.md`. Per webapp `CLAUDE.md`, in
+`providers.md`, `architecture.md`, `decisions.md`. Per webapp `AGENTS.md`, in
 the same change, not as a follow-up.

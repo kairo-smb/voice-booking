@@ -17,7 +17,7 @@ AUTH = {"Authorization": "Bearer test-secret"}
 @pytest.fixture(autouse=True)
 def stub_secret(monkeypatch):
     monkeypatch.setenv("CONTROL_PLANE_SECRET", "test-secret")
-    monkeypatch.setenv("OPENAI_TOOL_SECRET", "tool-secret")
+    monkeypatch.setenv("VOICE_AGENT_TOOL_SECRET", "tool-secret")
 
 
 @pytest.mark.asyncio

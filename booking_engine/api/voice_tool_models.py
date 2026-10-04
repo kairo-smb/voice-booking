@@ -1,29 +1,21 @@
-"""Pydantic models shared across voice tool routes.
+"""Pydantic models shared by the agent-facing routes.
 
-Every tool returns Envelope[T]; OpenAI sees ok/data/error and routes accordingly.
+`Envelope[T]` is the `{ok, data, error}` shape `/sessions/*` and
+`/voice/events/*` answer in — the same shape the voice tools used, which is why
+marketing-engine's customer agents can relay it unchanged. The tools themselves
+moved to marketing-engine on 2026-09-28 (AGENTS.md); what is left here is what
+the remaining routes and `identity_resolver` still use.
 """
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Generic, Literal, TypeVar
+from typing import Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, Field
 
 
 T = TypeVar("T")
-
-
-def _blank_to_none(v: object) -> object:
-    """OpenAI's function-calling sometimes sends "" for an optional field
-    instead of omitting it — treat that as not provided rather than failing
-    UUID/datetime parsing with a 422 the model can't act on (root-caused
-    from a real check_availability 422 in QA logs)."""
-    return None if v == "" else v
-
-
-OptionalUUID = Annotated[UUID | None, BeforeValidator(_blank_to_none)]
-OptionalDatetime = Annotated[datetime | None, BeforeValidator(_blank_to_none)]
 
 
 class Envelope(BaseModel, Generic[T]):
@@ -32,7 +24,6 @@ class Envelope(BaseModel, Generic[T]):
     error: str | None = None
 
 
-# Identity
 class CustomerSummary(BaseModel):
     customer_id: UUID
     first_name: str
@@ -43,130 +34,7 @@ class CustomerSummary(BaseModel):
     verified: bool
 
 
-class CreateCustomerIn(BaseModel):
-    phone: str
-    first_name: str
-    last_name: str | None = None
-    phone_source: Literal["caller_id", "stated"]
-
-
-class CreatedCustomerOut(BaseModel):
-    customer_id: UUID
-
-
-class UpdateCustomerIn(BaseModel):
-    customer_id: UUID
-    field: Literal["last_name", "email", "notes_tags"]
-    value: str
-
-
-# Catalog
-class ServiceOut(BaseModel):
-    service_id: UUID
-    name: str
-    duration_min: int
-    price_cents: int | None = None
-
-
-class StaffOut(BaseModel):
-    staff_id: UUID
-    name: str
-
-
-# Availability + booking
-class BookingServiceIn(BaseModel):
-    """One requested leg of a (possibly multi-service) booking, in the
-    order the services should be performed."""
-    service_id: UUID
-    staff_id: OptionalUUID = None  # None = auto-assign an eligible, available staff member
-
-
-class CheckAvailabilityIn(BaseModel):
-    services: list[BookingServiceIn] = Field(..., min_length=1)
-    preferred_when: OptionalDatetime = None
-    max_results: int = 5
-
-
-class AvailabilityLeg(BaseModel):
-    service_id: UUID
-    staff_id: UUID
-    staff_name: str
-    slot_start: datetime
-    slot_end: datetime
-
-
-class AvailabilityChain(BaseModel):
-    slot_start: datetime
-    slot_end: datetime
-    legs: list[AvailabilityLeg]
-
-
-class CreateBookingLeg(BaseModel):
-    service_id: UUID
-    staff_id: UUID
-    slot_start: datetime
-
-
-class CreateBookingIn(BaseModel):
-    customer_id: UUID
-    legs: list[CreateBookingLeg] = Field(..., min_length=1)
-
-
-class BookingLegOut(BaseModel):
-    service_id: UUID
-    staff_id: UUID
-    slot_start: datetime
-    slot_end: datetime
-
-
-class BookingOut(BaseModel):
-    appointment_id: UUID
-    confirmation_status: Literal[
-        "confirmed", "pending_sms_confirmation", "verification_failed"
-    ]
-    slot_start: datetime
-    slot_end: datetime
-    legs: list[BookingLegOut]
-
-
-class ModifyBookingIn(BaseModel):
-    appointment_id: UUID
-    new_slot_start: OptionalDatetime = None
-    new_service_id: OptionalUUID = None
-    verification_passed: bool | None = None  # ignored; server authorizes by caller phone
-
-
-class CancelBookingIn(BaseModel):
-    appointment_id: UUID
-    verification_passed: bool | None = None  # ignored; server authorizes by caller phone
-
-
-# Lifecycle
-class MarkOutcomeIn(BaseModel):
-    outcome: Literal[
-        "booked", "rescheduled", "cancelled", "info",
-        "abandoned", "escalated", "failed",
-    ]
-    summary: str
-    callback_window: str | None = None
-
-
 class EscalateIn(BaseModel):
     reason: str
     callback_window: str | None = None
     customer_message: str
-
-
-# Catalog (request models)
-class GetServicesIn(BaseModel):
-    filter: str | None = None
-    include_price: bool = False
-
-
-class GetStaffForServiceIn(BaseModel):
-    service_id: UUID
-
-
-# Identity (request model for lookup_customer)
-class LookupCustomerIn(BaseModel):
-    phone: str

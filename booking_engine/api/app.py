@@ -22,11 +22,10 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="Virtual Assistant Booking Engine", version="1.0.0", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-    from booking_engine.api.routes import shops, customers, services, availability, appointments
+    from booking_engine.api.routes import shops, customers, services, appointments
     app.include_router(shops.router, prefix="/api/v1")
     app.include_router(customers.router, prefix="/api/v1")
     app.include_router(services.router, prefix="/api/v1")
-    app.include_router(availability.router, prefix="/api/v1")
     app.include_router(appointments.router, prefix="/api/v1")
     from booking_engine.api.routes import voice  # noqa: WPS433
     app.include_router(voice.router, prefix="/api/v1")
@@ -46,26 +45,14 @@ def create_app() -> FastAPI:
     app.include_router(sms.router, prefix="/api/v1")
     from booking_engine.api.routes import whatsapp
     app.include_router(whatsapp.router, prefix="/api/v1")
-    from booking_engine.api.routes import voice_tools_catalog
-    app.include_router(voice_tools_catalog.router)
-    from booking_engine.api.routes import voice_tools_booking
-    app.include_router(voice_tools_booking.router)
-    from booking_engine.api.routes import voice_tools_lifecycle
-    app.include_router(voice_tools_lifecycle.router)
     from booking_engine.api.routes import voice_events
     app.include_router(voice_events.router)
     from booking_engine.api.routes import voice_memos
     app.include_router(voice_memos.router)
-    from booking_engine.api.routes import voice_tools_identity
-    app.include_router(voice_tools_identity.router)
+    from booking_engine.api.routes import sessions
+    app.include_router(sessions.router)
     from booking_engine.api.routes import messaging_tick
     app.include_router(messaging_tick.router, prefix="/api/v1")
-
-    # Remote MCP server for OpenAI Realtime tool calls (session manager is run
-    # by the production entrypoint's lifespan, see booking_engine/asgi.py).
-    from booking_engine.mcp_server import mcp_asgi, set_app
-    app.mount("/mcp", mcp_asgi)
-    set_app(app)
 
     @app.get("/health")
     async def health():

@@ -20,7 +20,10 @@ we don't understand must never widen a limit — if Meta adds `TIER_5K` we
 under-send until someone adds the row, which is the harmless direction.
 
 Sources: Meta's messaging limits (business-initiated conversations per rolling
-24h, per business phone number) and throughput levels. Coexistence numbers are
+24h) and throughput levels. The tier is per **business portfolio**, read from
+the WABA's `whatsapp_business_manager_messaging_limit` — the phone number's
+`messaging_limit_tier` is no longer returned at all (found 2026-09-28: Kairo's
+own real number answers without it, while its WABA says TIER_2K). Coexistence numbers are
 pinned at 20 mps for WhatsApp Business App compatibility.
 """
 from __future__ import annotations
@@ -31,7 +34,8 @@ from __future__ import annotations
 TIER_DAILY_CONVERSATIONS = {
     "TIER_50": 50,
     "TIER_250": 250,
-    "TIER_1K": 1_000,
+    "TIER_1K": 1_000,      # retired by Meta for TIER_2K; kept for old rows
+    "TIER_2K": 2_000,
     "TIER_10K": 10_000,
     "TIER_100K": 100_000,
     "TIER_UNLIMITED": 10**9,

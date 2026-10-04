@@ -4,7 +4,7 @@ from booking_engine.services.call_supervisor import (
 
 _TOOL_DONE = {
     "type": "response.output_item.done",
-    "item": {"type": "mcp_call", "name": "get_services", "id": "mcp_1", "output": "{}"},
+    "item": {"type": "mcp_call", "name": "services_catalog", "id": "mcp_1", "output": "{}"},
 }
 
 # The post-tool nudge carries explicit instructions (unlike the bare greeting
@@ -71,7 +71,7 @@ from booking_engine.services.call_supervisor import log_record
 def test_log_record_marks_tool_start():
     state = SupervisorState()
     ev = {"type": "response.output_item.added",
-          "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services"}}
+          "item": {"type": "mcp_call", "id": "mcp_1", "name": "services_catalog"}}
     rec = log_record("call_A", ev, state)
     assert rec["call_id"] == "call_A"
     assert rec["event"] == "response.output_item.added"
@@ -81,12 +81,12 @@ def test_log_record_marks_tool_start():
 def test_log_record_computes_latency_on_done():
     state = SupervisorState()
     added = {"type": "response.output_item.added",
-             "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services"}}
+             "item": {"type": "mcp_call", "id": "mcp_1", "name": "services_catalog"}}
     done = {"type": "response.output_item.done",
-            "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}}
+            "item": {"type": "mcp_call", "id": "mcp_1", "name": "services_catalog", "output": "{}"}}
     log_record("call_A", added, state)
     rec = log_record("call_A", done, state)
-    assert rec["tool"] == "get_services"
+    assert rec["tool"] == "services_catalog"
     assert isinstance(rec["latency_ms"], int) and rec["latency_ms"] >= 0
     assert "mcp_1" not in state.tool_started_at  # popped
 
@@ -107,12 +107,12 @@ def test_log_record_verbose_includes_full_raw_event():
 def test_log_record_verbose_keeps_computed_tool_latency():
     state = SupervisorState()
     added = {"type": "response.output_item.added",
-             "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services"}}
+             "item": {"type": "mcp_call", "id": "mcp_1", "name": "services_catalog"}}
     done = {"type": "response.output_item.done",
-            "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}}
+            "item": {"type": "mcp_call", "id": "mcp_1", "name": "services_catalog", "output": "{}"}}
     log_record("call_A", added, state, verbose=True)
     rec = log_record("call_A", done, state, verbose=True)
-    assert rec["tool"] == "get_services"
+    assert rec["tool"] == "services_catalog"
     assert isinstance(rec["latency_ms"], int)
     assert rec["item"]["output"] == "{}"  # raw event still present alongside computed fields
 
@@ -153,9 +153,9 @@ async def test_supervise_greets_then_nudges_after_tool():
         {"type": "response.created"},
         {"type": "response.done"},
         {"type": "response.output_item.added",
-         "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services"}},
+         "item": {"type": "mcp_call", "id": "mcp_1", "name": "services_catalog"}},
         {"type": "response.output_item.done",
-         "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}},
+         "item": {"type": "mcp_call", "id": "mcp_1", "name": "services_catalog", "output": "{}"}},
     ])
     await supervise("call_A", "key", connect=_connect_returning(ws))
     # First sent event is the bare greeting; last is the instructed nudge.
@@ -168,9 +168,9 @@ async def test_supervise_dedupes_parallel_tool_completions():
     ws = _FakeWS([
         {"type": "response.done"},
         {"type": "response.output_item.done",
-         "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}},
+         "item": {"type": "mcp_call", "id": "mcp_1", "name": "services_catalog", "output": "{}"}},
         {"type": "response.output_item.done",
-         "item": {"type": "mcp_call", "id": "mcp_2", "name": "check_availability", "output": "{}"}},
+         "item": {"type": "mcp_call", "id": "mcp_2", "name": "availability_search", "output": "{}"}},
     ])
     await supervise("call_A", "key", connect=_connect_returning(ws))
     # greeting + exactly one nudge (second completion suppressed by nudge_pending)
@@ -285,7 +285,7 @@ async def test_supervise_reconnects_once_and_does_not_regreet():
     good_ws = _FakeWS([
         {"type": "response.done"},
         {"type": "response.output_item.done",
-         "item": {"type": "mcp_call", "id": "mcp_1", "name": "get_services", "output": "{}"}},
+         "item": {"type": "mcp_call", "id": "mcp_1", "name": "services_catalog", "output": "{}"}},
     ])
     seq = iter([drop_ws, good_ws])
 

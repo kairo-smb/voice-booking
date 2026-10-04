@@ -232,7 +232,9 @@ async def enqueue_campaign(
             "last_at": when[-1].isoformat() if when else None}
 
 
-async def send_due(*, settings) -> dict:
+async def send_due(
+    *, settings, shop_id: UUID | None = None, campaign_key: str | None = None,
+) -> dict:
     """Send everything due right now, within each shop's daily cap.
 
     Dispatch is serial and **paced**. Serial because the loop mutates per-shop
@@ -241,11 +243,16 @@ async def send_due(*, settings) -> dict:
     claim MAX_PER_TICK rows across every tenant at once: Meta's per-number
     ceiling is far above that, but the Graph API's app-level limit is shared
     by all of them and is the one we can actually trip.
+
+    `shop_id` + `campaign_key` scope it to one campaign — the route's inline
+    send for a single win-back. Every check below still applies.
     """
     counts = {"sent": 0, "suppressed": 0, "failed": 0, "deferred": 0,
               "rate_capped": 0, "requeued": await wq.requeue_stuck()}
 
-    claimed = await wq.claim_due(MAX_PER_TICK)
+    claimed = await wq.claim_due(
+        MAX_PER_TICK, shop_id=shop_id, campaign_key=campaign_key,
+    )
     if not claimed:
         return counts
 
@@ -321,7 +328,7 @@ async def send_due(*, settings) -> dict:
         # credit line to share: the salon's own card is on its own WABA and
         # Meta bills it directly, so charging AI credits here would bill the
         # same message twice. The SMS path still debits — there Kairo really
-        # does pay Twilio. See CLAUDE.md §2026-08-24.
+        # does pay Twilio. See AGENTS.md §2026-08-24.
         await pacer.wait()
         try:
             provider_sid = await meta.send_template(

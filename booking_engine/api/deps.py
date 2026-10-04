@@ -17,7 +17,7 @@ async def require_tool_token(
     settings: Annotated[Settings, Depends(_get_settings)],
 ) -> bool:
     """Bearer-auth dependency for tool + event webhooks (OpenAI → us)."""
-    expected = settings.openai_tool_secret
+    expected = settings.voice_agent_tool_secret
     if not expected:
         raise HTTPException(500, "Tool secret not configured")
     header = request.headers.get("Authorization", "")

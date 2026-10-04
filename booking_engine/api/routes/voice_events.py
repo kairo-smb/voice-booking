@@ -1,6 +1,7 @@
 """OpenAI session-lifecycle webhooks.
 
-session.started → identify caller, assemble system prompt, return as session update.
+session.started → identify caller, assemble the persona prompt, return as session update.
+                  (Tools are not returned: they are marketing-engine's MCP server now.)
 session.turn    → append transcript fragment to voice_agent.call_turns.
 session.ended   → finalize call row, debit tokens, trigger post-hoc classifier if needed.
 """
@@ -73,7 +74,6 @@ async def session_started(
     return Envelope[dict](ok=True, data={
         "call_id": str(call_id),
         "prompt": assembled.prompt,
-        "tools": assembled.tools,
         "voice": assembled.voice,
     })
 

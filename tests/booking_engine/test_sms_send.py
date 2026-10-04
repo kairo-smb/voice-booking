@@ -238,7 +238,7 @@ async def test_shop_without_a_number_cannot_send(monkeypatch):
 @pytest.mark.asyncio
 async def test_status_callback_url_is_passed_to_the_provider(monkeypatch):
     # Without this Twilio never calls POST /sms/webhook/status, so the row
-    # stays 'sent' forever and price_usd stays NULL forever (CLAUDE.md).
+    # stays 'sent' forever and price_usd stays NULL forever (AGENTS.md).
     rec = _Recorder()
     captured = {}
 
