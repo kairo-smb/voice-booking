@@ -15,7 +15,7 @@ from typing import Any, NamedTuple
 # The set a handler may act on. Everything else — price, complaint, promo_reply,
 # opt_out, other — is a human's. Routing is an explicit allowlist, never the
 # absence of a red flag.
-WHITELIST = ("booking", "reschedule", "cancel", "hours")
+WHITELIST = ("booking", "reschedule", "cancel", "hours", "advice")
 
 ROUTING_CONFIDENCE = 0.7
 

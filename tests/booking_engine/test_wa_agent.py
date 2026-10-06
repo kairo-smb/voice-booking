@@ -763,7 +763,7 @@ async def test_the_engine_is_handed_only_the_session_and_the_transcript(wired):
     — so this side reads none of it and sends none of it."""
     await run(wired)
     assert set(wired.turn.last) == {"shop_id", "call_id", "messages", "now",
-                                    "settings"}
+                                    "settings", "intent"}
     assert wired.turn.last["messages"] == [
         {"role": "user", "content": "vorrei prenotare"}]
 
@@ -890,3 +890,8 @@ async def test_a_human_decision_never_reaches_the_agent(monkeypatch):
     await wa_inbound.process(SENDER, r)
 
     assert handled == []
+
+
+async def test_the_routed_intent_is_forwarded_to_the_engine(wired):
+    await run(wired, intent="advice")
+    assert wired.turn.last["intent"] == "advice"

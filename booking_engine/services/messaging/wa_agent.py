@@ -212,6 +212,7 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
         messages=await _messages(shop_id, phone, state.get("started_at")),
         now=datetime.now(timezone.utc),
         settings=settings,
+        intent=intent,
     )
     logger.info(
         "whatsapp.agent_turn shop=%s call=%s escalate=%s reason=%s tools=%s cost=%s",
