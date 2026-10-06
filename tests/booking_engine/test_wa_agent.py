@@ -758,7 +758,8 @@ async def test_a_failed_credit_read_does_not_stop_the_message(stateful,
 # --- the payload the engine is handed ---------------------------------------
 
 async def test_the_engine_is_handed_only_the_session_and_the_transcript(wired):
-    """The engine loads its own context — shop name and timezone off the shop,
+    """The engine loads its own context (the session, the transcript and the
+    routed intent are all this side sends) — shop name and timezone off the shop,
     the customer via `customers_identify`, the catalogue via `services_catalog`
     — so this side reads none of it and sends none of it."""
     await run(wired)

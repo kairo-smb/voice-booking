@@ -204,7 +204,7 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
                           escalate=reason in _ESCALATING_REASONS)
         return
 
-    # 5. One turn. Only the session and the transcript: the engine loads the
+    # 5. One turn. The session, the transcript and the routed intent: the engine loads the
     #    shop, the customer and the catalogue itself from the session row.
     turn = await marketing_agent.turn(
         shop_id=shop_id,
