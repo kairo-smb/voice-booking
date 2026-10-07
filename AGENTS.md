@@ -694,6 +694,15 @@ reopens it. Service conversations are free (Meta, 2024-11-01) and the Tech
 Provider model has no credit line to share, so `send_credits` stays out of the
 reply path entirely; only AI work is metered.
 
+**Template sends pay a flat Kairo fee (2026-10-07, owner decision).** Every
+template `send_due` delivers — reminder, review request, campaign — debits
+`whatsapp_pricing.SEND_CREDITS` (185) via `charge_actual(run_type=
+'whatsapp_send')`, checked before the send and charged only after Meta accepts,
+the SMS path's ordering. It is a platform fee on top of Meta's, not a recovery
+of it, so it is flat across categories. An empty basket marks the row `failed`
+(`insufficient_credits`) rather than deferring it. Free-form replies and the 20h
+nudge (`send_text`) do not pay it.
+
 **Coexistence is why echo handling is load-bearing rather than a nicety.** Every
 sender is `source='coexistence'`: the number is still live in the WhatsApp
 Business App and the owner answers from their phone out of habit. Meta reports

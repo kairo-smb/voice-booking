@@ -634,7 +634,8 @@ async def mark_sent(
 ) -> None:
     """`provider_sid` is Meta's `wamid`; `price_usd` our own send-time estimate.
 
-    `credits` stays None on this channel — the salon pays Meta directly.
+    `credits` is Kairo's send fee as collected; None when the charge was
+    refused. Meta's own fee is the salon's, on its WABA card.
     """
     await execute_void(
         """
