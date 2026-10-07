@@ -471,7 +471,7 @@ switch it off:
 | reason | meaning |
 |---|---|
 | `not_opted_in` | `voice_agent.shop_config.whatsapp_agent_enabled` is false. **The default** — a salon that has not asked for a robot must never get one |
-| `intent_not_whitelisted` | the session's intent is outside `wa_routing.WHITELIST`. Opted in is not enough; a complaint is a person's |
+| `intent_not_whitelisted` | the session's intent is outside `wa_routing.WHITELIST` (`booking`, `reschedule`, `cancel`, `hours`, `advice`). Opted in is not enough; a complaint is a person's. The menu offers Prenotare / Consulenza AI / Altro; `reschedule`/`cancel` arrive via free text. The routed intent is forwarded to the engine's `/whatsapp/agent` |
 | `escalated` | the session was handed to a human and stays handed over — the *next* message does not run a turn either |
 | `human_took_over` | the owner replied, from the webapp (`kairo`) or their phone (`phone`). Not marked escalated: they are already handling it |
 | `turn_limit` | `MAX_SESSION_TURNS` (12) reached **in this session**. A booking is four or five exchanges; twelve means the conversation is not going where the agent thinks it is, and the honest move is a person. Escalated, because it is something happening rather than a thread that was never the agent's |

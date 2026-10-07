@@ -242,7 +242,7 @@ async def test_low_confidence_sends_the_button_menu(wired):
     assert wired.send_interactive.count == 1
     assert wired.send_interactive.last["buttons"] == [
         ("booking", "Prenotare"),
-        ("reschedule", "Spostare o disdire"),
+        ("advice", "Consulenza AI"),
         ("other", "Altro"),
     ]
     assert wired.send_interactive.last["to"] == PHONE
@@ -478,3 +478,8 @@ async def test_a_typed_message_carries_no_media_id(monkeypatch):
     )
 
     assert scheduled[0][1]["media_id"] is None
+
+
+def test_menu_titles_fit_meta_and_stay_at_three():
+    assert len(wa_inbound.MENU_BUTTONS) == 3
+    assert all(len(t) <= 20 for _, t in wa_inbound.MENU_BUTTONS)

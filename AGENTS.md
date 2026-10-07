@@ -6,6 +6,21 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-10-06 — WhatsApp "Consulenza AI": advice intent, new menu, intent forwarded
+
+The routing menu is now **Prenotare / Consulenza AI / Altro** (still three
+reply buttons, Meta's cap; titles under 20 characters). "Spostare o disdire"
+left it: `reschedule` and `cancel` stay in `wa_routing.WHITELIST` and are
+reached by Jev on free text, which is how those requests arrive anyway. `advice`
+joins the whitelist (services, and products when the salon sells retail).
+`wa_agent.handle` now forwards the routed `intent` in the `/whatsapp/agent`
+payload (`{shop_id, call_id, messages, now, intent}`; the key is omitted when
+unset) and the engine uses it to pick the turn's tool set. Both sides tolerate
+the other being older: an older engine ignores `intent`, and an older
+voice-booking sends none, so the engine treats the turn as booking. **Deploy
+order: engine before voice-booking.** Nothing in the analytics views
+(`26_whatsapp_retention.sql`) enumerates menu ids.
+
 ## 2026-10-03 — asyncpg statement cache off: the stale-plan retry never worked behind pgbouncer
 
 GlitchTip VOICE-BOOKING-2 (`InvalidCachedStatementError: cached plan must
