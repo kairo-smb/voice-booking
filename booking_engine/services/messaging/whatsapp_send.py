@@ -17,8 +17,8 @@ one day's cap, `spread` rolls onto following days rather than piling
 everything onto today for `send_due` to defer an hour at a time.
 
 Sending goes straight to Meta's Cloud API — no BSP — and is *paced*: see
-`send_due`. Nothing here debits AI credits, because the salon's own card is
-on its own WABA and Meta charges it directly.
+`send_due`. Meta bills the salon's own card for the conversation; Kairo charges
+its flat `SEND_CREDITS` per template on top — see whatsapp_pricing.
 
 Consent is re-read at send time, not trusted from enqueue: a queued row can
 sit for hours, and a customer who withdraws consent in-store at 11:00 must not
@@ -34,12 +34,14 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from booking_engine.clients import meta_whatsapp as meta
+from booking_engine.clients import webapp_credits
 from booking_engine.db import sms_queries
+from booking_engine.db import token_basket_queries as tbq
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging.pacer import Pacer
 from booking_engine.services.messaging.sms_send import _has_active_consent
-from booking_engine.services.messaging.whatsapp_pricing import estimate_usd
+from booking_engine.services.messaging.whatsapp_pricing import SEND_CREDITS, estimate_usd
 from booking_engine.services.messaging.whatsapp_templates import clean_variable, render
 from booking_engine.services.phone_normalize import normalize_e164
 
@@ -324,11 +326,16 @@ async def send_due(
         if isinstance(variables, str):     # asyncpg hands jsonb back as text
             variables = json.loads(variables)
 
-        # No credit check and no debit. As a Meta Tech Provider we have no
-        # credit line to share: the salon's own card is on its own WABA and
-        # Meta bills it directly, so charging AI credits here would bill the
-        # same message twice. The SMS path still debits — there Kairo really
-        # does pay Twilio. See AGENTS.md §2026-08-24.
+        # Kairo's send fee, checked now and debited only after Meta accepts —
+        # the SMS path's ordering, for the same reason: a rejected send must
+        # not be billed. Meta's own fee is separate and goes to the salon's
+        # card. An empty basket fails the row rather than deferring it: a
+        # reminder retried after the appointment is worse than none.
+        if await tbq.get_balance(shop_id) < SEND_CREDITS:
+            await wq.mark_failed(message_id=msg["id"], error_code="insufficient_credits")
+            counts["failed"] += 1
+            continue
+
         await pacer.wait()
         try:
             provider_sid = await meta.send_template(
@@ -362,9 +369,23 @@ async def send_due(
             counts["failed"] += 1
             continue
 
+        # ponytail: the message is already gone, so a refused charge can only be
+        # logged, not undone — reachable only if the basket drained since the
+        # check above. The webapp's charge is one locked transaction.
+        charged = await webapp_credits.charge_actual(
+            shop_id=shop_id, run_type=webapp_credits.WHATSAPP_SEND,
+            run_ref=str(msg["id"]), credits=SEND_CREDITS, settings=settings,
+        )
+        if not charged:
+            logger.warning(
+                "whatsapp.unbilled_send shop=%s message=%s credits=%s",
+                shop_id, msg["id"], SEND_CREDITS,
+            )
+
         await wq.mark_sent(
             message_id=msg["id"], provider_sid=provider_sid,
-            price_usd=_ESTIMATED_USD_PER_MESSAGE, credits=None,
+            price_usd=_ESTIMATED_USD_PER_MESSAGE,
+            credits=SEND_CREDITS if charged else None,
         )
         remaining[shop_id] -= 1
         counts["sent"] += 1
