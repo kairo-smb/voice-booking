@@ -6,6 +6,21 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-10-06 — WhatsApp "Consulenza AI": advice intent, new menu, intent forwarded
+
+The routing menu is now **Prenotare / Consulenza AI / Altro** (still three
+reply buttons, Meta's cap; titles under 20 characters). "Spostare o disdire"
+left it: `reschedule` and `cancel` stay in `wa_routing.WHITELIST` and are
+reached by Jev on free text, which is how those requests arrive anyway. `advice`
+joins the whitelist (services, and products when the salon sells retail).
+`wa_agent.handle` now forwards the routed `intent` in the `/whatsapp/agent`
+payload (`{shop_id, call_id, messages, now, intent}`; the key is omitted when
+unset) and the engine uses it to pick the turn's tool set. Both sides tolerate
+the other being older: an older engine ignores `intent`, and an older
+voice-booking sends none, so the engine treats the turn as booking. **Deploy
+order: engine before voice-booking.** Nothing in the analytics views
+(`26_whatsapp_retention.sql`) enumerates menu ids.
+
 ## 2026-10-03 — asyncpg statement cache off: the stale-plan retry never worked behind pgbouncer
 
 GlitchTip VOICE-BOOKING-2 (`InvalidCachedStatementError: cached plan must
@@ -693,6 +708,15 @@ inside the window, inviting them to write back — free, and their reply is what
 reopens it. Service conversations are free (Meta, 2024-11-01) and the Tech
 Provider model has no credit line to share, so `send_credits` stays out of the
 reply path entirely; only AI work is metered.
+
+**Template sends pay a flat Kairo fee (2026-10-07, owner decision).** Every
+template `send_due` delivers — reminder, review request, campaign — debits
+`whatsapp_pricing.SEND_CREDITS` (185) via `charge_actual(run_type=
+'whatsapp_send')`, checked before the send and charged only after Meta accepts,
+the SMS path's ordering. It is a platform fee on top of Meta's, not a recovery
+of it, so it is flat across categories. An empty basket marks the row `failed`
+(`insufficient_credits`) rather than deferring it. Free-form replies and the 20h
+nudge (`send_text`) do not pay it.
 
 **Coexistence is why echo handling is load-bearing rather than a nicety.** Every
 sender is `source='coexistence'`: the number is still live in the WhatsApp

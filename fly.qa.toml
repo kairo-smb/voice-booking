@@ -7,7 +7,7 @@ primary_region = 'fra'
 [env]
   SENTRY_ENVIRONMENT = 'qa' # GlitchTip; SENTRY_DSN is a fly secret
   # In-process scheduler (services/scheduler.py), fleet-wide cadences.
-  WHATSAPP_SEND_LOOP_SECONDS = '60'
+  WHATSAPP_SEND_LOOP_SECONDS = '0' # off: the hourly tick drains; a per-minute drain kept Neon from ever scaling to zero
   MESSAGING_TICK_SECONDS = '3600'
   FORWARDING_HEARTBEAT_SECONDS = '86400'
 
