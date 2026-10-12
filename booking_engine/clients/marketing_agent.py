@@ -72,12 +72,13 @@ async def turn(
     messages: list[dict[str, str]],
     now: datetime,
     settings: Settings,
+    intent: str | None = None,
 ) -> Turn:
     """Run one turn. Never raises; every failure is an escalation with a reason."""
     try:
         return await _turn(
             shop_id=shop_id, call_id=call_id, messages=messages, now=now,
-            settings=settings,
+            settings=settings, intent=intent,
         )
     except Exception:  # noqa: BLE001 — every failure here is the same refusal
         logger.exception("whatsapp.agent_unexpected_error shop=%s call=%s",
@@ -92,6 +93,7 @@ async def _turn(
     messages: list[dict[str, str]],
     now: datetime,
     settings: Settings,
+    intent: str | None = None,
 ) -> Turn:
     base = (settings.market_intel_api_url or "").rstrip("/")
     secret = settings.market_intel_secret or ""
@@ -117,6 +119,10 @@ async def _turn(
         "messages": messages,
         "now": now.isoformat(),
     }
+    # The routed intent picks the engine's tool set (`advice` adds the product
+    # tools). Omitted when unset: an older engine ignores it either way.
+    if intent:
+        payload["intent"] = intent
 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:

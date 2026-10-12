@@ -184,3 +184,12 @@ def test_the_module_imports_no_clock_and_no_io():
     banned = ("booking_engine.db", "asyncpg", "httpx", "datetime.datetime")
     assert not [name for name in imported if name.startswith(banned)]
     assert "datetime.datetime" not in imported
+
+
+def test_advice_button_routes():
+    assert r.decide(history=[msg(1)], button_id="advice") == r.Decision("route", "advice")
+
+
+def test_confident_advice_verdict_routes():
+    d = r.decide(history=[msg(1)], verdict={"intent": "advice", "confidence": 0.9})
+    assert d == r.Decision("route", "advice")

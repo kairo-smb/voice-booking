@@ -43,3 +43,19 @@ async def test_posts_only_the_session_and_the_transcript():
         "messages": [{"role": "user", "content": "vorrei prenotare"}],
         "now": now.isoformat(),
     }
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_intent_is_posted_when_given():
+    route = respx.post(URL).mock(return_value=httpx.Response(
+        200, json={"data": {"text": "Ok", "escalate": False}}))
+    await marketing_agent.turn(
+        shop_id=uuid4(), call_id=uuid4(),
+        messages=[{"role": "user", "content": "che shampoo?"}],
+        now=datetime(2026, 10, 6, 11, 0, tzinfo=timezone.utc),
+        settings=Settings(market_intel_api_url="http://market-intel.test",
+                          market_intel_secret="test-secret"),
+        intent="advice",
+    )
+    assert json.loads(route.calls[0].request.content)["intent"] == "advice"

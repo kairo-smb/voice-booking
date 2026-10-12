@@ -8,7 +8,9 @@ import respx
 
 from booking_engine.api.routes import whatsapp as whatsapp_routes
 from booking_engine.clients import meta_whatsapp as meta
+from booking_engine.clients import webapp_credits
 from booking_engine.db import sms_queries
+from booking_engine.db import token_basket_queries as tbq
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.services.messaging import meta_limits
 from booking_engine.services.messaging import whatsapp_onboarding as wo
@@ -359,10 +361,10 @@ async def test_enqueue_counts_a_repeat_campaign_as_already_sent(monkeypatch):
 
 def _patch_send_due(
     monkeypatch, *, claimed, sender, customer,
-    cooled=(),
+    cooled=(), balance=10_000, charge_ok=True,
 ):
     spy = {"sent": [], "suppressed": [], "failed": [], "deferred": [],
-           "consent_withdrawn": []}
+           "consent_withdrawn": [], "charged": []}
 
     async def _claim(limit, **kw):
         return claimed
@@ -398,6 +400,14 @@ def _patch_send_due(
     monkeypatch.setattr(wq, "mark_failed", _mark_failed)
     monkeypatch.setattr(wq, "requeue_one", _requeue_one)
     monkeypatch.setattr(wq, "withdraw_marketing_consent", _withdraw)
+
+    async def _balance(shop_id):
+        return balance
+    async def _charge(**kw):
+        spy["charged"].append(kw)
+        return charge_ok
+    monkeypatch.setattr(tbq, "get_balance", _balance)
+    monkeypatch.setattr(webapp_credits, "charge_actual", _charge)
     return spy
 
 
@@ -443,23 +453,67 @@ async def test_send_due_sends_via_meta_and_records_the_wamid(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_due_never_debits_credits(monkeypatch):
-    """The salon's card is on the salon's WABA — Meta bills it, not us.
-
-    Debiting here would charge the same message twice. Guarded by asserting
-    the send path records no credits at all, rather than trusting that nobody
-    re-adds the import later.
-    """
+async def test_send_due_charges_the_flat_send_fee_after_meta_accepts(monkeypatch):
+    """185 credits per template, whatever its category — Meta's fee is separate."""
+    msg = _message()
     spy = _patch_send_due(
-        monkeypatch, claimed=[_message()],
+        monkeypatch, claimed=[msg],
         sender=_online_sender(), customer=_consenting(),
     )
     _patch_meta_send(monkeypatch, _ok_send())
 
     await ws.send_due(settings=FakeSettings())
 
+    assert spy["charged"] == [{
+        "shop_id": SHOP, "run_type": "whatsapp_send", "run_ref": str(msg["id"]),
+        "credits": 185, "settings": spy["charged"][0]["settings"],
+    }]
+    assert spy["sent"][0]["credits"] == 185
+    assert spy["sent"][0]["price_usd"] > 0        # Meta's fee, still quoted
+
+
+@pytest.mark.asyncio
+async def test_send_due_fails_without_reaching_meta_on_an_empty_basket(monkeypatch):
+    spy = _patch_send_due(
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(), customer=_consenting(), balance=184,
+    )
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["failed"] == 1
+    assert spy["failed"][0]["error_code"] == "insufficient_credits"
+    assert spy["charged"] == []
+
+
+@pytest.mark.asyncio
+async def test_send_due_never_charges_a_send_meta_rejected(monkeypatch):
+    spy = _patch_send_due(
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(), customer=_consenting(),
+    )
+    async def _rejects(**kw):
+        raise meta.MetaError(132000, "template param count mismatch")
+    _patch_meta_send(monkeypatch, _rejects)
+
+    await ws.send_due(settings=FakeSettings())
+
+    assert spy["charged"] == []
+
+
+@pytest.mark.asyncio
+async def test_send_due_records_no_credits_when_the_charge_was_refused(monkeypatch):
+    spy = _patch_send_due(
+        monkeypatch, claimed=[_message()],
+        sender=_online_sender(), customer=_consenting(), charge_ok=False,
+    )
+    _patch_meta_send(monkeypatch, _ok_send())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["sent"] == 1                    # already gone; only logged
     assert spy["sent"][0]["credits"] is None
-    assert spy["sent"][0]["price_usd"] > 0        # still quoted, never charged
 
 
 @pytest.mark.asyncio

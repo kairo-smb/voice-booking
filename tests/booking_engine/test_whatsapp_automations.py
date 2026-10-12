@@ -783,8 +783,17 @@ async def test_send_due_does_not_suppress_a_utility_message_for_no_consent(monke
     monkeypatch.setattr(wq, "mark_suppressed", _mark_suppressed)
     from booking_engine.clients import meta_whatsapp as meta
     monkeypatch.setattr(meta, "send_template", _send)
+    from booking_engine.clients import webapp_credits
+    from booking_engine.db import token_basket_queries as tbq
+    async def _balance(shop_id):
+        return 10_000
+    async def _charge(**kw):
+        return True
+    monkeypatch.setattr(tbq, "get_balance", _balance)
+    monkeypatch.setattr(webapp_credits, "charge_actual", _charge)
 
     counts = await ws.send_due(settings=FakeSettings())
 
     assert counts["sent"] == 1 and counts["suppressed"] == 0
     assert len(spy["sent"]) == 1
+    assert spy["sent"][0]["credits"] == 185       # a reminder pays the send fee too

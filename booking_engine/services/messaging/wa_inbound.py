@@ -40,9 +40,13 @@ MENU_BODY = "Non ho capito bene, cosa ti serve?"
 # `other` is deliberately NOT in `wa_routing.WHITELIST`: tapping it routes to
 # a human, which is the honest answer for a request no handler covers. The
 # titles are under Meta's 20-character limit.
+#
+# "Spostare o disdire" left the menu on 2026-10-06 to make room for advice:
+# `reschedule`/`cancel` stay whitelisted and are reached by Jev on free text,
+# which is how those requests arrive anyway.
 MENU_BUTTONS = [
     ("booking", "Prenotare"),
-    ("reschedule", "Spostare o disdire"),
+    ("advice", "Consulenza AI"),
     ("other", "Altro"),
 ]
 

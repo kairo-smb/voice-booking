@@ -14,8 +14,10 @@ from typing import Any, NamedTuple
 
 # The set a handler may act on. Everything else — price, complaint, promo_reply,
 # opt_out, other — is a human's. Routing is an explicit allowlist, never the
-# absence of a red flag.
-WHITELIST = ("booking", "reschedule", "cancel", "hours")
+# absence of a red flag. `advice` is "Consulenza AI" (services, and products when
+# the salon sells retail): the engine's advice turn handles it, selected by the
+# `intent` forwarded to `/whatsapp/agent`.
+WHITELIST = ("booking", "reschedule", "cancel", "hours", "advice")
 
 ROUTING_CONFIDENCE = 0.7
 

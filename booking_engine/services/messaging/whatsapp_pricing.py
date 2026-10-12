@@ -1,22 +1,19 @@
-"""What one WhatsApp message costs the salon, per Meta conversation category.
+"""What one WhatsApp template send costs the salon: Meta's fee plus Kairo's.
 
-**One party bills now, not two.** Under the Twilio model this table added
-Twilio's flat per-message platform fee to Meta's rate. Going direct as a Meta
-Tech Provider removes that fee *and* removes Kairo from the transaction
-entirely: the salon attaches its own card to its own WABA and Meta charges it
-directly (a Tech Provider, unlike a Solution Partner, has no credit line to
-share). So nothing here is a cost Kairo recovers — it is what the owner will
-see on their own Meta invoice.
+**Two parties bill, for two different things.** As a Meta Tech Provider we have
+no credit line to share: the salon attaches its own card to its own WABA and
+Meta charges it directly, per conversation category. `META_USD_IT` is that fee
+— an **estimate** shown to the owner before they click send and written to
+`outbound_messages.price_usd`. Meta reports no amount on send and none on the
+status webhook, so there is no later correction; the invoice is Meta's.
 
-That is why `send_credits` is gone from this module and `try_debit_for_message`
-is gone from the send path: charging AI credits on top would bill the salon
-twice for one message. The SMS path still does both, correctly — there Kairo
-really does pay Twilio.
-
-These remain **estimates**, shown to the owner before they click send and
-written to `outbound_messages.price_usd` at send time. Meta reports no amount
-on send and none on the status webhook, so unlike the SMS path there is no
-later correction to a real price. The invoice is Meta's, not ours.
+On top of it Kairo charges a flat `SEND_CREDITS` per template actually
+delivered to Meta (owner decision, 2026-10-07): a platform fee for the send,
+not a recovery of Meta's cost, the same for reminders, review requests and
+marketing. It is not a margin on anything, so it never scales with Meta's
+category rate. Generating a message's text is LLM work and is metered
+separately by the engine; free-form replies inside the 24h window are the AI
+responder's, which bills only its generation — neither path pays this fee.
 
 ponytail: a flat IT-only table, not a country matrix. Every salon is Italian and
 every recipient is an Italian consumer; add the country dimension when the first
@@ -33,6 +30,10 @@ META_USD_IT = {
     "authentication": 0.0512,
     "service": 0.0,        # free-form reply inside the 24h session window
 }
+
+# Kairo credits per template send (1000 credits = $1 list), charged after Meta
+# accepts the message. Flat across categories by design — see the docstring.
+SEND_CREDITS = 185
 
 
 def estimate_usd(kind: str) -> float:

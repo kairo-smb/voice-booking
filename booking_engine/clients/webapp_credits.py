@@ -38,6 +38,9 @@ SMS_SEND = "sms_send"
 # rather than the 2× pass-through `send_credits` applies to Twilio cost — see
 # `services/messaging/wa_transcribe.py` for the derivation.
 WHATSAPP_TRANSCRIBE = "whatsapp_transcribe"
+# Kairo's flat fee per WhatsApp template send (whatsapp_pricing.SEND_CREDITS).
+# Not Meta's fee — the salon pays that on its own WABA card.
+WHATSAPP_SEND = "whatsapp_send"
 
 
 async def charge_actual(
