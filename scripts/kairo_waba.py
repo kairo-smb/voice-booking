@@ -120,6 +120,17 @@ def _body_component(tpl) -> dict:
     }
 
 
+def _components(tpl) -> list[dict]:
+    """BODY plus BUTTONS, for create and edit alike (an edit without the BUTTONS
+    component would strip them)."""
+    comps = [_body_component(tpl)]
+    if tpl.buttons:
+        comps.append({"type": "BUTTONS", "buttons": [
+            {"type": "QUICK_REPLY", "text": b} for b in tpl.buttons
+        ]})
+    return comps
+
+
 def _live_body(live: dict) -> dict | None:
     for comp in live.get("components", []):
         if comp.get("type") == "BODY":
@@ -250,9 +261,7 @@ def push_templates(a) -> None:
             status, body = _call("POST", f"{_waba()}/message_templates", json={
                 "name": name, "language": language,
                 "category": tpl.category,
-                "components": [want] + ([{"type": "BUTTONS", "buttons": [
-                    {"type": "QUICK_REPLY", "text": b} for b in tpl.buttons
-                ]}] if tpl.buttons else []),
+                "components": _components(tpl),
             })
             # One failure must not abort the rest: the whole bug this replaces
             # was a single 4xx swallowing every later entry in the catalogue.
@@ -262,6 +271,8 @@ def push_templates(a) -> None:
                 print(f"created    {name}  {body.get('status', '')}")
             continue
 
+        # Only BODY is compared: a change to the buttons alone is not detected
+        # here, and needs a new template key (same rule as a body change).
         got = _live_body(have) or {}
         if got.get("text") == want["text"] and got.get("example") == want["example"]:
             print(f"unchanged  {name}  {have['status']}")
@@ -282,7 +293,7 @@ def push_templates(a) -> None:
         if a.dry_run:
             print(f"edit       {name}  ({have['status']} -> PENDING)"); continue
 
-        status, body = _call("POST", have["id"], json={"components": [want]})
+        status, body = _call("POST", have["id"], json={"components": _components(tpl)})
         if status >= 400:
             print(f"FAILED     {name}  {json.dumps(body)}"); failed.append(name)
         else:

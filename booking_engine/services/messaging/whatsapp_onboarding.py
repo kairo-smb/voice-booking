@@ -576,6 +576,7 @@ async def ensure_templates(
                 status = await meta.edit_template(
                     template_id=meta_id, token=row["access_token"],
                     body_text=tpl.body, sample_variables=tpl.sample,
+                    buttons=tpl.buttons,
                 )
             else:
                 meta_id, status = await meta.create_template(

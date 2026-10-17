@@ -237,7 +237,11 @@ async def session_transcript(
     Templates and campaign sends are included when sent up to OUTREACH_LOOKBACK
     before the session opened, labelled "[Jev outreach]" (see `label_outreach`):
     a promo can no longer land inside a conversation, so one that is here is
-    what the customer is replying to, and the agent must know it was ours.
+    what the customer is replying to, and the agent must know it was ours. Only
+    outreach the customer has not yet answered counts: one they replied to in an
+    earlier conversation must not come back as the topic of a new one. Plain
+    replies from before the session are never pulled in. Utility sends during
+    the session (a receipt, a reminder) are labelled outreach too — accepted.
 
     `limit` is a guard on the prompt, not on the conversation: MAX_SESSION_TURNS
     caps a session long before 40 messages, so this only ever bites on a thread
@@ -245,6 +249,8 @@ async def session_transcript(
     """
     rows = await execute(
         f"""
+        -- Newest rows win the LIMIT; re-sorted oldest-first outside.
+        SELECT * FROM (
         SELECT * FROM (
             SELECT 'user' AS role,
                    coalesce(nullif(i.transcript, ''), i.body) AS content,
@@ -266,13 +272,25 @@ async def session_transcript(
                AND (
                      (o.template_name IS NULL AND o.campaign_key IS NULL
                       AND coalesce(o.sent_at, o.created_at) >= $3)
-                  OR (o.sent_at IS NOT NULL
-                      AND o.sent_at >= $3 - interval '{OUTREACH_LOOKBACK}')
+                  OR ((o.template_name IS NOT NULL OR o.campaign_key IS NOT NULL)
+                      AND coalesce(o.sent_at, o.created_at) >= $3)
+                  OR ((o.template_name IS NOT NULL OR o.campaign_key IS NOT NULL)
+                      AND o.sent_at IS NOT NULL
+                      AND o.sent_at >= $3 - interval '{OUTREACH_LOOKBACK}'
+                      AND o.sent_at > coalesce((
+                            SELECT max(i2.received_at)
+                              FROM whatsapp.inbound_messages i2
+                             WHERE i2.shop_id = $1
+                               AND ltrim(i2.from_phone, '+') = ltrim($2, '+')
+                               AND i2.received_at < $3
+                          ), '-infinity'::timestamptz))
                )
-        ) t
-         WHERE coalesce(t.content, '') <> ''
-         ORDER BY t.at ASC
+        ) u
+         WHERE coalesce(u.content, '') <> ''
+         ORDER BY u.at DESC
          LIMIT $4
+        ) t
+         ORDER BY t.at ASC
         """,
         shop_id, phone, since, limit,
     )

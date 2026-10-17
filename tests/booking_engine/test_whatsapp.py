@@ -3037,3 +3037,21 @@ async def test_create_template_sends_quick_reply_buttons(monkeypatch):
         {"type": "QUICK_REPLY", "text": "Prenoto"},
         {"type": "QUICK_REPLY", "text": "Altro orario"},
     ]}
+
+
+@pytest.mark.asyncio
+async def test_edit_template_keeps_quick_reply_buttons(monkeypatch):
+    seen = {}
+    async def _request(method, path, *, token, json_body=None, **kw):
+        seen.update(json_body)
+        return {"status": "PENDING"}
+    monkeypatch.setattr(meta, "_request", _request)
+
+    await meta.edit_template(
+        template_id="T1", token="t", body_text="Ciao {{1}}",
+        sample_variables={"1": "Giulia"}, buttons=("Prenoto", "Altro orario"),
+    )
+    assert seen["components"][1] == {"type": "BUTTONS", "buttons": [
+        {"type": "QUICK_REPLY", "text": "Prenoto"},
+        {"type": "QUICK_REPLY", "text": "Altro orario"},
+    ]}

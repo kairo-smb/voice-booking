@@ -37,12 +37,34 @@ class TestSessionTranscriptLive:
                     "        'gap_fill:x:2026-10-20T15:00', $2)",
                     shop_id, since - timedelta(hours=20),
                 )
+                # Excluded: a plain reply from the previous session (20h back),
+                # and a promo the customer already answered in an earlier
+                # conversation (sent 40h back, replied to 39h back).
+                await conn.execute(
+                    "INSERT INTO whatsapp.outbound_messages "
+                    "(shop_id, from_number, to_phone, preview, status, sent_at) "
+                    "VALUES ($1, '+393339990000', '393331110077', 'Risposta vecchia', 'sent', $2), "
+                    "       ($1, '+393339990000', '393331110077', 'Promo vecchia', 'sent', $3)",
+                    shop_id, since - timedelta(hours=20), since - timedelta(hours=40),
+                )
+                await conn.execute(
+                    "UPDATE whatsapp.outbound_messages SET template_name = 'it_promo_v1', "
+                    "campaign_key = 'bulk_x' WHERE shop_id = $1 AND preview = 'Promo vecchia'",
+                    shop_id,
+                )
+                await conn.execute(
+                    "INSERT INTO whatsapp.inbound_messages (shop_id, from_phone, body, received_at) "
+                    "VALUES ($1, '393331110077', 'Ok grazie', $2)",
+                    shop_id, since - timedelta(hours=39),
+                )
                 rows = await ws.session_transcript(shop_id=shop_id, phone=PHONE, since=since)
                 assert len(rows) == 1
                 assert rows[0]["role"] == "assistant"
                 assert rows[0]["content"].startswith("[Jev outreach")
                 assert rows[0]["content"].endswith("Ciao Giulia")
             finally:
+                await conn.execute(
+                    "DELETE FROM whatsapp.inbound_messages WHERE shop_id = $1", shop_id)
                 await conn.execute(
                     "DELETE FROM whatsapp.outbound_messages WHERE shop_id = $1", shop_id)
                 await conn.execute(
