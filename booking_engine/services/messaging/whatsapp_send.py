@@ -38,7 +38,7 @@ from booking_engine.clients import webapp_credits
 from booking_engine.db import sms_queries
 from booking_engine.db import token_basket_queries as tbq
 from booking_engine.db import whatsapp_queries as wq
-from booking_engine.services.messaging import meta_limits
+from booking_engine.services.messaging import meta_limits, wa_routing
 from booking_engine.services.messaging.pacer import Pacer
 from booking_engine.services.messaging.sms_send import _has_active_consent
 from booking_engine.services.messaging.whatsapp_pricing import SEND_CREDITS, estimate_usd
@@ -66,6 +66,23 @@ FREQUENCY_CAP_RETRY_MINUTES = 24 * 60
 
 # The recipient told Meta to stop hearing from *us*. Permanent.
 OPT_OUT_CODE = 131050
+
+# Open conversation = the customer wrote within one session gap. Marketing
+# never lands inside one (it would interrupt a request in progress, and the
+# agent would read it as the customer's topic). Two named exceptions by
+# campaign key: the review ask still goes out, the appointment reminder does
+# not — a customer we spoke to today knows about tomorrow.
+_FEEDBACK_KEY = "automation:feedback:"
+_REMINDER_KEY = "automation:reminder:"
+
+
+def blocked_by_open_conversation(category: str | None, campaign_key: str | None) -> bool:
+    key = campaign_key or ""
+    if key.startswith(_REMINDER_KEY):
+        return True
+    if key.startswith(_FEEDBACK_KEY):
+        return False
+    return category != "UTILITY"
 
 
 def spread(
@@ -211,6 +228,12 @@ async def enqueue_campaign(
             reason = "marketing_blocked_destination"
         elif not is_utility and customer_id in cooled_off:
             reason = "recently_contacted"
+        elif not is_utility and phone in await wq.in_conversation(
+            shop_id=shop_id, phones=[phone], within=wa_routing.SESSION_GAP,
+        ):
+            # ponytail: one query per recipient, like the customer lookup above;
+            # batch both if a 2000-recipient enqueue gets slow.
+            reason = "open_conversation"
 
         message_id = await wq.enqueue(
             shop_id=shop_id, customer_id=customer_id, campaign_key=campaign_key,
@@ -319,6 +342,14 @@ async def send_due(
                 await wq.mark_suppressed(
                     message_id=msg["id"], reason="recently_contacted",
                 )
+                counts["suppressed"] += 1
+                continue
+
+        if blocked_by_open_conversation(msg.get("category"), msg.get("campaign_key")):
+            if await wq.in_conversation(
+                shop_id=shop_id, phones=[msg["to_phone"]], within=wa_routing.SESSION_GAP,
+            ):
+                await wq.mark_suppressed(message_id=msg["id"], reason="open_conversation")
                 counts["suppressed"] += 1
                 continue
 
