@@ -57,6 +57,15 @@ class TestSessionTranscriptLive:
                     "VALUES ($1, '393331110077', 'Ok grazie', $2)",
                     shop_id, since - timedelta(hours=39),
                 )
+                # Excluded: outreach queued during the session that never went out.
+                await conn.execute(
+                    "INSERT INTO whatsapp.outbound_messages "
+                    "(shop_id, from_number, to_phone, preview, status, template_name, "
+                    " campaign_key, sent_at, created_at) "
+                    "VALUES ($1, '+393339990000', '393331110077', 'Mai inviato', 'queued', "
+                    "        'it_promo_v1', 'bulk_y', NULL, $2)",
+                    shop_id, since + timedelta(seconds=1),
+                )
                 rows = await ws.session_transcript(shop_id=shop_id, phone=PHONE, since=since)
                 assert len(rows) == 1
                 assert rows[0]["role"] == "assistant"

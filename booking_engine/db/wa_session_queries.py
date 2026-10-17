@@ -240,8 +240,8 @@ async def session_transcript(
     what the customer is replying to, and the agent must know it was ours. Only
     outreach the customer has not yet answered counts: one they replied to in an
     earlier conversation must not come back as the topic of a new one. Plain
-    replies from before the session are never pulled in. Utility sends during
-    the session (a receipt, a reminder) are labelled outreach too — accepted.
+    replies from before the session are never pulled in. Utility messages *sent*
+    during the session (a receipt, a reminder) are labelled outreach too — accepted.
 
     `limit` is a guard on the prompt, not on the conversation: MAX_SESSION_TURNS
     caps a session long before 40 messages, so this only ever bites on a thread
@@ -271,8 +271,6 @@ async def session_transcript(
                AND o.status NOT IN ('suppressed', 'cancelled')
                AND (
                      (o.template_name IS NULL AND o.campaign_key IS NULL
-                      AND coalesce(o.sent_at, o.created_at) >= $3)
-                  OR ((o.template_name IS NOT NULL OR o.campaign_key IS NOT NULL)
                       AND coalesce(o.sent_at, o.created_at) >= $3)
                   OR ((o.template_name IS NOT NULL OR o.campaign_key IS NOT NULL)
                       AND o.sent_at IS NOT NULL
