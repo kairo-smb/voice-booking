@@ -144,7 +144,7 @@ async def enqueue_campaign(
 
     # UTILITY is transactional — a reminder about the customer's own
     # appointment. It needs no marketing consent, is not blocked by Meta's +1
-    # marketing pause, and must never be suppressed by the 7-day recipient
+    # marketing pause, and must never be suppressed by the 10-day (240h) recipient
     # cooldown (that cooldown is our guard against the MARKETING frequency
     # cap; an appointment reminder is not a promotion). Nothing fails when
     # this is wrong the other way: a missing category fails closed to the
