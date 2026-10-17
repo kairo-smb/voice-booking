@@ -3055,3 +3055,59 @@ async def test_edit_template_keeps_quick_reply_buttons(monkeypatch):
         {"type": "QUICK_REPLY", "text": "Prenoto"},
         {"type": "QUICK_REPLY", "text": "Altro orario"},
     ]}
+
+
+@pytest.mark.asyncio
+async def test_enqueue_together_schedules_everyone_at_the_same_moment(monkeypatch):
+    _patch_enqueue(monkeypatch)
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", _async_return(_consenting()))
+    rows = []
+
+    async def _enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+
+    monkeypatch.setattr(wq, "enqueue", _enqueue)
+
+    await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="gap_fill:s:2026-10-20T15:00", template_key="gap_fill_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(3)],
+        now=datetime(2026, 10, 19, 10, 0, tzinfo=ROME), settings=FakeSettings(),
+        together=True,
+    )
+    assert len(rows) == 3
+    assert len({r["scheduled_at"] for r in rows}) == 1
+
+
+@pytest.mark.asyncio
+async def test_enqueue_reports_each_recipient(monkeypatch):
+    ok, cooled = uuid4(), uuid4()
+    _patch_enqueue(monkeypatch, cooled={cooled})
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", _async_return(_consenting()))
+    monkeypatch.setattr(wq, "enqueue", _async_return(uuid4()))
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": ok, "variables": {}}, {"customer_id": cooled, "variables": {}}],
+        settings=FakeSettings(),
+    )
+    assert result["results"] == [
+        {"customer_id": str(ok), "status": "queued", "reason": None},
+        {"customer_id": str(cooled), "status": "suppressed", "reason": "recently_contacted"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_reports_already_sent(monkeypatch):
+    cid = uuid4()
+    _patch_enqueue(monkeypatch)
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", _async_return(_consenting()))
+    monkeypatch.setattr(wq, "enqueue", _async_return(None))
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": cid, "variables": {}}], settings=FakeSettings(),
+    )
+    assert result["results"] == [
+        {"customer_id": str(cid), "status": "already_sent", "reason": None},
+    ]

@@ -445,6 +445,7 @@ async def campaign(
         recipients=[r.model_dump() for r in payload.recipients],
         settings=settings,
         initiated_by=payload.requested_by,
+        together=payload.source == "gap_fill",
     )
     # Recipients never go into the audit — count only; the rows belong to
     # outbound_messages.
@@ -462,9 +463,10 @@ async def campaign(
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
     # A single win-back is one owner, one customer, one click: waiting for the
-    # next scheduled drain reads as "nothing happened". Send what is due now; `spread` already put
-    # an out-of-hours send on tomorrow's opening, so that one still waits.
-    if payload.source == "offer" and result.get("queued"):
+    # next scheduled drain reads as "nothing happened". A gap fill is the same
+    # click, and its slot is perishable. Send what is due now; `spread` already
+    # put an out-of-hours send on tomorrow's opening, so that one still waits.
+    if payload.source in ("offer", "gap_fill") and result.get("queued"):
         result["sent_now"] = (await locked_send_due(
             settings=settings, shop_id=payload.shop_id,
             campaign_key=payload.campaign_key,

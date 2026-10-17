@@ -164,8 +164,13 @@ async def enqueue_campaign(
     now: datetime | None = None,
     settings,
     initiated_by: UUID | None = None,
+    together: bool = False,
 ) -> dict:
     """Queue one personalised message per recipient. Refusals are rows, not silence.
+
+    `together` schedules everyone at one moment: a gap-fill invite offers one
+    slot to several customers, and spacing them across the day would hand the
+    slot to whoever happened to be first in the list.
 
     `recipients` is `[{"customer_id": UUID, "variables": {"1": "Giulia", ...}}]`
     — the caller (the webapp, from its LLM copy generator) supplies the
@@ -207,12 +212,14 @@ async def enqueue_campaign(
     # it is one we can read. See the 2026-08-24 campaigns spec §7.3.
 
     when = spread(
-        len(recipients),
+        1 if together else len(recipients),
         now or datetime.now(tz=SALON_TZ),
         start_hour=settings.whatsapp_send_start_hour,
         end_hour=settings.whatsapp_send_end_hour,
         daily_cap=cap,
     )
+    if together:
+        when = when * len(recipients)
 
     # Who already heard from this salon inside the cooldown. One batched query
     # for the whole campaign — a bulk send is up to 2000 recipients, and this
@@ -231,6 +238,7 @@ async def enqueue_campaign(
     )
 
     queued, suppressed, skipped = 0, 0, 0
+    results: list[dict] = []
     for recipient, scheduled_at in zip(recipients, when):
         customer_id = recipient["customer_id"]
         variables = {
@@ -271,6 +279,11 @@ async def enqueue_campaign(
             status="suppressed" if reason else "queued", suppressed_reason=reason,
             initiated_by=initiated_by,
         )
+        results.append({
+            "customer_id": str(customer_id),
+            "status": "already_sent" if message_id is None else ("suppressed" if reason else "queued"),
+            "reason": reason,
+        })
         if message_id is None:
             skipped += 1        # this campaign already reached them
         elif reason:
@@ -279,7 +292,7 @@ async def enqueue_campaign(
             queued += 1
 
     return {"ok": True, "queued": queued, "suppressed": suppressed,
-            "already_sent": skipped,
+            "already_sent": skipped, "results": results,
             "first_at": when[0].isoformat() if when else None,
             "last_at": when[-1].isoformat() if when else None}
 
