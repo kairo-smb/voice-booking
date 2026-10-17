@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -104,7 +104,10 @@ def minutes_until_window(now: datetime, *, start_hour: int, end_hour: int) -> in
     nxt = local.replace(hour=start_hour, minute=0, second=0, microsecond=0)
     if local.hour >= end_hour:
         nxt += timedelta(days=1)
-    return max(1, math.ceil((nxt - local).total_seconds() / 60))
+    # Subtract in UTC: same-zone aware datetimes subtract by wall clock, which
+    # is an hour off across a DST change.
+    gap = nxt.astimezone(timezone.utc) - local.astimezone(timezone.utc)
+    return max(1, math.ceil(gap.total_seconds() / 60))
 
 
 def spread(
@@ -250,7 +253,9 @@ async def enqueue_campaign(
             reason = "marketing_blocked_destination"
         elif not is_utility and customer_id in cooled_off:
             reason = "recently_contacted"
-        elif not is_utility and phone in await wq.in_conversation(
+        elif blocked_by_open_conversation(
+            template.get("category"), campaign_key,
+        ) and phone in await wq.in_conversation(
             shop_id=shop_id, phones=[phone], within=wa_routing.SESSION_GAP,
         ):
             # ponytail: one query per recipient, like the customer lookup above;

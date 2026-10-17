@@ -402,7 +402,7 @@ def _patch_send_due(
     monkeypatch.setattr(wq, "recently_contacted", _recent)
     monkeypatch.setattr(wq, "in_conversation", _talking)
     # Pinned so no send test depends on the wall clock (the window check reads it).
-    monkeypatch.setattr(ws, "_now", lambda: now, raising=False)
+    monkeypatch.setattr(ws, "_now", lambda: now)
     monkeypatch.setattr(sms_queries, "get_customer_for_send", _customer)
     monkeypatch.setattr(wq, "mark_sent", _mark_sent)
     monkeypatch.setattr(wq, "mark_suppressed", _mark_suppressed)
@@ -2914,7 +2914,8 @@ async def test_send_due_skips_the_reminder_in_an_open_conversation(monkeypatch):
                           customer=_consenting(), talking={msg["to_phone"]})
     _patch_meta_send(monkeypatch, _never_sends())
 
-    await ws.send_due(settings=FakeSettings())
+    counts = await ws.send_due(settings=FakeSettings())
+    assert counts["suppressed"] == 1 and counts["sent"] == 0
     assert spy["suppressed"][0]["reason"] == "open_conversation"
 
 
@@ -2981,3 +2982,39 @@ async def test_send_due_sends_utility_at_night(monkeypatch):
     _patch_meta_send(monkeypatch, _ok_send())
 
     assert (await ws.send_due(settings=FakeSettings()))["sent"] == 1
+
+
+@pytest.mark.asyncio
+async def test_open_conversation_is_decided_before_the_credit_check(monkeypatch):
+    """An empty basket must not turn a skipped promotion into a failed row."""
+    msg = _message(category="MARKETING", campaign_key="bulk_x")
+    spy = _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                          customer=_consenting(), balance=0,
+                          talking={msg["to_phone"]})
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["suppressed"] == 1
+    assert spy["failed"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_window_is_decided_before_the_credit_check(monkeypatch):
+    """At night an empty basket defers the promotion; it is not failed."""
+    msg = _message(category="MARKETING", campaign_key="bulk_x")
+    spy = _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                          customer=_consenting(), balance=0,
+                          now=datetime(2026, 10, 20, 22, 0, tzinfo=ROME))
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["deferred"] == 1
+    assert spy["failed"] == []
+
+
+def test_minutes_until_window_survives_the_autumn_clock_change():
+    """Clocks go back on 2026-10-25 03:00, so the night is 12h long, not 11."""
+    f = ws.minutes_until_window
+    assert f(datetime(2026, 10, 24, 22, 0, tzinfo=ROME), start_hour=9, end_hour=20) == 12 * 60

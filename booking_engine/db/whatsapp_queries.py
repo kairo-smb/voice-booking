@@ -703,7 +703,8 @@ async def requeue_one(*, message_id: UUID, minutes: int) -> None:
     """Push one claimed message back into the queue, later.
 
     Used when the shop is over its daily cap: the message isn't wrong, it's
-    early, and dropping it would silently lose a scheduled promotion.
+    early, and dropping it would silently lose a scheduled promotion. Also used
+    to hold a message until the send window opens and after Meta's frequency cap.
     """
     await execute_void(
         """
