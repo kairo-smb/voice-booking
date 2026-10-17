@@ -2946,3 +2946,38 @@ async def test_enqueue_records_an_open_conversation_as_a_refusal(monkeypatch):
     )
     assert result["suppressed"] == 1
     assert rows[0]["suppressed_reason"] == "open_conversation"
+
+
+# ------------------------------------------------------------ send window
+
+def test_minutes_until_window():
+    f = ws.minutes_until_window
+    assert f(datetime(2026, 10, 20, 10, 0, tzinfo=ROME), start_hour=9, end_hour=20) == 0
+    assert f(datetime(2026, 10, 20, 8, 30, tzinfo=ROME), start_hour=9, end_hour=20) == 30
+    assert f(datetime(2026, 10, 20, 22, 0, tzinfo=ROME), start_hour=9, end_hour=20) == 11 * 60
+    assert f(datetime(2026, 10, 20, 20, 0, tzinfo=ROME), start_hour=9, end_hour=20) == 13 * 60
+
+
+@pytest.mark.asyncio
+async def test_send_due_holds_marketing_outside_the_window(monkeypatch):
+    msg = _message(category="MARKETING", campaign_key="automation:feedback:a1")
+    spy = _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                          customer=_consenting(),
+                          now=datetime(2026, 10, 20, 22, 0, tzinfo=ROME))
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["deferred"] == 1
+    assert spy["deferred"][0]["minutes"] == 11 * 60
+
+
+@pytest.mark.asyncio
+async def test_send_due_sends_utility_at_night(monkeypatch):
+    msg = _message(category="UTILITY", campaign_key=None)
+    _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                    customer=_consenting(),
+                    now=datetime(2026, 10, 20, 22, 0, tzinfo=ROME))
+    _patch_meta_send(monkeypatch, _ok_send())
+
+    assert (await ws.send_due(settings=FakeSettings()))["sent"] == 1

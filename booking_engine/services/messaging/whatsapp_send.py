@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -83,6 +84,27 @@ def blocked_by_open_conversation(category: str | None, campaign_key: str | None)
     if key.startswith(_FEEDBACK_KEY):
         return False
     return category != "UTILITY"
+
+
+def _now() -> datetime:
+    """The clock, as a seam: send-window tests pin it."""
+    return datetime.now(tz=SALON_TZ)
+
+
+def minutes_until_window(now: datetime, *, start_hour: int, end_hour: int) -> int:
+    """0 inside [start, end) salon time, else minutes to the next opening.
+
+    `spread` already schedules campaigns inside this window, but automations
+    enqueue at `now()` and a deferred row can roll past closing — so the window
+    is enforced again where the message actually leaves.
+    """
+    local = now.astimezone(SALON_TZ)
+    if start_hour <= local.hour < end_hour:
+        return 0
+    nxt = local.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    if local.hour >= end_hour:
+        nxt += timedelta(days=1)
+    return max(1, math.ceil((nxt - local).total_seconds() / 60))
 
 
 def spread(
@@ -320,6 +342,16 @@ async def send_due(
             await wq.requeue_one(message_id=msg["id"], minutes=60)
             counts["deferred"] += 1
             continue
+
+        if msg.get("category") != "UTILITY":
+            wait = minutes_until_window(
+                _now(), start_hour=settings.whatsapp_send_start_hour,
+                end_hour=settings.whatsapp_send_end_hour,
+            )
+            if wait:
+                await wq.requeue_one(message_id=msg["id"], minutes=wait)
+                counts["deferred"] += 1
+                continue
 
         # Re-read consent and the cooldown only for MARKETING, for the same
         # reason consent is re-read at all: a queued row can sit for hours (or
