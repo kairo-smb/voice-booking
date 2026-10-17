@@ -33,6 +33,7 @@ from booking_engine.services.messaging import wa_agent
 from booking_engine.services.messaging import wa_inbound
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
 from booking_engine.services.messaging.whatsapp_pricing import price_list
+from booking_engine.services.messaging.whatsapp_templates import TEMPLATE_BUTTON_INTENTS
 from booking_engine.services.messaging import whatsapp_receipt
 from booking_engine.services.messaging.whatsapp_send import enqueue_campaign
 from booking_engine.services.scheduler import locked_send_due
@@ -813,6 +814,10 @@ def _interactive_or_text(message: dict) -> tuple[str | None, str]:
     Every read is a `.get()` chain that degrades to empty: a shape Meta changes
     or a type we have never seen must record a blank message, not raise inside
     the webhook. Same reason the text branch tolerates a bare string.
+
+    A tap on a *template's* quick reply (gap_fill_v1's "Prenoto") arrives as
+    `type: "button"` instead, with no id of ours; its text maps to an intent via
+    TEMPLATE_BUTTON_INTENTS.
     """
     if message.get("type") == "interactive":
         inter = message.get("interactive")
@@ -822,6 +827,14 @@ def _interactive_or_text(message: dict) -> tuple[str | None, str]:
         if not isinstance(reply, dict):
             return None, ""
         return (str(reply.get("id") or "") or None, str(reply.get("title") or ""))
+    if message.get("type") == "button":
+        # A tap on a template's quick reply: Meta sends the button text as the
+        # payload when we set none at send time.
+        btn = message.get("button")
+        if not isinstance(btn, dict):
+            return None, ""
+        text = str(btn.get("text") or btn.get("payload") or "")
+        return TEMPLATE_BUTTON_INTENTS.get(str(btn.get("payload") or "")), text
     text = message.get("text")
     if isinstance(text, dict):
         return None, str(text.get("body") or "")

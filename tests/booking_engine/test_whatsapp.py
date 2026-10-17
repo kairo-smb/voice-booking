@@ -3018,3 +3018,22 @@ def test_minutes_until_window_survives_the_autumn_clock_change():
     """Clocks go back on 2026-10-25 03:00, so the night is 12h long, not 11."""
     f = ws.minutes_until_window
     assert f(datetime(2026, 10, 24, 22, 0, tzinfo=ROME), start_hour=9, end_hour=20) == 12 * 60
+
+
+@pytest.mark.asyncio
+async def test_create_template_sends_quick_reply_buttons(monkeypatch):
+    seen = {}
+    async def _request(method, path, *, token, json_body=None, **kw):
+        seen.update(json_body)
+        return {"id": "T1", "status": "PENDING"}
+    monkeypatch.setattr(meta, "_request", _request)
+
+    await meta.create_template(
+        waba_id="W", token="t", name="it_gap_fill_v1", language="it",
+        category="MARKETING", body_text="Ciao {{1}}", sample_variables={"1": "Giulia"},
+        buttons=("Prenoto", "Altro orario"),
+    )
+    assert seen["components"][1] == {"type": "BUTTONS", "buttons": [
+        {"type": "QUICK_REPLY", "text": "Prenoto"},
+        {"type": "QUICK_REPLY", "text": "Altro orario"},
+    ]}

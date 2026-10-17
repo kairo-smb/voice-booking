@@ -271,6 +271,7 @@ async def get_phone_number(*, phone_number_id: str, token: str) -> PhoneNumber:
 async def create_template(
     *, waba_id: str, token: str, name: str, language: str,
     category: str, body_text: str, sample_variables: dict[str, str],
+    buttons: tuple[str, ...] = (),
 ) -> tuple[str, str]:
     """Create a template on the *salon's* WABA. Returns (id, status).
 
@@ -281,17 +282,22 @@ async def create_template(
     "Ciao {{1}}".
     """
     ordered = [sample_variables[str(i)] for i in range(1, len(sample_variables) + 1)]
+    components: list[dict] = [{
+        "type": "BODY",
+        "text": body_text,
+        **({"example": {"body_text": [ordered]}} if ordered else {}),
+    }]
+    if buttons:
+        components.append({"type": "BUTTONS", "buttons": [
+            {"type": "QUICK_REPLY", "text": b} for b in buttons
+        ]})
     body = await _request(
         "POST", f"{waba_id}/message_templates", token=token,
         json_body={
             "name": name,
             "language": language,
             "category": category,
-            "components": [{
-                "type": "BODY",
-                "text": body_text,
-                **({"example": {"body_text": [ordered]}} if ordered else {}),
-            }],
+            "components": components,
         },
     )
     return body.get("id", ""), (body.get("status") or "PENDING").lower()

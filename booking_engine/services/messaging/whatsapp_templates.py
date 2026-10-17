@@ -58,7 +58,7 @@ def resolve_language(language: str | None) -> str:
 # missing slot means a prompt with no frame to write into — so the exemption is
 # named per key rather than inferred from `filled_by`, and badges like this
 # cannot quietly spread to a template the model is supposed to fill.
-MARKETING_WITHOUT_GENERATED_SLOT: frozenset[str] = frozenset({"feedback_v2"})
+MARKETING_WITHOUT_GENERATED_SLOT: frozenset[str] = frozenset({"feedback_v2", "gap_fill_v1"})
 
 
 @dataclass(frozen=True)
@@ -88,6 +88,9 @@ class Template:
     # freely after a template is approved.
     intent: str = ""
     guidance: str = ""
+    # Quick-reply buttons, in order. Meta returns a tap as `type: "button"` with
+    # the button text as payload; TEMPLATE_BUTTON_INTENTS turns it into an intent.
+    buttons: tuple[str, ...] = ()
 
 
 CATALOGUE: dict[str, Template] = {
@@ -255,6 +258,29 @@ CATALOGUE: dict[str, Template] = {
         generated_slot=None,
     ),
 
+    # A free slot offered to up to three customers at once (the webapp's
+    # "Riempi buchi"). Every variable is a fact: name, day, time, stylist. The
+    # service is left implicit on purpose (owner, 2026-10-18). Both buttons route
+    # to the booking agent, which re-checks the slot — it may already be taken by
+    # another invitee.
+    "gap_fill_v1": Template(
+        body=(
+            "Ciao {{1}}, si è appena liberato un posto {{2}} alle {{3}} con {{4}}. "
+            "Ti andrebbe di passare? Se l'orario non va bene, possiamo trovarne "
+            "un altro insieme."
+        ),
+        variables=4,
+        sample={
+            "1": "Giulia",
+            "2": "giovedì 23 ottobre",
+            "3": "15:00",
+            "4": "Chiara",
+        },
+        category="MARKETING",
+        generated_slot=None,
+        buttons=("Prenoto", "Altro orario"),
+    ),
+
     # ── UTILITY ──────────────────────────────────────────────────────────────
     # NOTHING GENERATED AND NOTHING PERSUASIVE. That is the whole reason these
     # cost €0.0341 instead of €0.0691, need no marketing consent and are exempt
@@ -287,6 +313,13 @@ CATALOGUE: dict[str, Template] = {
         category="UTILITY",
         generated_slot=None,
     ),
+}
+
+# Template quick-reply text → routing intent. Only ids in wa_routing.WHITELIST
+# route; anything else falls back to text and the classifier.
+TEMPLATE_BUTTON_INTENTS: dict[str, str] = {
+    "Prenoto": "booking",
+    "Altro orario": "booking",
 }
 
 

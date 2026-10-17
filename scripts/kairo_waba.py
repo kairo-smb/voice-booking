@@ -249,7 +249,10 @@ def push_templates(a) -> None:
                 print(f"create     {name}"); continue
             status, body = _call("POST", f"{_waba()}/message_templates", json={
                 "name": name, "language": language,
-                "category": tpl.category, "components": [want],
+                "category": tpl.category,
+                "components": [want] + ([{"type": "BUTTONS", "buttons": [
+                    {"type": "QUICK_REPLY", "text": b} for b in tpl.buttons
+                ]}] if tpl.buttons else []),
             })
             # One failure must not abort the rest: the whole bug this replaces
             # was a single 4xx swallowing every later entry in the catalogue.

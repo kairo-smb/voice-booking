@@ -582,6 +582,7 @@ async def ensure_templates(
                     waba_id=row["waba_id"], token=row["access_token"],
                     name=name, language=language, category=tpl.category,
                     body_text=tpl.body, sample_variables=tpl.sample,
+                    buttons=tpl.buttons,
                 )
         except meta.MetaError as exc:
             # The name may already exist on that WABA with no row here: a
