@@ -202,6 +202,26 @@ async def mark_escalated(*, call_id: UUID, reason: str) -> None:
     )
 
 
+# What the agent reads in front of a message we sent unprompted. Outreach is in
+# the transcript because the send rules guarantee a promo never lands inside a
+# conversation (whatsapp_send.blocked_by_open_conversation): when one is there,
+# it is what the customer is answering.
+OUTREACH_LOOKBACK = "48 hours"
+_OUTREACH = "[Jev outreach]"
+_GAP_FILL_OUTREACH = (
+    "[Jev outreach — invito inviato a più clienti per lo stesso orario: verifica "
+    "che sia ancora libero prima di confermare; se è stato preso, scusati, spiega "
+    "che un'altra cliente ha appena prenotato e proponi alternative]"
+)
+
+
+def label_outreach(content: str, *, campaign_key: str | None, template_name: str | None) -> str:
+    if campaign_key is None and template_name is None:
+        return content
+    prefix = _GAP_FILL_OUTREACH if (campaign_key or "").startswith("gap_fill:") else _OUTREACH
+    return f"{prefix} {content}"
+
+
 async def session_transcript(
     *, shop_id: UUID, phone: str, since, limit: int = 40,
 ) -> list[dict]:
@@ -214,19 +234,22 @@ async def session_transcript(
     the salon speaks with one voice, whoever was holding the keyboard.
 
     A voice note reads as its words (`transcript`), never as an empty bubble.
-    Templates and campaign sends are excluded — a promo that landed mid-thread
-    is not part of this request and would only mislead the turn.
+    Templates and campaign sends are included when sent up to OUTREACH_LOOKBACK
+    before the session opened, labelled "[Jev outreach]" (see `label_outreach`):
+    a promo can no longer land inside a conversation, so one that is here is
+    what the customer is replying to, and the agent must know it was ours.
 
     `limit` is a guard on the prompt, not on the conversation: MAX_SESSION_TURNS
     caps a session long before 40 messages, so this only ever bites on a thread
     that somehow escaped it.
     """
-    return await execute(
-        """
+    rows = await execute(
+        f"""
         SELECT * FROM (
             SELECT 'user' AS role,
                    coalesce(nullif(i.transcript, ''), i.body) AS content,
-                   i.received_at AS at
+                   i.received_at AS at,
+                   NULL::text AS campaign_key, NULL::text AS template_name
               FROM whatsapp.inbound_messages i
              WHERE i.shop_id = $1
                AND ltrim(i.from_phone, '+') = ltrim($2, '+')
@@ -234,14 +257,18 @@ async def session_transcript(
             UNION ALL
             SELECT 'assistant' AS role,
                    o.preview AS content,
-                   coalesce(o.sent_at, o.created_at) AS at
+                   coalesce(o.sent_at, o.created_at) AS at,
+                   o.campaign_key, o.template_name
               FROM whatsapp.outbound_messages o
              WHERE o.shop_id = $1
                AND ltrim(o.to_phone, '+') = ltrim($2, '+')
-               AND o.template_name IS NULL
-               AND o.campaign_key IS NULL
                AND o.status NOT IN ('suppressed', 'cancelled')
-               AND coalesce(o.sent_at, o.created_at) >= $3
+               AND (
+                     (o.template_name IS NULL AND o.campaign_key IS NULL
+                      AND coalesce(o.sent_at, o.created_at) >= $3)
+                  OR (o.sent_at IS NOT NULL
+                      AND o.sent_at >= $3 - interval '{OUTREACH_LOOKBACK}')
+               )
         ) t
          WHERE coalesce(t.content, '') <> ''
          ORDER BY t.at ASC
@@ -249,3 +276,9 @@ async def session_transcript(
         """,
         shop_id, phone, since, limit,
     )
+    return [
+        {"role": r["role"],
+         "content": label_outreach(r["content"], campaign_key=r["campaign_key"],
+                                   template_name=r["template_name"])}
+        for r in rows
+    ]
