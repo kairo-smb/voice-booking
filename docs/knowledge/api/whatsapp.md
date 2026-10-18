@@ -249,14 +249,14 @@ Returns immediately with the schedule; nothing is sent inline:
                       {"customer_id": "…", "status": "suppressed", "reason": "recently_contacted"}]}}
 ```
 
-`results` has one entry per recipient, in request order: `status` is `queued`, `suppressed` (with the `reason`) or `already_sent`. The webapp's "Riempi buchi" shows a per-customer outcome from it; the counts above are the same facts summed.
+`results` is the **enqueue verdict**, not the delivery outcome: a `queued` row can still be deferred (daily cap, send window) or suppressed at send time. For `offer` and `gap_fill`, `sent_now` counts what the inline send actually sent. `results` has one entry per recipient, in request order: `status` is `queued`, `suppressed` (with the `reason`) or `already_sent`. The webapp's "Riempi buchi" shows a per-customer outcome from it; the counts above are the same facts summed.
 
 - `suppressed` — a row written with a `suppressed_reason` (`no_consent`, `no_phone`, `customer_not_found`, `marketing_blocked_destination`, `recently_contacted`, `open_conversation`). Refusals are recorded, never silent.
 - `already_sent` — this `campaign_key` already reached that customer; the unique index made the retry a no-op. That guard earns its keep here, where "invia a 400 clienti" is exactly the button someone double-clicks.
 
 **Exception: `source: "offer"`** (the webapp's single win-back modal) is sent at enqueue time — `send_due` scoped to that shop + `campaign_key`, same consent/cooldown/cap checks — and the response carries `sent_now`. One click for one customer shouldn't wait for the next scheduled drain. It shares the drain lock: if a drain is running, the row stays queued for the next one and `sent_now` is 0. Out of opening hours `spread` has already put the row on tomorrow's first slot, so it still waits.
 
-**`source: "gap_fill"`** (the webapp's "Riempi buchi": one freed slot offered to up to 3 customers, `template_key: "gap_fill_v1"`, `campaign_key: "gap_fill:<staff_uuid>:<YYYY-MM-DDTHH:MM>"`) behaves like `offer` and adds one thing. It is sent inline the same way, and `enqueue_campaign(..., together=True)` schedules **every recipient at the same moment** instead of spreading them: spacing them across the day would hand the slot to whoever happened to be first in the list. If two accept, the agent is told in the transcript (see [Outreach in the agent's transcript](#outreach-in-the-agents-transcript)) to re-check the slot before confirming.
+**`source: "gap_fill"`** (the webapp's "Riempi buchi": one freed slot offered to up to 3 customers, `template_key: "gap_fill_v1"`, `campaign_key: "gap_fill:<staff_uuid>:<YYYY-MM-DDTHH:MM>"`) behaves like `offer` and adds one thing. It is sent inline the same way, and `enqueue_campaign(..., together=True)` schedules **every recipient at the same moment** instead of spreading them: spacing them across the day would hand the slot to whoever happened to be first in the list. At most **3 recipients** (`GAP_FILL_MAX_RECIPIENTS`); more is a 422 `too_many_recipients` before anything is enqueued. `together` ignores the daily-cap chunking, so rows beyond the day's cap wait an hour at send time instead of rolling to another day. If two accept, the agent is told in the transcript (see [Outreach in the agent's transcript](#outreach-in-the-agents-transcript)) to re-check the slot before confirming.
 
 `gap_fill_v1` is MARKETING with four variables and two quick-reply buttons, **Prenoto** and **Altro orario**. A tap arrives as `type: "button"` (not `interactive`), and `TEMPLATE_BUTTON_INTENTS` in `whatsapp_templates.py` maps both texts to the `booking` intent, so the booking agent takes the thread. Its facts-only variables put it in `MARKETING_WITHOUT_GENERATED_SLOT`.
 
@@ -759,7 +759,7 @@ multi-day drip can be overtaken by another campaign. It counts `sent_at`, so a
 message that never left never starts a cooldown.
 
 New `suppressed_reason` values: `recently_contacted`,
-`marketing_blocked_destination`.
+`marketing_blocked_destination`, `open_conversation`.
 
 ---
 

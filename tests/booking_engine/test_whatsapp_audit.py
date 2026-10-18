@@ -147,3 +147,23 @@ async def test_single_offer_is_sent_at_enqueue_bulk_waits_for_tick(monkeypatch, 
     else:
         assert send_calls == []
         assert "sent_now" not in out["data"]
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_refuses_more_than_three_recipients(monkeypatch):
+    from fastapi import HTTPException
+    from booking_engine.api.routes import whatsapp as wa_routes
+    from booking_engine.api.routes.whatsapp import CampaignRequest
+
+    async def boom(**kw):
+        raise AssertionError("must be refused before enqueue")
+
+    monkeypatch.setattr(wa_routes, "enqueue_campaign", boom)
+    payload = CampaignRequest(
+        shop_id=uuid4(), source="gap_fill", campaign_key="gap_fill:s:2026-10-20T15:00",
+        template_key="gap_fill_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(4)],
+    )
+    with pytest.raises(HTTPException) as exc:
+        await wa_routes.campaign(payload=payload, settings=FakeSettings(), _auth=True)
+    assert exc.value.status_code == 422

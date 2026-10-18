@@ -3111,3 +3111,23 @@ async def test_enqueue_reports_already_sent(monkeypatch):
     assert result["results"] == [
         {"customer_id": str(cid), "status": "already_sent", "reason": None},
     ]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_together_after_hours_waits_for_tomorrow_morning(monkeypatch):
+    _patch_enqueue(monkeypatch)
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", _async_return(_consenting()))
+    rows = []
+
+    async def _enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+
+    monkeypatch.setattr(wq, "enqueue", _enqueue)
+    await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="gap_fill:s:2026-10-21T15:00", template_key="gap_fill_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(3)],
+        now=datetime(2026, 10, 19, 21, 0, tzinfo=ROME), settings=FakeSettings(),
+        together=True,
+    )
+    assert {r["scheduled_at"] for r in rows} == {datetime(2026, 10, 20, 9, 0, tzinfo=ROME)}

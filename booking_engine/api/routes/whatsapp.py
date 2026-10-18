@@ -46,6 +46,9 @@ from booking_engine.services.meta_signature import meta_signature_valid
 
 logger = logging.getLogger(__name__)
 
+# One freed slot is offered to at most this many customers at once.
+GAP_FILL_MAX_RECIPIENTS = 3
+
 router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
 
 # Meta message status -> ours. 'read' is WhatsApp-only and worth keeping: it's
@@ -434,10 +437,13 @@ async def campaign(
 ) -> dict:
     """Queue a personalised campaign, dripped across the salon's opening hours.
 
-    Returns immediately with the schedule. Nothing is sent inline: a bulk send
-    is hundreds of serial Graph calls with an owner watching a spinner, and the
-    whole point is that they land through the day (or the week), not at once.
+    Returns immediately with the schedule. Nothing is sent inline, except for
+    `offer` and `gap_fill`, which send what is due now: a bulk send is hundreds
+    of serial Graph calls with an owner watching a spinner, and the whole point
+    is that they land through the day (or the week), not at once.
     """
+    if payload.source == "gap_fill" and len(payload.recipients) > GAP_FILL_MAX_RECIPIENTS:
+        raise HTTPException(status_code=422, detail="too_many_recipients")
     result = await enqueue_campaign(
         shop_id=payload.shop_id,
         campaign_key=payload.campaign_key,
