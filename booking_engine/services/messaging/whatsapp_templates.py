@@ -259,24 +259,27 @@ CATALOGUE: dict[str, Template] = {
     ),
 
     # A free slot offered to up to three customers at once (the webapp's
-    # "Riempi buchi"). Every variable is a fact: name, day, time, stylist. The
-    # service is left implicit on purpose (owner, 2026-10-18). "Abbiamo un posto
-    # libero" is true both for a slot freed by a cancellation and for an
-    # always-empty stretch, which the webapp also offers. Both buttons route
-    # to the booking agent, which re-checks the slot — it may already be taken by
-    # another invitee.
+    # "Riempi buchi"). Every variable is a fact: name, her usual interval
+    # ("6 settimane", "settimana" when it is one), day, time, stylist. The
+    # service is left implicit on purpose and the copy is the owner's own
+    # (2026-10-18): it names her rhythm, so the slot reads as meant for her.
+    # "Disponibilità" is true both for a slot freed by a cancellation and for
+    # an always-empty stretch, which the webapp also offers. Both buttons route
+    # to the booking agent, which re-checks the slot — it may already be taken
+    # by another invitee.
     "gap_fill_v1": Template(
         body=(
-            "Ciao {{1}}, abbiamo un posto libero {{2}} alle {{3}} con {{4}}. "
-            "Ti andrebbe di passare? Se l'orario non va bene, possiamo trovarne "
-            "un altro insieme."
+            "Ciao {{1}}, ho visto che di solito torni ogni {{2}} e ho una "
+            "disponibilità in agenda {{3}} alle {{4}} con {{5}}, vuoi che la "
+            "riservi per te?"
         ),
-        variables=4,
+        variables=5,
         sample={
             "1": "Giulia",
-            "2": "giovedì 23 ottobre",
-            "3": "15:00",
-            "4": "Chiara",
+            "2": "6 settimane",
+            "3": "giovedì 23 ottobre",
+            "4": "15:00",
+            "5": "Chiara",
         },
         category="MARKETING",
         generated_slot=None,
