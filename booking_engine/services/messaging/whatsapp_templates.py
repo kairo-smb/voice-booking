@@ -260,12 +260,14 @@ CATALOGUE: dict[str, Template] = {
 
     # A free slot offered to up to three customers at once (the webapp's
     # "Riempi buchi"). Every variable is a fact: name, day, time, stylist. The
-    # service is left implicit on purpose (owner, 2026-10-18). Both buttons route
+    # service is left implicit on purpose (owner, 2026-10-18). "Abbiamo un posto
+    # libero" is true both for a slot freed by a cancellation and for an
+    # always-empty stretch, which the webapp also offers. Both buttons route
     # to the booking agent, which re-checks the slot — it may already be taken by
     # another invitee.
     "gap_fill_v1": Template(
         body=(
-            "Ciao {{1}}, si è appena liberato un posto {{2}} alle {{3}} con {{4}}. "
+            "Ciao {{1}}, abbiamo un posto libero {{2}} alle {{3}} con {{4}}. "
             "Ti andrebbe di passare? Se l'orario non va bene, possiamo trovarne "
             "un altro insieme."
         ),
