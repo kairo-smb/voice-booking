@@ -169,7 +169,8 @@ class CampaignRequest(BaseModel):
     shop_id: UUID
     requested_by: UUID | None = None
     # Which webapp surface enqueued this: composer (AI) | touchpoint (bulk) |
-    # offer (single win-back). NULL if an operator ever calls the API directly.
+    # offer (single win-back) | gap_fill (one free slot, up to 3 invitees, sent
+    # together). NULL if an operator ever calls the API directly.
     source: str | None = None
     campaign_key: str = Field(min_length=1, max_length=80)
     template_key: str = "promo_v1"
