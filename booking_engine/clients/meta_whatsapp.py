@@ -268,9 +268,28 @@ async def get_phone_number(*, phone_number_id: str, token: str) -> PhoneNumber:
 
 # ------------------------------------------------------------------- templates
 
+def template_components(
+    body_text: str, sample_variables: dict[str, str], buttons: tuple[str, ...] = (),
+) -> list[dict]:
+    """BODY (+ BUTTONS when there are quick replies) — one builder for create and
+    edit, because an edit that sends only the BODY would strip the buttons."""
+    ordered = [sample_variables[str(i)] for i in range(1, len(sample_variables) + 1)]
+    components: list[dict] = [{
+        "type": "BODY",
+        "text": body_text,
+        **({"example": {"body_text": [ordered]}} if ordered else {}),
+    }]
+    if buttons:
+        components.append({"type": "BUTTONS", "buttons": [
+            {"type": "QUICK_REPLY", "text": b} for b in buttons
+        ]})
+    return components
+
+
 async def create_template(
     *, waba_id: str, token: str, name: str, language: str,
     category: str, body_text: str, sample_variables: dict[str, str],
+    buttons: tuple[str, ...] = (),
 ) -> tuple[str, str]:
     """Create a template on the *salon's* WABA. Returns (id, status).
 
@@ -280,18 +299,13 @@ async def create_template(
     variables without one, and every useful marketing template opens with
     "Ciao {{1}}".
     """
-    ordered = [sample_variables[str(i)] for i in range(1, len(sample_variables) + 1)]
     body = await _request(
         "POST", f"{waba_id}/message_templates", token=token,
         json_body={
             "name": name,
             "language": language,
             "category": category,
-            "components": [{
-                "type": "BODY",
-                "text": body_text,
-                **({"example": {"body_text": [ordered]}} if ordered else {}),
-            }],
+            "components": template_components(body_text, sample_variables, buttons),
         },
     )
     return body.get("id", ""), (body.get("status") or "PENDING").lower()
@@ -348,6 +362,7 @@ async def fetch_template(*, waba_id: str, name: str, token: str) -> TemplateStat
 
 async def edit_template(
     *, template_id: str, token: str, body_text: str, sample_variables: dict[str, str],
+    buttons: tuple[str, ...] = (),
 ) -> str:
     """Replace an existing template's body, keeping its name. Returns the status.
 
@@ -356,18 +371,14 @@ async def edit_template(
     air for a month. An edit puts the template back to PENDING and Meta
     re-reviews it; the previously approved version keeps sending meanwhile.
 
-    Only the body is sent: category is not editable this way (a UTILITY →
+    Body and buttons are sent (an edit without the BUTTONS component would drop
+    them): category is not editable this way (a UTILITY →
     MARKETING move doubles the cost of our highest-volume messages and gets a
     human, not a loop), and the name is the identity.
     """
-    ordered = [sample_variables[str(i)] for i in range(1, len(sample_variables) + 1)]
     body = await _request(
         "POST", template_id, token=token,
-        json_body={"components": [{
-            "type": "BODY",
-            "text": body_text,
-            **({"example": {"body_text": [ordered]}} if ordered else {}),
-        }]},
+        json_body={"components": template_components(body_text, sample_variables, buttons)},
     )
     return (body.get("status") or "PENDING").lower()
 

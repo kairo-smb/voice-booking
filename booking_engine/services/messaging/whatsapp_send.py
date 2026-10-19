@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+import math
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -38,7 +39,7 @@ from booking_engine.clients import webapp_credits
 from booking_engine.db import sms_queries
 from booking_engine.db import token_basket_queries as tbq
 from booking_engine.db import whatsapp_queries as wq
-from booking_engine.services.messaging import meta_limits
+from booking_engine.services.messaging import meta_limits, wa_routing
 from booking_engine.services.messaging.pacer import Pacer
 from booking_engine.services.messaging.sms_send import _has_active_consent
 from booking_engine.services.messaging.whatsapp_pricing import SEND_CREDITS, estimate_usd
@@ -66,6 +67,47 @@ FREQUENCY_CAP_RETRY_MINUTES = 24 * 60
 
 # The recipient told Meta to stop hearing from *us*. Permanent.
 OPT_OUT_CODE = 131050
+
+# Open conversation = the customer wrote within one session gap. Marketing
+# never lands inside one (it would interrupt a request in progress, and the
+# agent would read it as the customer's topic). Two named exceptions by
+# campaign key: the review ask still goes out, the appointment reminder does
+# not — a customer we spoke to today knows about tomorrow.
+_FEEDBACK_KEY = "automation:feedback:"
+_REMINDER_KEY = "automation:reminder:"
+
+
+def blocked_by_open_conversation(category: str | None, campaign_key: str | None) -> bool:
+    key = campaign_key or ""
+    if key.startswith(_REMINDER_KEY):
+        return True
+    if key.startswith(_FEEDBACK_KEY):
+        return False
+    return category != "UTILITY"
+
+
+def _now() -> datetime:
+    """The clock, as a seam: send-window tests pin it."""
+    return datetime.now(tz=SALON_TZ)
+
+
+def minutes_until_window(now: datetime, *, start_hour: int, end_hour: int) -> int:
+    """0 inside [start, end) salon time, else minutes to the next opening.
+
+    `spread` already schedules campaigns inside this window, but automations
+    enqueue at `now()` and a deferred row can roll past closing — so the window
+    is enforced again where the message actually leaves.
+    """
+    local = now.astimezone(SALON_TZ)
+    if start_hour <= local.hour < end_hour:
+        return 0
+    nxt = local.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    if local.hour >= end_hour:
+        nxt += timedelta(days=1)
+    # Subtract in UTC: same-zone aware datetimes subtract by wall clock, which
+    # is an hour off across a DST change.
+    gap = nxt.astimezone(timezone.utc) - local.astimezone(timezone.utc)
+    return max(1, math.ceil(gap.total_seconds() / 60))
 
 
 def spread(
@@ -122,8 +164,13 @@ async def enqueue_campaign(
     now: datetime | None = None,
     settings,
     initiated_by: UUID | None = None,
+    together: bool = False,
 ) -> dict:
     """Queue one personalised message per recipient. Refusals are rows, not silence.
+
+    `together` schedules everyone at one moment: a gap-fill invite offers one
+    slot to several customers, and spacing them across the day would hand the
+    slot to whoever happened to be first in the list.
 
     `recipients` is `[{"customer_id": UUID, "variables": {"1": "Giulia", ...}}]`
     — the caller (the webapp, from its LLM copy generator) supplies the
@@ -144,7 +191,7 @@ async def enqueue_campaign(
 
     # UTILITY is transactional — a reminder about the customer's own
     # appointment. It needs no marketing consent, is not blocked by Meta's +1
-    # marketing pause, and must never be suppressed by the 7-day recipient
+    # marketing pause, and must never be suppressed by the 10-day (240h) recipient
     # cooldown (that cooldown is our guard against the MARKETING frequency
     # cap; an appointment reminder is not a promotion). Nothing fails when
     # this is wrong the other way: a missing category fails closed to the
@@ -165,12 +212,14 @@ async def enqueue_campaign(
     # it is one we can read. See the 2026-08-24 campaigns spec §7.3.
 
     when = spread(
-        len(recipients),
+        1 if together else len(recipients),
         now or datetime.now(tz=SALON_TZ),
         start_hour=settings.whatsapp_send_start_hour,
         end_hour=settings.whatsapp_send_end_hour,
         daily_cap=cap,
     )
+    if together:
+        when = when * len(recipients)
 
     # Who already heard from this salon inside the cooldown. One batched query
     # for the whole campaign — a bulk send is up to 2000 recipients, and this
@@ -189,6 +238,7 @@ async def enqueue_campaign(
     )
 
     queued, suppressed, skipped = 0, 0, 0
+    results: list[dict] = []
     for recipient, scheduled_at in zip(recipients, when):
         customer_id = recipient["customer_id"]
         variables = {
@@ -211,6 +261,14 @@ async def enqueue_campaign(
             reason = "marketing_blocked_destination"
         elif not is_utility and customer_id in cooled_off:
             reason = "recently_contacted"
+        elif blocked_by_open_conversation(
+            template.get("category"), campaign_key,
+        ) and phone in await wq.in_conversation(
+            shop_id=shop_id, phones=[phone], within=wa_routing.SESSION_GAP,
+        ):
+            # ponytail: one query per recipient, like the customer lookup above;
+            # batch both if a 2000-recipient enqueue gets slow.
+            reason = "open_conversation"
 
         message_id = await wq.enqueue(
             shop_id=shop_id, customer_id=customer_id, campaign_key=campaign_key,
@@ -221,6 +279,11 @@ async def enqueue_campaign(
             status="suppressed" if reason else "queued", suppressed_reason=reason,
             initiated_by=initiated_by,
         )
+        results.append({
+            "customer_id": str(customer_id),
+            "status": "already_sent" if message_id is None else ("suppressed" if reason else "queued"),
+            "reason": reason,
+        })
         if message_id is None:
             skipped += 1        # this campaign already reached them
         elif reason:
@@ -229,7 +292,7 @@ async def enqueue_campaign(
             queued += 1
 
     return {"ok": True, "queued": queued, "suppressed": suppressed,
-            "already_sent": skipped,
+            "already_sent": skipped, "results": results,
             "first_at": when[0].isoformat() if when else None,
             "last_at": when[-1].isoformat() if when else None}
 
@@ -298,6 +361,16 @@ async def send_due(
             counts["deferred"] += 1
             continue
 
+        if msg.get("category") != "UTILITY":
+            wait = minutes_until_window(
+                _now(), start_hour=settings.whatsapp_send_start_hour,
+                end_hour=settings.whatsapp_send_end_hour,
+            )
+            if wait:
+                await wq.requeue_one(message_id=msg["id"], minutes=wait)
+                counts["deferred"] += 1
+                continue
+
         # Re-read consent and the cooldown only for MARKETING, for the same
         # reason consent is re-read at all: a queued row can sit for hours (or
         # days, on a multi-day drip), and both the customer's consent and the
@@ -319,6 +392,14 @@ async def send_due(
                 await wq.mark_suppressed(
                     message_id=msg["id"], reason="recently_contacted",
                 )
+                counts["suppressed"] += 1
+                continue
+
+        if blocked_by_open_conversation(msg.get("category"), msg.get("campaign_key")):
+            if await wq.in_conversation(
+                shop_id=shop_id, phones=[msg["to_phone"]], within=wa_routing.SESSION_GAP,
+            ):
+                await wq.mark_suppressed(message_id=msg["id"], reason="open_conversation")
                 counts["suppressed"] += 1
                 continue
 

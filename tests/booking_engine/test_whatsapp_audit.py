@@ -102,7 +102,7 @@ async def test_campaign_enqueue_hook_records_actor(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source,sends_now", [("offer", True), ("touchpoint", False)])
+@pytest.mark.parametrize("source,sends_now", [("offer", True), ("gap_fill", True), ("touchpoint", False)])
 async def test_single_offer_is_sent_at_enqueue_bulk_waits_for_tick(monkeypatch, source, sends_now):
     """The win-back modal is one click for one customer; waiting for the tick
     (the next scheduled drain) read as "nothing happened". Bulk keeps
@@ -111,8 +111,10 @@ async def test_single_offer_is_sent_at_enqueue_bulk_waits_for_tick(monkeypatch, 
     from booking_engine.api.routes.whatsapp import CampaignRequest
 
     send_calls: list[dict] = []
+    enqueue_calls: list[dict] = []
 
     async def fake_enqueue(**kw):
+        enqueue_calls.append(kw)
         return {"ok": True, "queued": 1, "suppressed": 0, "already_sent": 0,
                 "first_at": None, "last_at": None}
 
@@ -136,6 +138,8 @@ async def test_single_offer_is_sent_at_enqueue_bulk_waits_for_tick(monkeypatch, 
 
     out = await wa_routes.campaign(payload=payload, settings=FakeSettings(), _auth=True)
 
+    # Only a gap fill offers one slot to several people at once.
+    assert enqueue_calls[0]["together"] is (source == "gap_fill")
     if sends_now:
         assert send_calls == [{"settings": send_calls[0]["settings"],
                                "shop_id": shop, "campaign_key": "winback-1"}]
@@ -143,3 +147,23 @@ async def test_single_offer_is_sent_at_enqueue_bulk_waits_for_tick(monkeypatch, 
     else:
         assert send_calls == []
         assert "sent_now" not in out["data"]
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_refuses_more_than_three_recipients(monkeypatch):
+    from fastapi import HTTPException
+    from booking_engine.api.routes import whatsapp as wa_routes
+    from booking_engine.api.routes.whatsapp import CampaignRequest
+
+    async def boom(**kw):
+        raise AssertionError("must be refused before enqueue")
+
+    monkeypatch.setattr(wa_routes, "enqueue_campaign", boom)
+    payload = CampaignRequest(
+        shop_id=uuid4(), source="gap_fill", campaign_key="gap_fill:s:2026-10-20T15:00",
+        template_key="gap_fill_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(4)],
+    )
+    with pytest.raises(HTTPException) as exc:
+        await wa_routes.campaign(payload=payload, settings=FakeSettings(), _auth=True)
+    assert exc.value.status_code == 422

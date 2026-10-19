@@ -371,6 +371,35 @@ def test_a_list_tap_is_read_like_a_button_tap(client, db):
     assert db.inbound[0]["body"] == "Listino"
 
 
+def template_button_payload(text: str = "Prenoto", wa_id: str = "wamid.btn1") -> dict:
+    return _envelope("messages", {
+        "messaging_product": "whatsapp",
+        "messages": [{"from": CUSTOMER_PHONE, "id": wa_id, "timestamp": "1760000000",
+                      "type": "button", "button": {"payload": text, "text": text}}],
+    })
+
+
+def test_a_template_quick_reply_is_stored_as_a_booking_intent(client, db):
+    """A tap on gap_fill_v1's "Prenoto" arrives as `type: button`, not
+    `interactive`; it routes to the booking agent like any menu tap."""
+    assert post_webhook(client, template_button_payload("Prenoto")).status_code == 200
+
+    row = db.inbound[0]
+    assert row["intent"] == "booking"
+    assert float(row["confidence"]) == 1.0
+    assert row["body"] == "Prenoto"
+
+
+def test_template_quick_reply_maps_to_its_intent():
+    msg = {"type": "button", "button": {"payload": "Altro orario", "text": "Altro orario"}}
+    assert wa_routes._interactive_or_text(msg) == ("booking", "Altro orario")
+
+
+def test_an_unknown_template_button_is_text():
+    msg = {"type": "button", "button": {"payload": "Boh", "text": "Boh"}}
+    assert wa_routes._interactive_or_text(msg) == (None, "Boh")
+
+
 def test_a_typed_message_carries_no_intent_and_no_confidence(client, db):
     """Anything typed is for the classifier to rule on, later and elsewhere."""
     post_webhook(client, inbound_payload(body="vorrei un taglio"))
