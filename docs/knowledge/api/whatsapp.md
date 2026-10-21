@@ -491,6 +491,15 @@ switch it off:
 | `turn_limit` | `MAX_SESSION_TURNS` (12) reached **in this session**. A booking is four or five exchanges; twelve means the conversation is not going where the agent thinks it is, and the honest move is a person. Escalated, because it is something happening rather than a thread that was never the agent's |
 | `low_credit` | the basket is at or below the shop's low-credit threshold (`services/credit_state.py`: `balance <= coalesce(shop_config.auto_topup_threshold_tokens, 10000)`). Checked **after** `open_session` and after the escalation/takeover rules, then stamped `outcome = 'escalated'`, `outcome_reason = 'low_credit'` — never over a takeover. No marketing-engine call is made. The stamp is what keeps the conversation manual after a top-up; the *next* session (past `SESSION_GAP`) is answered again automatically |
 
+**A reply Meta refuses escalates as `send_failed` (2026-10-21).** Not a
+`may_speak` rule — the turn ran and the engine charged for it — but the reply
+never reached the customer: a Meta test number answering anyone outside its
+"To" allow-list (131030), a revoked token, an unregistered number. `handle`
+catches `MetaError` around `_say` and stamps `outcome = 'escalated'`,
+`outcome_reason = 'send_failed'`. Until then the exception died in the inbound
+worker's catch-all, the session stayed open with no outcome, and the thread
+read as the agent still handling it while nobody answered.
+
 **The credit pause (owner decision, 2026-09-29).** One threshold per shop, read
 by every surface. Below it the responder stands down but nothing else changes:
 the WABA stays connected, the classifier keeps naming requests while the
