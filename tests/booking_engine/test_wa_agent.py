@@ -437,6 +437,20 @@ async def test_a_turn_that_escalates_sends_nothing_to_the_customer(wired):
     assert wired.record_reply.count == 0
 
 
+async def test_a_send_meta_refuses_hands_the_thread_to_the_owner(wired):
+    """131030 on a test number: the turn ran, the reply never left. Raising
+    used to leave the session open with no outcome, so the thread looked
+    handled and nobody answered. It must land in the owner's queue."""
+    wired.send_text.raises = wa_agent.meta.MetaError(
+        131030, "(#131030) Recipient phone number not in allowed list")
+
+    await run(wired)
+
+    assert wired.record_reply.count == 0
+    assert wired.mark_escalated.count == 1
+    assert wired.mark_escalated.last == {"call_id": CALL, "reason": "send_failed"}
+
+
 async def test_text_riding_along_with_an_escalation_is_still_not_sent(wired):
     """Belt and braces on the engine's contract: if a future change there let
     an apology ride along, the customer must still not be answered twice."""
