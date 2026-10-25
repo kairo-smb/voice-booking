@@ -116,7 +116,7 @@ The owner disconnects their WABA, in any state (added 2026-09-25). Unsubscribes 
           "messaging_limit": "TIER_2K", "coexistence": true,
           "daily_cap": 50, "configured_daily_cap": 50,
           "meta_tier": "TIER_2K", "meta_tier_daily": 2000,
-          "recipient_cooldown_hours": 168,
+          "recipient_cooldown_hours": 240,
           "offline_reason": null, "sent_today": 12, "sent_last_24h": 47,
           "sent_this_month": 87,
           "credit": {"balance": 45372, "threshold": 10000, "low": false},
@@ -244,17 +244,31 @@ Returns immediately with the schedule; nothing is sent inline:
 ```json
 {"data": {"ok": true, "queued": 380, "suppressed": 18, "already_sent": 2,
           "first_at": "2026-08-24T09:00:00+02:00",
-          "last_at": "2026-08-31T19:47:00+02:00"}}
+          "last_at": "2026-08-31T19:47:00+02:00",
+          "results": [{"customer_id": "…", "status": "queued", "reason": null},
+                      {"customer_id": "…", "status": "suppressed", "reason": "recently_contacted"}]}}
 ```
 
-- `suppressed` — a row written with a `suppressed_reason` (`no_consent`, `no_phone`, `customer_not_found`). Refusals are recorded, never silent.
+`results` is the **enqueue verdict**, not the delivery outcome: a `queued` row can still be deferred (daily cap, send window) or suppressed at send time. For `offer` and `gap_fill`, `sent_now` counts what the inline send actually sent. `results` has one entry per recipient, in request order: `status` is `queued`, `suppressed` (with the `reason`) or `already_sent`. The webapp's "Riempi buchi" shows a per-customer outcome from it; the counts above are the same facts summed.
+
+- `suppressed` — a row written with a `suppressed_reason` (`no_consent`, `no_phone`, `customer_not_found`, `marketing_blocked_destination`, `recently_contacted`, `open_conversation`). Refusals are recorded, never silent.
 - `already_sent` — this `campaign_key` already reached that customer; the unique index made the retry a no-op. That guard earns its keep here, where "invia a 400 clienti" is exactly the button someone double-clicks.
 
 **Exception: `source: "offer"`** (the webapp's single win-back modal) is sent at enqueue time — `send_due` scoped to that shop + `campaign_key`, same consent/cooldown/cap checks — and the response carries `sent_now`. One click for one customer shouldn't wait for the next scheduled drain. It shares the drain lock: if a drain is running, the row stays queued for the next one and `sent_now` is 0. Out of opening hours `spread` has already put the row on tomorrow's first slot, so it still waits.
 
+**`source: "gap_fill"`** (the webapp's "Riempi buchi": one freed slot offered to up to 3 customers, `template_key: "gap_fill_v1"`, `campaign_key: "gap_fill:<staff_uuid>:<YYYY-MM-DDTHH:MM>"`) behaves like `offer` and adds one thing. It is sent inline the same way, and `enqueue_campaign(..., together=True)` schedules **every recipient at the same moment** instead of spreading them: spacing them across the day would hand the slot to whoever happened to be first in the list. At most **3 recipients** (`GAP_FILL_MAX_RECIPIENTS`); more is a 422 `too_many_recipients` before anything is enqueued. `together` ignores the daily-cap chunking, so rows beyond the day's cap wait an hour at send time instead of rolling to another day. If two accept, the agent is told in the transcript (see [Outreach in the agent's transcript](#outreach-in-the-agents-transcript)) to re-check the slot before confirming.
+
+`gap_fill_v1` is MARKETING with four variables and two quick-reply buttons, **Prenoto** and **Altro orario**. A tap arrives as `type: "button"` (not `interactive`), and `TEMPLATE_BUTTON_INTENTS` in `whatsapp_templates.py` maps both texts to the `booking` intent, so the booking agent takes the thread. Its facts-only variables put it in `MARKETING_WITHOUT_GENERATED_SLOT`.
+
 `spread()` lays the campaign across the salon's opening hours (`WHATSAPP_SEND_START_HOUR`–`WHATSAPP_SEND_END_HOUR`, Europe/Rome), rolling onto **following days** once a day's `daily_cap` is used. A 400-recipient campaign against a 50/day sender is eight days of drip, and the owner is told so at enqueue time.
 
 There is **no `over_daily_cap` rejection any more**: exceeding a day's allowance is a longer schedule, not an error. Keeping it would have made bulk impossible, and piling everything onto today just hands `send_due` hundreds of rows to defer by an hour, repeatedly, until nobody can read the queue.
+
+Marketing sends also obey three rules at enqueue **and** send time:
+
+- **Cooldown 240h** (`WHATSAPP_RECIPIENT_COOLDOWN_HOURS`) per recipient; see [The cooldown](#the-cooldown-is-the-by-design-half-of-131049).
+- **Open conversation.** A non-UTILITY message is not sent to a phone that wrote within one session gap (`wa_routing.SESSION_GAP`): enqueue records it `suppressed` / `open_conversation`, and `send_due` suppresses a row that was overtaken by a new conversation. A promo landing mid-conversation interrupts a request in progress and the agent would read it as the customer's topic. Named exceptions by `campaign_key`: the **feedback** request (`automation:feedback:`) is exempt and still goes out; the appointment **reminder** (`automation:reminder:`) is skipped, because a customer we spoke to today already knows about tomorrow. UTILITY templates are otherwise unaffected.
+- **Send-time window 09:00-20:00 Europe/Rome** (`WHATSAPP_SEND_START_HOUR`/`END_HOUR`) for every non-UTILITY row. `spread` already schedules inside it, but automations enqueue at `now()` and a deferred row can roll past closing, so `send_due` re-checks via `minutes_until_window` and defers the row to the next opening instead of sending.
 
 Errors (409): `sender_not_online`, `unknown_template`, `template_pending`/`template_rejected`/…, `sender_has_no_allowance`.
 
@@ -477,6 +491,15 @@ switch it off:
 | `turn_limit` | `MAX_SESSION_TURNS` (12) reached **in this session**. A booking is four or five exchanges; twelve means the conversation is not going where the agent thinks it is, and the honest move is a person. Escalated, because it is something happening rather than a thread that was never the agent's |
 | `low_credit` | the basket is at or below the shop's low-credit threshold (`services/credit_state.py`: `balance <= coalesce(shop_config.auto_topup_threshold_tokens, 10000)`). Checked **after** `open_session` and after the escalation/takeover rules, then stamped `outcome = 'escalated'`, `outcome_reason = 'low_credit'` — never over a takeover. No marketing-engine call is made. The stamp is what keeps the conversation manual after a top-up; the *next* session (past `SESSION_GAP`) is answered again automatically |
 
+**A reply Meta refuses escalates as `send_failed` (2026-10-21).** Not a
+`may_speak` rule — the turn ran and the engine charged for it — but the reply
+never reached the customer: a Meta test number answering anyone outside its
+"To" allow-list (131030), a revoked token, an unregistered number. `handle`
+catches `MetaError` around `_say` and stamps `outcome = 'escalated'`,
+`outcome_reason = 'send_failed'`. Until then the exception died in the inbound
+worker's catch-all, the session stayed open with no outcome, and the thread
+read as the agent still handling it while nobody answered.
+
 **The credit pause (owner decision, 2026-09-29).** One threshold per shop, read
 by every surface. Below it the responder stands down but nothing else changes:
 the WABA stays connected, the classifier keeps naming requests while the
@@ -654,6 +677,10 @@ Echo dedup is best-effort: the wamid goes into `provider_sid`, which has only a 
 
 A tap on a button or list we sent arrives as `type: "interactive"` with `interactive.button_reply.id` (or `list_reply.id`). That id is one **we** defined, so it *is* the intent: it is stored straight into `inbound_messages.intent` with `confidence = 1.0`, and the reply's `title` is stored as `body` so the thread shows the customer what they saw themselves tap. No model call, no cost, no possibility of a hallucinated intent. Anything typed arrives with both columns NULL, for the classifier.
 
+### Outreach in the agent's transcript
+
+`wa_session_queries.session_transcript` hands the booking agent the thread, and it includes our own template and campaign sends, labelled `[Jev outreach]`, so the agent knows the customer is answering something we sent. Gap-fill campaigns (`campaign_key` starting `gap_fill:`) get a longer variant telling the agent the invite went to several customers for the same time: verify the slot is still free before confirming, and if it was taken, apologise, say another customer just booked and offer alternatives. Only outreach that was **actually sent** (`sent_at` set; suppressed and cancelled rows never appear) and **not yet answered** (no inbound from that phone since) is included, up to **48 hours** (`OUTREACH_LOOKBACK`) before the session opened. One the customer already replied to in an earlier conversation must not come back as the topic of a new one. Plain replies from before the session are never pulled in. Utility messages sent *during* the session (a receipt, a reminder) are labelled outreach too; accepted.
+
 ### Opt-out vs. frequency cap
 
 Two error codes that look alike and must not behave alike:
@@ -708,7 +735,7 @@ as `daily_cap`, with the raw column exposed separately as
 | Volume tier (business-initiated conversations / **rolling 24h**) | `enqueue_campaign`, `send_due` | `effective_daily_cap()` against `sent_last_24h()` |
 | Throughput (mps, per number) | `send_due` | global pacer clamped to `MAX_SENDS_PER_MINUTE` |
 | Graph API app-level rate | `send_due` | `Pacer`, `WHATSAPP_SENDS_PER_MINUTE` |
-| Per-user cross-brand marketing cap (131049) | `enqueue_campaign` + `send_due` | `WHATSAPP_RECIPIENT_COOLDOWN_HOURS` (default 168) |
+| Per-user cross-brand marketing cap (131049) | `enqueue_campaign` + `send_due` | `WHATSAPP_RECIPIENT_COOLDOWN_HOURS` (default 240) |
 | Marketing to +1 recipients (paused since 2025-04-01) | `enqueue_campaign` | `marketing_allowed()` |
 | Tech Provider onboarding, 10 (or 200) per rolling 7 days | `complete()` | `onboarded_last_7_days()`, checked *before* spending the popup's single-use code |
 
@@ -734,14 +761,14 @@ the env var to something absurd cannot silently remove the ceiling.
 ### The cooldown is the by-design half of 131049
 
 Reacting to `131049` costs the send and a quality-rating hit; not sending
-costs nothing. The cooldown (7 days by default) means we stay under Meta's
+costs nothing. The cooldown (10 days / 240h by default) means we stay under Meta's
 undisclosed per-user ceiling instead of discovering it. It is checked at
 enqueue *and* re-checked at send, for the same reason consent is: a row on a
 multi-day drip can be overtaken by another campaign. It counts `sent_at`, so a
 message that never left never starts a cooldown.
 
 New `suppressed_reason` values: `recently_contacted`,
-`marketing_blocked_destination`.
+`marketing_blocked_destination`, `open_conversation`.
 
 ---
 
@@ -751,7 +778,7 @@ New `suppressed_reason` values: `recently_contacted`,
 
 - `whatsapp` — reconciles sender and template state against Meta, for verdicts the webhook didn't deliver, and carries the **only retry of the propagation gate**: live senders missing part of the catalogue — the receipt included since 2026-09-23 (`propagation_fingerprints()` = catalogue + document fingerprints) — **or holding an outdated body** are pushed once Kairo's own copy of that exact text turns `approved`. The worklist (`list_senders_needing_templates`) is keyed on `template_key|body_hash` pairs rather than on a count of rows, which fixed two things at once: a count could not see a body that changed under an unchanged name, and it was inflated by non-pushed templates, so a shop could look complete while missing something. The receipt flipped sides in 2026-09-23: it used to be the padding to exclude, and is now one of the fingerprints a shop must hold. Kairo's WABA is asked once per run, not once per shop — the answer is identical for everyone. An empty gate (unconfigured, or a Graph error) skips the stage entirely rather than pushing on a guess. Counts add `propagated`, `edited` and `approved_on_kairo`.
 - `whatsapp_sends` — claims what is due and sends it. Counts: `sent`, `suppressed` (`no_consent`, `opted_out`, `recently_contacted`), `failed`, `deferred` (over daily cap, retried in an hour), `rate_capped` (Meta 131049, retried in 24h), `requeued` (claimed but never sent, recovered from a crashed tick).
-- `whatsapp_automations` — fires each shop's enabled rules against what is due ([Automations](#automations)). It runs **after** `whatsapp_sends`, so a row it enqueues this tick goes out on the **next** drain (≤60s), not this pass. Per enabled rule: an offline sender skips the shop (`skipped_shops`); the rule's template row must be `approved` or it is skipped silently (the automations tile disables the toggle on that same signal); and a **MARKETING** rule is held while the sender's quality rating is YELLOW/RED — `feedback_v2` is MARKETING, so a red sender pauses the review request while the UTILITY reminder continues. Then `feedback_v2` is due for a **completed** appointment whose `end_time` falls in `(now − (hours_after+1)h, now − hours_after h]` (default 24), with a phone and no prior `automation_sends` row; `reminder_v6` is due for a `scheduled`/`confirmed` appointment starting in `(now, now+24h]`, with a phone, the optional `min_no_shows` filter and no prior send. Every variable is a database fact (Italian date/time formatting) — nothing is generated, which is what keeps the reminder UTILITY and lets the MARKETING feedback carry its [one named slot exemption](#post-whatsapptemplatesensureshop_id). Each due row is enqueued (`campaign_key = automation:{rule}:{appointment_id}`) and then recorded in `whatsapp.automation_sends` (PK `(rule_key, appointment_id)`) — **enqueue first**, so a crash between the two re-sends once rather than dropping a message forever, and a `None` from `enqueue` means a crashed tick already queued it, so it records anyway. `outbound_messages.initiated_by` stays NULL: no human configured this send. Counts: `feedback`, `reminder`, `skipped_shops`, `errors`. `reminder_v6` being UTILITY is load-bearing: `send_due` re-checks consent and the 7-day cooldown only for non-UTILITY rows.
+- `whatsapp_automations` — fires each shop's enabled rules against what is due ([Automations](#automations)). It runs **after** `whatsapp_sends`, so a row it enqueues this tick goes out on the **next** drain (≤60s), not this pass. Per enabled rule: an offline sender skips the shop (`skipped_shops`); the rule's template row must be `approved` or it is skipped silently (the automations tile disables the toggle on that same signal); and a **MARKETING** rule is held while the sender's quality rating is YELLOW/RED — `feedback_v2` is MARKETING, so a red sender pauses the review request while the UTILITY reminder continues. Then `feedback_v2` is due for a **completed** appointment whose `end_time` falls in `(now − (hours_after+1)h, now − hours_after h]` (default 24), with a phone and no prior `automation_sends` row; `reminder_v6` is due for a `scheduled`/`confirmed` appointment starting in `(now, now+24h]`, with a phone, the optional `min_no_shows` filter and no prior send. Every variable is a database fact (Italian date/time formatting) — nothing is generated, which is what keeps the reminder UTILITY and lets the MARKETING feedback carry its [one named slot exemption](#post-whatsapptemplatesensureshop_id). Each due row is enqueued (`campaign_key = automation:{rule}:{appointment_id}`) and then recorded in `whatsapp.automation_sends` (PK `(rule_key, appointment_id)`) — **enqueue first**, so a crash between the two re-sends once rather than dropping a message forever, and a `None` from `enqueue` means a crashed tick already queued it, so it records anyway. `outbound_messages.initiated_by` stays NULL: no human configured this send. Counts: `feedback`, `reminder`, `skipped_shops`, `errors`. `reminder_v6` being UTILITY is load-bearing: `send_due` re-checks consent and the 10-day (240h) cooldown only for non-UTILITY rows.
 - `whatsapp_nudges` — **the 20h nudge**. Meta's service window permits free-form messages only within 24h of the customer's *last* message, and it resets every time they write — so the only thing truly forbidden is speaking first after 24h of silence, which needs an approved template. One last free message inside the window (`NUDGE_AFTER_HOURS = 20`, `wa_nudge.NUDGE_BODY`) invites the customer to write back, and their reply is what reopens it. `should_nudge` is pure, `now` an argument, and refuses on every one of: shop not opted in, thread escalated, the shop at or below its low-credit threshold (`credit_low`, read once per shop per sweep from `credit_state`), the owner already replied (webapp or phone echo), the customer replied after the agent (the thread is waiting on *us*), the agent never spoke, already nudged since their last message, and the window already closed. "At most once" is **derived from a row**, not a column: the nudge is recorded like any other agent reply (`origin='agent'`, `preview = NUDGE_BODY`) and `list_nudge_candidates` reads that back — so it survives a restart, and there is no second fact about the same send to keep true. Counts: `nudged`, `errors`.
 - `credit_notices` — **the low-credit email, once per episode** (`credit_state.notify_sweep`). For an opted-in shop with an online sender that is at or below its threshold and not yet stamped, it POSTs `{shop_id, balance, threshold}` to the webapp's `POST /api/v1/hair-salon/whatsapp/credit-low` (engine bearer `MARKET_INTEL_SECRET`, as for token-expiring) **claiming** the episode first — one conditional `UPDATE … SET credit_low_notified_at = now() WHERE shop_id = $1 AND credit_low_notified_at IS NULL RETURNING 1`, so two concurrent ticks can never both mail. The claim is kept when the webapp answers sent, or `sent: false` for a standing reason (`no_owner_email`, `not_configured` — facts about the shop). It is **released** (retry next tick) when the webapp never answered, when it answered `sent: false` with `send_failed` or no reason (a transient Resend failure must not burn the episode's only mail), or when the send raised. The first tick that finds the balance back above the threshold clears the stamp, so the next episode mails again. Counts: `notified`, `cleared`, `errors`.
 

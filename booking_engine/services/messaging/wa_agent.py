@@ -239,7 +239,17 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
         logger.info("whatsapp.agent_empty_text shop=%s call=%s", shop_id, call_id)
         return
 
-    await _say(sender, phone, text)
+    # A send Meta refuses (131030 on a test number, a revoked token, an
+    # unregistered number) is a reply the customer will never read. Left to
+    # raise it died in the worker's catch-all, the session stayed open with no
+    # outcome, and the thread read as the agent still handling it — so nobody
+    # answered. Escalate instead: the owner's queue is where it belongs.
+    try:
+        await _say(sender, phone, text)
+    except meta.MetaError as exc:
+        logger.warning("whatsapp.agent_send_failed shop=%s call=%s err=%s",
+                       shop_id, call_id, exc)
+        await _stand_down(call_id, shop_id, phone, "send_failed", escalate=True)
 
 
 async def hold_for_low_credit(sender: dict, row: dict) -> None:

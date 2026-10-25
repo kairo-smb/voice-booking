@@ -221,7 +221,7 @@ def _approved_template(**over):
     return row
 
 
-def _patch_enqueue(monkeypatch, *, sender=None, template=None, cooled=()):
+def _patch_enqueue(monkeypatch, *, sender=None, template=None, cooled=(), talking=()):
     async def _sender(shop_id):
         return sender if sender is not None else _online_sender()
     async def _template(shop_id, key):
@@ -229,7 +229,10 @@ def _patch_enqueue(monkeypatch, *, sender=None, template=None, cooled=()):
     async def _recent(*, shop_id, customer_ids, hours):
         return {c for c in customer_ids if c in cooled}
     monkeypatch.setattr(wq, "get_sender", _sender)
+    async def _talking(*, shop_id, phones, within):
+        return {p for p in phones if p in talking}
     monkeypatch.setattr(wq, "get_template", _template)
+    monkeypatch.setattr(wq, "in_conversation", _talking)
     monkeypatch.setattr(wq, "recently_contacted", _recent)
 
 
@@ -361,7 +364,8 @@ async def test_enqueue_counts_a_repeat_campaign_as_already_sent(monkeypatch):
 
 def _patch_send_due(
     monkeypatch, *, claimed, sender, customer,
-    cooled=(), balance=10_000, charge_ok=True,
+    cooled=(), balance=10_000, charge_ok=True, talking=(),
+    now=datetime(2026, 8, 20, 10, 0, tzinfo=ROME),
 ):
     spy = {"sent": [], "suppressed": [], "failed": [], "deferred": [],
            "consent_withdrawn": [], "charged": []}
@@ -376,6 +380,8 @@ def _patch_send_due(
         return sender.get("_sent_today", 0)
     async def _recent(*, shop_id, customer_ids, hours):
         return {c for c in customer_ids if c in cooled}
+    async def _talking(*, shop_id, phones, within):
+        return {p for p in phones if p in talking}
     async def _customer(shop_id, customer_id):
         return customer
     async def _mark_sent(**kw):
@@ -394,6 +400,9 @@ def _patch_send_due(
     monkeypatch.setattr(wq, "get_sender", _get_sender)
     monkeypatch.setattr(wq, "sent_last_24h", _sent_24h)
     monkeypatch.setattr(wq, "recently_contacted", _recent)
+    monkeypatch.setattr(wq, "in_conversation", _talking)
+    # Pinned so no send test depends on the wall clock (the window check reads it).
+    monkeypatch.setattr(ws, "_now", lambda: now)
     monkeypatch.setattr(sms_queries, "get_customer_for_send", _customer)
     monkeypatch.setattr(wq, "mark_sent", _mark_sent)
     monkeypatch.setattr(wq, "mark_suppressed", _mark_suppressed)
@@ -2854,3 +2863,271 @@ async def test_sweep_refreshes_the_portfolio_tier_of_live_senders(monkeypatch):
 
     assert result["tiers_updated"] == 1
     assert meta_limits.tier_daily_conversations("TIER_2K") == 2_000
+
+
+# ------------------------------------------------------- open conversations
+
+def _async_return(value):
+    async def _f(*a, **kw):
+        return value
+    return _f
+
+
+def test_open_conversation_rule_by_kind():
+    """Marketing waits for silence; utility and the review ask do not; the
+    reminder does, because a customer we are talking to knows about tomorrow."""
+    f = ws.blocked_by_open_conversation
+    assert f("MARKETING", "bulk_x") is True
+    assert f(None, "gap_fill:s:2026-10-20T15:00") is True        # unknown category fails closed
+    assert f("MARKETING", "automation:feedback:a1") is False
+    assert f("UTILITY", "automation:reminder:a1") is True
+    assert f("UTILITY", None) is False
+
+
+@pytest.mark.asyncio
+async def test_send_due_skips_marketing_while_the_customer_is_talking(monkeypatch):
+    msg = _message(category="MARKETING", campaign_key="bulk_x")
+    spy = _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                          customer=_consenting(), talking={msg["to_phone"]})
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["suppressed"] == 1
+    assert spy["suppressed"][0]["reason"] == "open_conversation"
+
+
+@pytest.mark.asyncio
+async def test_send_due_still_sends_the_review_ask_in_an_open_conversation(monkeypatch):
+    msg = _message(category="MARKETING", campaign_key="automation:feedback:a1")
+    _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                    customer=_consenting(), talking={msg["to_phone"]})
+    _patch_meta_send(monkeypatch, _ok_send())
+
+    assert (await ws.send_due(settings=FakeSettings()))["sent"] == 1
+
+
+@pytest.mark.asyncio
+async def test_send_due_skips_the_reminder_in_an_open_conversation(monkeypatch):
+    msg = _message(category="UTILITY", campaign_key="automation:reminder:a1")
+    spy = _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                          customer=_consenting(), talking={msg["to_phone"]})
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+    assert counts["suppressed"] == 1 and counts["sent"] == 0
+    assert spy["suppressed"][0]["reason"] == "open_conversation"
+
+
+@pytest.mark.asyncio
+async def test_send_due_sends_other_utility_in_an_open_conversation(monkeypatch):
+    msg = _message(category="UTILITY", campaign_key=None)
+    _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                    customer=_consenting(), talking={msg["to_phone"]})
+    _patch_meta_send(monkeypatch, _ok_send())
+
+    assert (await ws.send_due(settings=FakeSettings()))["sent"] == 1
+
+
+@pytest.mark.asyncio
+async def test_enqueue_records_an_open_conversation_as_a_refusal(monkeypatch):
+    cust = _consenting()
+    _patch_enqueue(monkeypatch, talking={"+393331112222"})
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", _async_return(cust))
+    rows = []
+    async def _enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+    monkeypatch.setattr(wq, "enqueue", _enqueue)
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": cust["id"], "variables": {}}],
+        settings=FakeSettings(),
+    )
+    assert result["suppressed"] == 1
+    assert rows[0]["suppressed_reason"] == "open_conversation"
+
+
+# ------------------------------------------------------------ send window
+
+def test_minutes_until_window():
+    f = ws.minutes_until_window
+    assert f(datetime(2026, 10, 20, 10, 0, tzinfo=ROME), start_hour=9, end_hour=20) == 0
+    assert f(datetime(2026, 10, 20, 8, 30, tzinfo=ROME), start_hour=9, end_hour=20) == 30
+    assert f(datetime(2026, 10, 20, 22, 0, tzinfo=ROME), start_hour=9, end_hour=20) == 11 * 60
+    assert f(datetime(2026, 10, 20, 20, 0, tzinfo=ROME), start_hour=9, end_hour=20) == 13 * 60
+
+
+@pytest.mark.asyncio
+async def test_send_due_holds_marketing_outside_the_window(monkeypatch):
+    msg = _message(category="MARKETING", campaign_key="automation:feedback:a1")
+    spy = _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                          customer=_consenting(),
+                          now=datetime(2026, 10, 20, 22, 0, tzinfo=ROME))
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["deferred"] == 1
+    assert spy["deferred"][0]["minutes"] == 11 * 60
+
+
+@pytest.mark.asyncio
+async def test_send_due_sends_utility_at_night(monkeypatch):
+    msg = _message(category="UTILITY", campaign_key=None)
+    _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                    customer=_consenting(),
+                    now=datetime(2026, 10, 20, 22, 0, tzinfo=ROME))
+    _patch_meta_send(monkeypatch, _ok_send())
+
+    assert (await ws.send_due(settings=FakeSettings()))["sent"] == 1
+
+
+@pytest.mark.asyncio
+async def test_open_conversation_is_decided_before_the_credit_check(monkeypatch):
+    """An empty basket must not turn a skipped promotion into a failed row."""
+    msg = _message(category="MARKETING", campaign_key="bulk_x")
+    spy = _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                          customer=_consenting(), balance=0,
+                          talking={msg["to_phone"]})
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["suppressed"] == 1
+    assert spy["failed"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_window_is_decided_before_the_credit_check(monkeypatch):
+    """At night an empty basket defers the promotion; it is not failed."""
+    msg = _message(category="MARKETING", campaign_key="bulk_x")
+    spy = _patch_send_due(monkeypatch, claimed=[msg], sender=_online_sender(),
+                          customer=_consenting(), balance=0,
+                          now=datetime(2026, 10, 20, 22, 0, tzinfo=ROME))
+    _patch_meta_send(monkeypatch, _never_sends())
+
+    counts = await ws.send_due(settings=FakeSettings())
+
+    assert counts["deferred"] == 1
+    assert spy["failed"] == []
+
+
+def test_minutes_until_window_survives_the_autumn_clock_change():
+    """Clocks go back on 2026-10-25 03:00, so the night is 12h long, not 11."""
+    f = ws.minutes_until_window
+    assert f(datetime(2026, 10, 24, 22, 0, tzinfo=ROME), start_hour=9, end_hour=20) == 12 * 60
+
+
+@pytest.mark.asyncio
+async def test_create_template_sends_quick_reply_buttons(monkeypatch):
+    seen = {}
+    async def _request(method, path, *, token, json_body=None, **kw):
+        seen.update(json_body)
+        return {"id": "T1", "status": "PENDING"}
+    monkeypatch.setattr(meta, "_request", _request)
+
+    await meta.create_template(
+        waba_id="W", token="t", name="it_gap_fill_v1", language="it",
+        category="MARKETING", body_text="Ciao {{1}}", sample_variables={"1": "Giulia"},
+        buttons=("Prenoto", "Altro orario"),
+    )
+    assert seen["components"][1] == {"type": "BUTTONS", "buttons": [
+        {"type": "QUICK_REPLY", "text": "Prenoto"},
+        {"type": "QUICK_REPLY", "text": "Altro orario"},
+    ]}
+
+
+@pytest.mark.asyncio
+async def test_edit_template_keeps_quick_reply_buttons(monkeypatch):
+    seen = {}
+    async def _request(method, path, *, token, json_body=None, **kw):
+        seen.update(json_body)
+        return {"status": "PENDING"}
+    monkeypatch.setattr(meta, "_request", _request)
+
+    await meta.edit_template(
+        template_id="T1", token="t", body_text="Ciao {{1}}",
+        sample_variables={"1": "Giulia"}, buttons=("Prenoto", "Altro orario"),
+    )
+    assert seen["components"][1] == {"type": "BUTTONS", "buttons": [
+        {"type": "QUICK_REPLY", "text": "Prenoto"},
+        {"type": "QUICK_REPLY", "text": "Altro orario"},
+    ]}
+
+
+@pytest.mark.asyncio
+async def test_enqueue_together_schedules_everyone_at_the_same_moment(monkeypatch):
+    _patch_enqueue(monkeypatch)
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", _async_return(_consenting()))
+    rows = []
+
+    async def _enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+
+    monkeypatch.setattr(wq, "enqueue", _enqueue)
+
+    await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="gap_fill:s:2026-10-20T15:00", template_key="gap_fill_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(3)],
+        now=datetime(2026, 10, 19, 10, 0, tzinfo=ROME), settings=FakeSettings(),
+        together=True,
+    )
+    assert len(rows) == 3
+    assert len({r["scheduled_at"] for r in rows}) == 1
+
+
+@pytest.mark.asyncio
+async def test_enqueue_reports_each_recipient(monkeypatch):
+    ok, cooled = uuid4(), uuid4()
+    _patch_enqueue(monkeypatch, cooled={cooled})
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", _async_return(_consenting()))
+    monkeypatch.setattr(wq, "enqueue", _async_return(uuid4()))
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": ok, "variables": {}}, {"customer_id": cooled, "variables": {}}],
+        settings=FakeSettings(),
+    )
+    assert result["results"] == [
+        {"customer_id": str(ok), "status": "queued", "reason": None},
+        {"customer_id": str(cooled), "status": "suppressed", "reason": "recently_contacted"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_reports_already_sent(monkeypatch):
+    cid = uuid4()
+    _patch_enqueue(monkeypatch)
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", _async_return(_consenting()))
+    monkeypatch.setattr(wq, "enqueue", _async_return(None))
+
+    result = await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="c1", template_key="promo_v1",
+        recipients=[{"customer_id": cid, "variables": {}}], settings=FakeSettings(),
+    )
+    assert result["results"] == [
+        {"customer_id": str(cid), "status": "already_sent", "reason": None},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_together_after_hours_waits_for_tomorrow_morning(monkeypatch):
+    _patch_enqueue(monkeypatch)
+    monkeypatch.setattr(sms_queries, "get_customer_for_send", _async_return(_consenting()))
+    rows = []
+
+    async def _enqueue(**kw):
+        rows.append(kw)
+        return uuid4()
+
+    monkeypatch.setattr(wq, "enqueue", _enqueue)
+    await ws.enqueue_campaign(
+        shop_id=SHOP, campaign_key="gap_fill:s:2026-10-21T15:00", template_key="gap_fill_v1",
+        recipients=[{"customer_id": uuid4(), "variables": {}} for _ in range(3)],
+        now=datetime(2026, 10, 19, 21, 0, tzinfo=ROME), settings=FakeSettings(),
+        together=True,
+    )
+    assert {r["scheduled_at"] for r in rows} == {datetime(2026, 10, 20, 9, 0, tzinfo=ROME)}

@@ -76,9 +76,9 @@ class Settings(BaseSettings):
     forwarding_heartbeat_seconds: int = 0    # silent-forwarding push alerts
     # Our own guard against Meta's per-user, cross-brand marketing cap (error
     # 131049): never send the same customer two marketing messages inside this
-    # window. Seven days both keeps us well under Meta's undisclosed ceiling
+    # window. Ten days both keeps us well under Meta's undisclosed ceiling
     # and matches how often a salon should reasonably contact anyone.
-    whatsapp_recipient_cooldown_hours: int = 168
+    whatsapp_recipient_cooldown_hours: int = 240
     # Meta caps a Tech Provider's new-customer onboarding per rolling 7 days:
     # 10 until Access Verification is complete, 200 after. Flip this once it is.
     meta_access_verified: bool = False

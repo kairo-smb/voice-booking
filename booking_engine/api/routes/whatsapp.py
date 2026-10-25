@@ -33,6 +33,7 @@ from booking_engine.services.messaging import wa_agent
 from booking_engine.services.messaging import wa_inbound
 from booking_engine.services.messaging import whatsapp_onboarding as onboarding
 from booking_engine.services.messaging.whatsapp_pricing import price_list
+from booking_engine.services.messaging.whatsapp_templates import TEMPLATE_BUTTON_INTENTS
 from booking_engine.services.messaging import whatsapp_receipt
 from booking_engine.services.messaging.whatsapp_send import enqueue_campaign
 from booking_engine.services.scheduler import locked_send_due
@@ -44,6 +45,9 @@ from booking_engine.services.messaging.whatsapp_templates import (
 from booking_engine.services.meta_signature import meta_signature_valid
 
 logger = logging.getLogger(__name__)
+
+# One freed slot is offered to at most this many customers at once.
+GAP_FILL_MAX_RECIPIENTS = 3
 
 router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
 
@@ -165,7 +169,8 @@ class CampaignRequest(BaseModel):
     shop_id: UUID
     requested_by: UUID | None = None
     # Which webapp surface enqueued this: composer (AI) | touchpoint (bulk) |
-    # offer (single win-back). NULL if an operator ever calls the API directly.
+    # offer (single win-back) | gap_fill (one free slot, up to 3 invitees, sent
+    # together). NULL if an operator ever calls the API directly.
     source: str | None = None
     campaign_key: str = Field(min_length=1, max_length=80)
     template_key: str = "promo_v1"
@@ -433,10 +438,13 @@ async def campaign(
 ) -> dict:
     """Queue a personalised campaign, dripped across the salon's opening hours.
 
-    Returns immediately with the schedule. Nothing is sent inline: a bulk send
-    is hundreds of serial Graph calls with an owner watching a spinner, and the
-    whole point is that they land through the day (or the week), not at once.
+    Returns immediately with the schedule. Nothing is sent inline, except for
+    `offer` and `gap_fill`, which send what is due now: a bulk send is hundreds
+    of serial Graph calls with an owner watching a spinner, and the whole point
+    is that they land through the day (or the week), not at once.
     """
+    if payload.source == "gap_fill" and len(payload.recipients) > GAP_FILL_MAX_RECIPIENTS:
+        raise HTTPException(status_code=422, detail="too_many_recipients")
     result = await enqueue_campaign(
         shop_id=payload.shop_id,
         campaign_key=payload.campaign_key,
@@ -444,6 +452,7 @@ async def campaign(
         recipients=[r.model_dump() for r in payload.recipients],
         settings=settings,
         initiated_by=payload.requested_by,
+        together=payload.source == "gap_fill",
     )
     # Recipients never go into the audit — count only; the rows belong to
     # outbound_messages.
@@ -461,9 +470,10 @@ async def campaign(
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error"))
     # A single win-back is one owner, one customer, one click: waiting for the
-    # next scheduled drain reads as "nothing happened". Send what is due now; `spread` already put
-    # an out-of-hours send on tomorrow's opening, so that one still waits.
-    if payload.source == "offer" and result.get("queued"):
+    # next scheduled drain reads as "nothing happened". A gap fill is the same
+    # click, and its slot is perishable. Send what is due now; `spread` already
+    # put an out-of-hours send on tomorrow's opening, so that one still waits.
+    if payload.source in ("offer", "gap_fill") and result.get("queued"):
         result["sent_now"] = (await locked_send_due(
             settings=settings, shop_id=payload.shop_id,
             campaign_key=payload.campaign_key,
@@ -813,6 +823,10 @@ def _interactive_or_text(message: dict) -> tuple[str | None, str]:
     Every read is a `.get()` chain that degrades to empty: a shape Meta changes
     or a type we have never seen must record a blank message, not raise inside
     the webhook. Same reason the text branch tolerates a bare string.
+
+    A tap on a *template's* quick reply (gap_fill_v1's "Prenoto") arrives as
+    `type: "button"` instead, with no id of ours; its text maps to an intent via
+    TEMPLATE_BUTTON_INTENTS.
     """
     if message.get("type") == "interactive":
         inter = message.get("interactive")
@@ -822,6 +836,14 @@ def _interactive_or_text(message: dict) -> tuple[str | None, str]:
         if not isinstance(reply, dict):
             return None, ""
         return (str(reply.get("id") or "") or None, str(reply.get("title") or ""))
+    if message.get("type") == "button":
+        # A tap on a template's quick reply: Meta sends the button text as the
+        # payload when we set none at send time.
+        btn = message.get("button")
+        if not isinstance(btn, dict):
+            return None, ""
+        text = str(btn.get("text") or btn.get("payload") or "")
+        return TEMPLATE_BUTTON_INTENTS.get(str(btn.get("payload") or "")), text
     text = message.get("text")
     if isinstance(text, dict):
         return None, str(text.get("body") or "")

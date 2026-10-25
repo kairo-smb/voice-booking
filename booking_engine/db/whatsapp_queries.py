@@ -7,6 +7,7 @@ There is deliberately no WhatsApp-specific consent table.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from uuid import UUID
 
 from booking_engine.config import get_settings
@@ -595,6 +596,34 @@ async def recently_contacted(
     return {row["customer_id"] for row in rows}
 
 
+async def in_conversation(
+    *, shop_id: UUID, phones: list[str], within: timedelta,
+) -> set[str]:
+    """Which of these numbers wrote to the shop inside `within`.
+
+    "An open conversation" for the send rules: the customer spoke recently,
+    whoever answered — the agent or the owner by hand. `within` is
+    wa_routing.SESSION_GAP, the codebase's one definition of a conversation,
+    bound as an interval rather than written as a literal. Returns the input
+    strings that matched, so callers compare against what they passed.
+    """
+    if not phones:
+        return set()
+    rows = await execute(
+        """
+        SELECT p FROM unnest($2::text[]) AS p
+        WHERE EXISTS (
+            SELECT 1 FROM whatsapp.inbound_messages i
+            WHERE i.shop_id = $1
+              AND ltrim(i.from_phone, '+') = ltrim(p, '+')
+              AND i.received_at > now() - $3::interval
+        )
+        """,
+        shop_id, phones, within,
+    )
+    return {row["p"] for row in rows}
+
+
 async def onboarded_last_7_days() -> int:
     """Senders that went live in the last rolling 7 days, across all shops.
 
@@ -674,7 +703,8 @@ async def requeue_one(*, message_id: UUID, minutes: int) -> None:
     """Push one claimed message back into the queue, later.
 
     Used when the shop is over its daily cap: the message isn't wrong, it's
-    early, and dropping it would silently lose a scheduled promotion.
+    early, and dropping it would silently lose a scheduled promotion. Also used
+    to hold a message until the send window opens and after Meta's frequency cap.
     """
     await execute_void(
         """

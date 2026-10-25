@@ -153,3 +153,13 @@ def test_owner_written_templates_carry_no_model_guidance():
         if tpl.filled_by == "owner":
             assert not tpl.guidance, f"{key}: guidance on an owner-written template"
             assert not tpl.intent.startswith("winback"), f"{key}: intent looks LLM-ish"
+
+
+def test_gap_fill_is_marketing_with_booking_buttons():
+    from booking_engine.services.messaging.whatsapp_templates import TEMPLATE_BUTTON_INTENTS
+    tpl = CATALOGUE["gap_fill_v1"]
+    assert tpl.category == "MARKETING"
+    assert tpl.generated_slot is None
+    assert "gap_fill_v1" in MARKETING_WITHOUT_GENERATED_SLOT
+    assert tpl.buttons == ("Prenoto", "Altro orario")
+    assert all(TEMPLATE_BUTTON_INTENTS[b] == "booking" for b in tpl.buttons)

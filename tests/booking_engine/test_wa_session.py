@@ -200,3 +200,38 @@ def test_open_session_returns_a_uuid(db):
     import asyncio
     call_id = asyncio.run(ws.open_session(shop_id=SHOP, phone=PHONE, customer_id=None))
     assert isinstance(call_id, UUID)
+
+
+def test_plain_replies_are_not_labelled():
+    assert ws.label_outreach("Ciao!", campaign_key=None, template_name=None) == "Ciao!"
+
+
+def test_a_campaign_send_is_labelled_outreach():
+    out = ws.label_outreach("Ciao Giulia…", campaign_key="bulk_x", template_name="it_promo_v1")
+    assert out == "[Jev outreach] Ciao Giulia…"
+
+
+def test_a_gap_fill_invite_carries_the_broadcast_instruction():
+    out = ws.label_outreach("Ciao Giulia…", campaign_key="gap_fill:s:2026-10-20T15:00",
+                            template_name="it_gap_fill_v1")
+    assert out.startswith("[Jev outreach — invito inviato a più clienti")
+    assert "verifica che sia ancora libero" in out
+    assert out.endswith("Ciao Giulia…")
+
+
+@pytest.mark.asyncio
+async def test_the_transcript_labels_outreach_rows(monkeypatch):
+    async def _execute(sql, *args):
+        assert "interval '48 hours'" in sql
+        return [
+            {"role": "assistant", "content": "Ciao Giulia…", "at": NOW,
+             "campaign_key": "gap_fill:s:2026-10-20T15:00", "template_name": "it_gap_fill_v1"},
+            {"role": "user", "content": "Prenoto", "at": NOW,
+             "campaign_key": None, "template_name": None},
+        ]
+    monkeypatch.setattr(ws, "execute", _execute)
+
+    rows = await ws.session_transcript(shop_id=SHOP, phone=PHONE, since=NOW)
+
+    assert rows[0]["content"].startswith("[Jev outreach")
+    assert rows[1] == {"role": "user", "content": "Prenoto"}
