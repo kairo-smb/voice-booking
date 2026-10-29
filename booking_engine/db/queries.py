@@ -131,11 +131,15 @@ async def create_appointment(
     total_minutes = sum(r["duration_minutes"] for r in svc_rows)
     end_time = start_time + timedelta(minutes=total_minutes)
 
-    # Check for overlapping appointments
+    # Check for overlapping appointments. The lower bound on start_time lets
+    # the (staff_id, start_time) index skip the shop's whole history: no
+    # appointment lasts a day, so one that overlaps must have started within
+    # 24h before. (No DB constraint caps duration; bookings are minutes-hours.)
     overlap = await execute(
         "SELECT id FROM business_app_core.appointments "
         "WHERE staff_id = $1 AND status NOT IN ('cancelled', 'no_show') "
-        "AND start_time < $2 AND end_time > $3",
+        "AND start_time < $2 AND end_time > $3 "
+        "AND start_time > $3::timestamptz - interval '1 day'",
         staff_id, end_time, start_time,
     )
     if overlap:
