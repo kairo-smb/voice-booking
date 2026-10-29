@@ -173,7 +173,7 @@ async def due_reminders(shop_id: UUID, min_no_shows: int) -> list[dict]:
     if min_no_shows > 0:
         no_show_filter = """
           AND (SELECT count(*) FROM business_app_core.appointments a2
-               WHERE a2.customer_id = c.id AND a2.status = 'no_show') >= $2
+               WHERE a2.shop_id = $1 AND a2.customer_id = c.id AND a2.status = 'no_show') >= $2
         """
         args.append(min_no_shows)
     return await execute(
