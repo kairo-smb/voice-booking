@@ -87,7 +87,7 @@ fly secrets unset ENABLE_CALL_SUPERVISOR CALL_SUPERVISOR_VERBOSE_LOGGING --app k
    psql "$QA_DATABASE_URL" -v confirm_qa=yes -v recipient='+39…' \
      -f scripts/seed_automation_test.sql
    ```
-   Enables both rules and creates a due reminder (`scheduled`, start +2h) and a due feedback (`completed`, end −24h30m). `-v shop='…'` overrides the demo shop.
+   Enables both rules and creates a due reminder (`scheduled`, start +2h) and a due feedback (`completed`, end −24h30m). Feedback never selects `source = 'import'`: an agenda the webapp imported is history the shop served elsewhere, not a visit to ask about (since 2026-11-01). `-v shop='…'` overrides the demo shop.
 3. **Trigger:** `POST https://kairo-booking-engine-qa.fly.dev/api/v1/messaging/tick` with the control-plane bearer, or let the QA hourly scheduler fire it, then wait ≤60s for the drain — the automations stage enqueues and `whatsapp_sends` delivers on the next pass.
 4. **Verify:** `whatsapp.outbound_messages WHERE campaign_key LIKE 'automation:%'` reaches `sent`/`delivered`/`read`, and both messages arrive.
 5. **Re-run the tick → nothing new.** `whatsapp.automation_sends` dedupes on the same appointment.

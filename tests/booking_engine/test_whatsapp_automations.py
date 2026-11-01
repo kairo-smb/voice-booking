@@ -114,16 +114,16 @@ async def _insert_service(shop_id, service_id, name="Taglio"):
 async def _insert_appointment(
     *,
     shop_id, appointment_id, customer_id, staff_id,
-    start_time, end_time, status="completed",
+    start_time, end_time, status="completed", source="manual",
 ):
     await connection.execute_void(
         """
         INSERT INTO business_app_core.appointments
-            (id, shop_id, customer_id, staff_id, start_time, end_time, status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+            (id, shop_id, customer_id, staff_id, start_time, end_time, status, source)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
         """,
         appointment_id, shop_id, customer_id, staff_id,
-        start_time, end_time, status,
+        start_time, end_time, status, source,
     )
 
 
@@ -232,6 +232,21 @@ class TestAutomationQueriesIntegration:
         assert ids == {due_id}
         assert len(due) == 1
         assert due[0]["service_names"] == "Taglio"
+
+    async def test_due_feedback_skips_an_imported_visit(self, shop):
+        customer_id, staff_id = uuid4(), uuid4()
+        await _insert_staff(shop, staff_id)
+        await _insert_customer(shop, customer_id)
+        appointment_id = uuid4()
+        await _insert_appointment(
+            shop_id=shop, appointment_id=appointment_id, customer_id=customer_id,
+            staff_id=staff_id,
+            start_time=datetime.now(tz=ROME) - timedelta(hours=3, minutes=10),
+            end_time=datetime.now(tz=ROME) - timedelta(hours=2),
+            source="import",
+        )
+
+        assert await aq.due_feedback(shop, hours_after=2) == []
 
     async def test_due_feedback_excludes_a_customer_with_no_phone(self, shop):
         customer_id, staff_id = uuid4(), uuid4()
