@@ -37,7 +37,7 @@ The Control Plane (`webapp`) has full CRUD on all of the above except `appointme
 
 **IDs are generated in Python** (`uuid4()`, `booking_engine/db/queries.py`), passed explicitly into every INSERT — not `gen_random_uuid()` at the database level (that convention is what the *bootstrap-only* `01_schema.sql` uses for its own tables, and does not describe how this repo's code actually writes to real `business_app_core`).
 
-**Other stable conventions:** soft deletes via `is_active = false` (never hard-delete a row with dependent appointments); timezone is hardcoded `Europe/Rome` for all slot calculations (`ZoneInfo("Europe/Rome")` in `queries.py`).
+**Other stable conventions:** soft deletes via `is_active = false` (never hard-delete a row with dependent appointments); the database stores UTC instants and every shop-facing time is converted with `shops.timezone` (IANA) through `booking_engine/time/shop_time.py` — see [decisions](decisions.md) and AGENTS.md 2026-11-13. SQL reads the zone as `AT TIME ZONE s.timezone`, never a literal.
 
 **`customers.marketing_consent*` columns appear in no migration in this repo.** They arrive via the webapp's own migration chain, not this repo's — noted here so nobody re-diagnoses that as a missing-migration bug (found while grounding the 2026-08-14 number-provisioning docs; see `AGENTS.md`).
 

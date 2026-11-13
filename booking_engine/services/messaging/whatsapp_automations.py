@@ -27,20 +27,18 @@ Per-rule params the owner configures on the webapp tile:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from booking_engine.db import whatsapp_automation_queries as aq
 from booking_engine.db import whatsapp_queries as wq
 from booking_engine.services.phone_normalize import normalize_e164
+from booking_engine.time import shop_time
 from booking_engine.services.messaging.whatsapp_templates import (
     clean_variable, render,
 )
 
 logger = logging.getLogger(__name__)
-
-SALON_TZ = ZoneInfo("Europe/Rome")
 
 # The audit-trail marker for an automated send. There is no `source` column on
 # outbound_messages, so the marker lives in campaign_key — the webapp's
@@ -72,21 +70,21 @@ _PLATFORM_LABELS = {
 _GENERAL_PLATFORM = "un canale a tua scelta"
 
 
-def _feedback_date(when: datetime) -> str:
-    """The visit date, Italian: "12 marzo". A fact, not a generation."""
-    local = when.astimezone(SALON_TZ)
+def _feedback_date(when: datetime, tz: shop_time.TzLike = None) -> str:
+    """The visit date, Italian: "12 marzo", on the shop's calendar. A fact, not a generation."""
+    local = shop_time.to_shop_local(when, tz)
     return f"{local.day} {_IT_MONTHS[local.month - 1]}"
 
 
-def _reminder_when(when: datetime) -> str:
-    """The appointment moment, Italian: "giovedì 14 alle 10:30"."""
-    local = when.astimezone(SALON_TZ)
+def _reminder_when(when: datetime, tz: shop_time.TzLike = None) -> str:
+    """The appointment moment, Italian: "giovedì 14 alle 10:30", on the shop's wall clock."""
+    local = shop_time.to_shop_local(when, tz)
     return f"{_IT_DAYS[local.weekday()]} {local.day} alle {local:%H:%M}"
 
 
 def render_variables(
     template_key: str, row: dict,
-    *, platform: str = "general", link: str = "",
+    *, platform: str = "general", link: str = "", tz: shop_time.TzLike = None,
 ) -> dict[str, str]:
     """The variables the templates need, from the due-work row.
 
@@ -101,7 +99,8 @@ def render_variables(
     salon name from the review request — that one already arrives from the
     salon's own number. The reminder keeps the salon name, because a reminder
     from a number the customer never saved otherwise says who is waiting for
-    them nowhere. For the feedback {{3}}, the owner's review `link` wins when
+    them nowhere. Dates and times are the shop's own (`tz` = shops.timezone;
+    the row carries UTC instants). For the feedback {{3}}, the owner's review `link` wins when
     non-empty; the platform label is the fallback when no link was deposited.
     """
     when = row["appointment_at"]
@@ -112,12 +111,12 @@ def render_variables(
         )
         return {
             "1": name,
-            "2": clean_variable(_feedback_date(when)),
+            "2": clean_variable(_feedback_date(when, tz)),
             "3": review_target,
         }
     return {
         "1": name,
-        "2": clean_variable(_reminder_when(when)),
+        "2": clean_variable(_reminder_when(when, tz)),
         "3": clean_variable(row["shop_name"] or ""),
     }
 
@@ -148,6 +147,7 @@ async def run_automations(*, settings) -> dict:
                 continue
 
             template_key = _RULE_TEMPLATE[rule_key]
+            tz = await shop_time.shop_tz(shop_id)
             template = await wq.get_template(shop_id, template_key)
             if not template or template.get("status") != "approved":
                 # Sending on an unapproved template fails at Meta and still
@@ -176,6 +176,7 @@ async def run_automations(*, settings) -> dict:
                     template_key, row,
                     platform=str(rule["params"].get("platform", "general")),
                     link=str(rule["params"].get("link") or ""),
+                    tz=tz,
                 )
                 try:
                     message_id = await wq.enqueue(
@@ -190,7 +191,7 @@ async def run_automations(*, settings) -> dict:
                         template_language=template["language"],
                         variables=variables,
                         preview=render(template_key, variables),
-                        scheduled_at=datetime.now(tz=SALON_TZ),
+                        scheduled_at=datetime.now(timezone.utc),
                     )
                 except Exception:  # noqa: BLE001 — one bad row retries, not a dead shop
                     logger.exception(

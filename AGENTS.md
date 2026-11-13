@@ -6,6 +6,40 @@ same trade-offs. Newest entry on top. Don't rewrite old entries when they're
 superseded — add a new entry and note what changed and why; the old entry
 stays as the record of what was true and decided at the time.
 
+## 2026-11-13 — Shop time: one module, the shop's own zone
+
+**Owner decision (same as webapp and engine, round 3).** The database stores UTC
+instants. Every DB -> user value (WhatsApp reminder and feedback text, the send
+window, the call-stats buckets, the `now` the engine shows its model) is converted
+to the shop's wall clock; every user -> DB value (a naive `start_time` /
+`new_start_time` / `from` / `to` on a request) is read as shop-local and converted
+to UTC. The zone is `business_app_core.shops.timezone` (IANA, DST-aware via
+`zoneinfo`). DST gap (Rome 2026-03-29 02:30, London 01:30) -> first valid minute
+(03:00 / 02:00); overlap -> first occurrence; date-only values are never
+converted. Same rules as the webapp's `src/lib/time/shop-time.ts`.
+
+**One module, `booking_engine/time/shop_time.py`**: `to_shop_local`,
+`from_shop_local`, `ensure_instant`, `shop_today`, `shop_day_bounds`,
+`at_shop_hour`, and `shop_tz(shop_id)` (reads `shops.timezone`, cached 10 s). The
+only fallback to `Europe/Rome` lives there, for a missing/garbage zone or a failed
+lookup, and warns. Nothing else under `booking_engine/` may name a zone, call
+`ZoneInfo`, or use naive `datetime.now()` / `date.today()` / `.astimezone()` /
+SQL `CURRENT_DATE` or `AT TIME ZONE '<literal>'`:
+`tests/booking_engine/test_shop_time_fence.py` fails the build (allow-list with
+reasons for Kairo-internal uses; today one SQL column default). SQL reads the
+zone as `AT TIME ZONE s.timezone` / `(SELECT timezone FROM
+business_app_core.shops WHERE id = $1)`. `whatsapp_send.minutes_until_window` /
+`spread` and `whatsapp_automations.render_variables` take a `tz` argument (callers
+pass `shop_tz(shop_id)`; `None` means the module fallback), and do their window
+arithmetic on UTC instants so a DST change inside a drip never shifts a send. The
+`SALON_TZ` constants are gone. Sweep table:
+`collaudo/2026-11-13-chat-routing/round3/voice-tz-sweep.md`.
+
+**Verification.** `pytest tests/ --ignore=tests/live_db --ignore=tests/live_twilio`
+green; the changed SQL was run against a scratch Postgres. Not run: `tests/live_db`
+(needs the QA `DATABASE_URL`), so `voice_queries.get_analytics` and `sent_this_month`
+with a non-Rome shop are unproven against QA.
+
 ## 2026-10-06 — WhatsApp "Consulenza AI": advice intent, new menu, intent forwarded
 
 The routing menu is now **Prenotare / Consulenza AI / Altro** (still three

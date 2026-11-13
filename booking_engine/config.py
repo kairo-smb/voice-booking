@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     # means "not configured": ensure_receipt_template fails closed rather than
     # submitting a header-less document template Meta would reject.
     meta_receipt_sample_url: str = ""
-    # Marketing sends are dripped across this local window (Europe/Rome) so a
+    # Marketing sends are dripped across this local window (the shop's own zone, shops.timezone) so a
     # salon's promotions arrive during opening hours, not at 03:00.
     whatsapp_send_start_hour: int = 9
     whatsapp_send_end_hour: int = 20
