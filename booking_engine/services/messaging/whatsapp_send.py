@@ -32,7 +32,6 @@ import logging
 import math
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.clients import webapp_credits
@@ -45,10 +44,9 @@ from booking_engine.services.messaging.sms_send import _has_active_consent
 from booking_engine.services.messaging.whatsapp_pricing import SEND_CREDITS, estimate_usd
 from booking_engine.services.messaging.whatsapp_templates import clean_variable, render
 from booking_engine.services.phone_normalize import normalize_e164
+from booking_engine.time import shop_time
 
 logger = logging.getLogger(__name__)
-
-SALON_TZ = ZoneInfo("Europe/Rome")
 
 # What the salon will be billed by Meta for one marketing template to an
 # Italian recipient. Written to the row at send time and never corrected:
@@ -88,31 +86,30 @@ def blocked_by_open_conversation(category: str | None, campaign_key: str | None)
 
 def _now() -> datetime:
     """The clock, as a seam: send-window tests pin it."""
-    return datetime.now(tz=SALON_TZ)
+    return datetime.now(timezone.utc)
 
 
-def minutes_until_window(now: datetime, *, start_hour: int, end_hour: int) -> int:
-    """0 inside [start, end) salon time, else minutes to the next opening.
+def minutes_until_window(
+    now: datetime, *, start_hour: int, end_hour: int, tz: shop_time.TzLike = None,
+) -> int:
+    """0 inside [start, end) shop time (`tz` = shops.timezone), else minutes to the next opening.
 
     `spread` already schedules campaigns inside this window, but automations
     enqueue at `now()` and a deferred row can roll past closing — so the window
     is enforced again where the message actually leaves.
     """
-    local = now.astimezone(SALON_TZ)
+    local = shop_time.to_shop_local(now, tz)
     if start_hour <= local.hour < end_hour:
         return 0
-    nxt = local.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-    if local.hour >= end_hour:
-        nxt += timedelta(days=1)
-    # Subtract in UTC: same-zone aware datetimes subtract by wall clock, which
-    # is an hour off across a DST change.
-    gap = nxt.astimezone(timezone.utc) - local.astimezone(timezone.utc)
+    day = local.date() + (timedelta(days=1) if local.hour >= end_hour else timedelta())
+    # Instants on both sides: wall-clock subtraction is an hour off across a DST change.
+    gap = shop_time.at_shop_hour(day, start_hour, tz) - now.astimezone(timezone.utc)
     return max(1, math.ceil(gap.total_seconds() / 60))
 
 
 def spread(
     count: int, now: datetime, *, start_hour: int, end_hour: int,
-    daily_cap: int = 10**6,
+    daily_cap: int = 10**6, tz: shop_time.TzLike = None,
 ) -> list[datetime]:
     """Evenly space `count` sends across the send window, rolling onto more days.
 
@@ -133,16 +130,18 @@ def spread(
         return []
     per_day = max(1, daily_cap)
 
+    # The window is the shop's wall clock; all arithmetic is on UTC instants so
+    # a DST change inside the drip cannot shift a send by an hour.
     out: list[datetime] = []
-    local = now.astimezone(SALON_TZ)
+    now_utc = now.astimezone(timezone.utc)
+    today = shop_time.shop_today(tz, now_utc)
     day = 0
     while len(out) < count:
-        day_start = (local + timedelta(days=day)).replace(
-            hour=start_hour, minute=0, second=0, microsecond=0
-        )
-        day_end = day_start.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+        d = today + timedelta(days=day)
+        day_start = shop_time.at_shop_hour(d, start_hour, tz)
+        day_end = shop_time.at_shop_hour(d, end_hour, tz)
         # Today's window may already be over, or partly gone.
-        begin = max(local, day_start) if day == 0 else day_start
+        begin = max(now_utc, day_start) if day == 0 else day_start
         if begin >= day_end:
             day += 1
             continue
@@ -152,7 +151,7 @@ def spread(
         out += [begin + timedelta(seconds=step * i) for i in range(n)]
         day += 1
 
-    return [d.astimezone(now.tzinfo or SALON_TZ) for d in out]
+    return [d.astimezone(now.tzinfo or timezone.utc) for d in out]
 
 
 async def enqueue_campaign(
@@ -213,7 +212,8 @@ async def enqueue_campaign(
 
     when = spread(
         1 if together else len(recipients),
-        now or datetime.now(tz=SALON_TZ),
+        now or datetime.now(timezone.utc),
+        tz=await shop_time.shop_tz(shop_id),
         start_hour=settings.whatsapp_send_start_hour,
         end_hour=settings.whatsapp_send_end_hour,
         daily_cap=cap,
@@ -363,7 +363,8 @@ async def send_due(
 
         if msg.get("category") != "UTILITY":
             wait = minutes_until_window(
-                _now(), start_hour=settings.whatsapp_send_start_hour,
+                _now(), tz=await shop_time.shop_tz(shop_id),
+                start_hour=settings.whatsapp_send_start_hour,
                 end_hour=settings.whatsapp_send_end_hour,
             )
             if wait:

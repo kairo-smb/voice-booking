@@ -37,6 +37,7 @@ from booking_engine.db import wa_session_queries as wsq
 from booking_engine.db import whatsapp_thread_queries as tq
 from booking_engine.services import credit_state
 from booking_engine.services.messaging import wa_routing
+from booking_engine.time import shop_time
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +211,8 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
         shop_id=shop_id,
         call_id=call_id,
         messages=await _messages(shop_id, phone, state.get("started_at")),
-        now=datetime.now(timezone.utc),
+        # The shop's wall clock (same instant, shop offset): the engine shows it to the model.
+        now=shop_time.to_shop_local(datetime.now(timezone.utc), await shop_time.shop_tz(shop_id)),
         settings=settings,
         intent=intent,
     )

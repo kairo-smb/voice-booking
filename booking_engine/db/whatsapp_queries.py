@@ -555,7 +555,7 @@ async def sent_today(shop_id: UUID) -> int:
     to an instant. `date_trunc('day', now())` is UTC midnight — 02:00 in Rome in
     summer — so anything sent between local midnight and then counted against
     yesterday. The zone is read off the shop row in the same statement
-    (NOT NULL, default 'Europe/Rome'), so nothing new is bound.
+    (NOT NULL), so nothing new is bound.
     """
     row = await execute_one(
         f"""
@@ -650,7 +650,10 @@ async def sent_this_month(shop_id: UUID) -> int:
         f"""
         SELECT count(*) AS n FROM whatsapp.outbound_messages om
         {_MARKETING_JOIN}
-        WHERE om.shop_id = $1 AND om.sent_at >= date_trunc('month', now())
+        JOIN business_app_core.shops s ON s.id = om.shop_id
+        WHERE om.shop_id = $1
+          AND om.sent_at >= date_trunc('month', now() AT TIME ZONE s.timezone)
+                            AT TIME ZONE s.timezone
         """,
         shop_id,
     )

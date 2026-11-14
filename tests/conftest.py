@@ -114,3 +114,12 @@ def fake_appointment() -> dict:
         ],
         "notes": None,
     }
+
+
+@pytest.fixture(autouse=True)
+def _fresh_shop_tz_cache():
+    """`shop_tz` caches per shop for a few seconds; a test must not inherit the last one's zone."""
+    from booking_engine.time import shop_time
+    shop_time.clear_cache()
+    yield
+    shop_time.clear_cache()
