@@ -155,7 +155,7 @@ webapp (LLM writes the per-customer offer line, i.e. the template's {{3}})
       whatsapp_send.py::enqueue_campaign
         sender online? template approved? recipients ≤ daily_cap?
         → per recipient: consent gate → one row in whatsapp.outbound_messages,
-          scheduled_at spread evenly across 09:00–20:00 Europe/Rome
+          scheduled_at spread evenly across 09:00–20:00 in the shop's own zone (shops.timezone)
   → POST /api/v1/messaging/tick              (hourly, in-process scheduler)
       whatsapp_send.py::send_due
         claim due rows atomically → RE-check consent → balance check

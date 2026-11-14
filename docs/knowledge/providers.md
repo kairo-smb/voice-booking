@@ -212,7 +212,7 @@ exchange), `META_VERIFY_TOKEN` (webhook handshake),
 `META_KAIRO_WABA_ID`/`META_KAIRO_TOKEN` (Kairo's own WABA — the template
 approval gate reads these; unset means `ensure_templates` propagates nothing),
 `WHATSAPP_SEND_START_HOUR`/`WHATSAPP_SEND_END_HOUR` (default 9/20,
-Europe/Rome), `WHATSAPP_SENDS_PER_MINUTE` (default 60),
+the shop's own clock, `shops.timezone`), `WHATSAPP_SENDS_PER_MINUTE` (default 60),
 `WHATSAPP_TOKEN_KEY` (Fernet key encrypting `senders.access_token` at rest —
 see below), and `WEBAPP_BASE_URL`/`MARKET_INTEL_SECRET`, shared with the SMS
 charge path, which the tick also uses to ask the webapp to email a salon whose

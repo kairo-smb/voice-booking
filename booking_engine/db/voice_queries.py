@@ -112,6 +112,10 @@ async def link_customer(shop_id: UUID, call_id: UUID, customer_id: UUID) -> dict
     )
 
 
+# The shop's own zone, read in the same statement (shops.timezone, never a
+# literal): a call's hour / weekday / day are the salon's wall clock.
+_SHOP_TZ = "(SELECT timezone FROM business_app_core.shops WHERE id = $1)"
+
 _OUTCOME_KEYS = ("booked", "rescheduled", "cancelled", "info",
                  "abandoned", "escalated", "failed")
 
@@ -143,7 +147,7 @@ async def get_analytics(
     failure_rate = (failed / total) if total else 0.0
 
     by_day_rows = await execute(
-        f"SELECT (started_at AT TIME ZONE 'Europe/Rome')::date AS d, COUNT(*) AS c "
+        f"SELECT (started_at AT TIME ZONE {_SHOP_TZ})::date AS d, COUNT(*) AS c "
         f"FROM voice_agent.calls WHERE {w} GROUP BY d ORDER BY d",
         *params,
     )
@@ -204,14 +208,14 @@ async def get_analytics(
     ]
 
     by_hour_rows = await execute(
-        f"SELECT EXTRACT(HOUR FROM started_at AT TIME ZONE 'Europe/Rome')::int AS h, "
+        f"SELECT EXTRACT(HOUR FROM started_at AT TIME ZONE {_SHOP_TZ})::int AS h, "
         f"COUNT(*) AS c FROM voice_agent.calls WHERE {w} GROUP BY h ORDER BY h",
         *params,
     )
     by_hour = [{"hour": r["h"], "count": r["c"]} for r in by_hour_rows]
 
     by_dow_rows = await execute(
-        f"SELECT EXTRACT(ISODOW FROM started_at AT TIME ZONE 'Europe/Rome')::int AS d, "
+        f"SELECT EXTRACT(ISODOW FROM started_at AT TIME ZONE {_SHOP_TZ})::int AS d, "
         f"COUNT(*) AS c FROM voice_agent.calls WHERE {w} GROUP BY d ORDER BY d",
         *params,
     )
@@ -224,8 +228,8 @@ async def get_analytics(
         f"  JOIN business_app_core.staff_schedules sch ON sch.staff_id = s.id "
         f"  WHERE s.shop_id = $1 AND s.is_active = true "
         f"    AND sch.day_of_week = (EXTRACT(ISODOW FROM c.started_at "
-        f"        AT TIME ZONE 'Europe/Rome')::int - 1) "
-        f"    AND (c.started_at AT TIME ZONE 'Europe/Rome')::time "
+        f"        AT TIME ZONE {_SHOP_TZ})::int - 1) "
+        f"    AND (c.started_at AT TIME ZONE {_SHOP_TZ})::time "
         f"        BETWEEN sch.start_time AND sch.end_time"
         f")",
         *params,

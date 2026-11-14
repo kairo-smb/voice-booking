@@ -20,6 +20,7 @@ from booking_engine.api.voice_models import (
 from booking_engine.db import voice_queries as vq
 from booking_engine.db.voice_tool_queries import list_services
 from booking_engine.services.service_catalog_match import enrich_brief, parse_brief
+from booking_engine.time import shop_time
 
 
 router = APIRouter(
@@ -41,6 +42,10 @@ async def list_calls(
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
+    # A naive bound is what the owner typed: the shop's wall clock, not UTC.
+    tz = await shop_time.shop_tz(shop_id)
+    from_ = shop_time.ensure_instant(from_, tz) if from_ else None
+    to = shop_time.ensure_instant(to, tz) if to else None
     filters = {"outcome": outcome, "from": from_, "to": to, "q": q}
     result = await vq.list_calls(shop_id, filters=filters, cursor=cursor, limit=limit)
     items = [CallSummary(**r).model_dump(mode="json") for r in result["items"]]
@@ -85,5 +90,8 @@ async def get_analytics(
     from_: Annotated[datetime | None, Query(alias="from")] = None,
     to: Annotated[datetime | None, Query()] = None,
 ):
+    tz = await shop_time.shop_tz(shop_id)
+    from_ = shop_time.ensure_instant(from_, tz) if from_ else None
+    to = shop_time.ensure_instant(to, tz) if to else None
     result = await vq.get_analytics(shop_id, from_dt=from_, to_dt=to)
     return _wrap(VoiceAnalyticsResponse(**result).model_dump(mode="json"))
