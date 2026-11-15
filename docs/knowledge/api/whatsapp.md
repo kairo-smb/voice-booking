@@ -451,8 +451,12 @@ the button apart from the agent giving up. Both are the same `escalated` row;
 the same sentence.
 
 **There is no endpoint to hand a thread back**, deliberately. The agent resumes
-by itself on the customer's next conversation (a new session, past
-`wa_routing.SESSION_GAP`), which is what "resume" can honestly mean — and
+by itself on the customer's next conversation: a new session, past
+`wa_routing.SESSION_GAP`, or — once a person has replied in this one — past
+`wa_routing.HUMAN_HOLD` (3h, owner decision 2026-11-15) since their last reply,
+which `open_session`'s lookup reads as the session being over. A "Rispondo io"
+with no reply after it has no timestamp to measure from and still holds the
+whole session. That is what "resume" can honestly mean — and
 un-escalating *this* session would put the agent back into a thread a person is
 in the middle of. It could not work fully in any case: `may_speak` also silences
 on `human_replied_at`, derived from an outbound row that cannot be unsent, so a

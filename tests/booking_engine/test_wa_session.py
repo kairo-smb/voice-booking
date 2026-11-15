@@ -39,7 +39,7 @@ class FakeCalls:
     async def execute_one(self, sql: str, *args):
         self.statements.append((sql, args))
         if sql.lstrip().upper().startswith("SELECT"):
-            shop_id, phone, gap = args
+            shop_id, phone, gap, _hold = args  # the hold is SQL: test_human_hold_live
             hits = [
                 r for r in self.rows
                 if r["shop_id"] == shop_id
@@ -154,6 +154,7 @@ async def test_the_session_gap_is_wa_routings_constant_not_a_second_literal(db):
     # can drift is exactly the bug this avoids. `session_messages` splits a
     # history on this boundary; the row must agree with it by construction.
     assert select_args[2] is wa_routing.SESSION_GAP
+    assert select_args[3] is wa_routing.HUMAN_HOLD
     assert "interval" in select_sql
 
 
