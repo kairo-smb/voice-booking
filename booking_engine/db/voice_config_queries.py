@@ -22,6 +22,22 @@ async def get_config(shop_id: UUID) -> dict | None:
     )
 
 
+async def get_or_create_config(shop_id: UUID) -> dict:
+    """The row, created with column defaults when missing.
+
+    A shop that connected WhatsApp without ever saving the voice settings had no
+    row, so GET answered null and the webapp hid both the WhatsApp-agent switch
+    and the settings form: no control could create it. DO NOTHING (not an
+    upsert) so a concurrent PATCH is never overwritten by the defaults.
+    """
+    await execute_void(
+        "INSERT INTO voice_agent.shop_config (shop_id) VALUES ($1) "
+        "ON CONFLICT (shop_id) DO NOTHING",
+        shop_id,
+    )
+    return await get_config(shop_id)
+
+
 async def upsert_config(shop_id: UUID, **fields) -> dict:
     cols = ", ".join(fields.keys())
     placeholders = ", ".join(f"${i+2}" for i in range(len(fields)))

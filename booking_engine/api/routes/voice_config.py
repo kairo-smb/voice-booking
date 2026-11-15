@@ -10,7 +10,9 @@ from pydantic import BaseModel, Field
 
 from booking_engine.api.deps import require_control_plane_token
 from booking_engine.db import service_intake_queries as intake
-from booking_engine.db.voice_config_queries import get_config, upsert_config
+from booking_engine.db.voice_config_queries import (
+    get_config, get_or_create_config, upsert_config,
+)
 from booking_engine.db.voice_telephony_queries import get_telephony
 from booking_engine.db.voice_tone_queries import get_tone_by_id, list_preset_tones
 from booking_engine.services.phone_normalize import digits_only
@@ -112,8 +114,7 @@ async def get_for_shop(
     shop_id: UUID,
     _auth: Annotated[bool, Depends(require_control_plane_token)],
 ) -> dict[str, Any]:
-    row = await get_config(shop_id)
-    return {"data": row}
+    return {"data": await get_or_create_config(shop_id)}
 
 
 @router.patch("/{shop_id}", response_model=None)

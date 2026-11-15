@@ -236,6 +236,6 @@ def test_the_intake_route_does_not_shadow_the_config_route():
     # `/voice/config/{shop_id}` already exists and `{shop_id}` is greedy in
     # neither direction — pinned because adding a sibling path under a dynamic
     # segment is exactly where a route table silently reorders.
-    with patch.object(voice_config, "get_config", AsyncMock(return_value=None)):
+    with patch.object(voice_config, "get_or_create_config", AsyncMock(return_value={})):
         r = TestClient(_app()).get(f"/api/v1/voice/config/{SHOP}", headers=HEADERS)
     assert r.status_code == 200
