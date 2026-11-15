@@ -348,10 +348,20 @@ async def _superseded(shop_id, phone: str, row: dict) -> bool:
 
 
 async def _messages(shop_id, phone: str, since) -> list[dict[str, str]]:
-    """The conversation so far, in the engine's `{role, content}` shape."""
+    """The conversation so far, in the engine's `{role, content}` shape.
+
+    The whole SESSION_GAP window, not just this session (owner decision,
+    2026-11-15): after a human hold the agent's new session starts at the
+    customer's latest message, and on an AI -> human -> AI thread the agent
+    must know what the owner already told them. `since is None` (no session
+    row) still reads nothing.
+    """
     if since is None:
         return []
-    rows = await wsq.session_transcript(shop_id=shop_id, phone=phone, since=since)
+    window = datetime.now(timezone.utc) - wa_routing.SESSION_GAP
+    rows = await wsq.session_transcript(
+        shop_id=shop_id, phone=phone, since=min(since, window),
+    )
     return [{"role": r["role"], "content": r["content"]} for r in rows]
 
 

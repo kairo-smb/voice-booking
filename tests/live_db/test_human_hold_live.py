@@ -69,6 +69,14 @@ class TestHumanHoldLive:
                 state = await ws.session_state(call_id=second, phone=PHONE)
                 assert state["human_replied_at"] is None
                 assert not state["escalated"]
+                # AI -> human -> AI: the new session's agent still reads the
+                # whole 24h window, the owner's reply included.
+                from booking_engine.services.messaging import wa_agent
+                await conn.execute(
+                    "UPDATE whatsapp.outbound_messages SET preview = 'Ti aspetto alle 15' "
+                    "WHERE shop_id = $1 AND origin = 'kairo'", shop_id)
+                msgs = await wa_agent._messages(shop_id, PHONE, state["started_at"])
+                assert {"role": "assistant", "content": "Ti aspetto alle 15"} in msgs
             finally:
                 await conn.execute(
                     "DELETE FROM voice_agent.calls WHERE shop_id = $1", shop_id)
