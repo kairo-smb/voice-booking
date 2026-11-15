@@ -26,8 +26,11 @@ COMMENT ON COLUMN whatsapp.inbound_messages.intent IS
 ALTER TABLE whatsapp.outbound_messages
   ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'kairo';
 ALTER TABLE whatsapp.outbound_messages DROP CONSTRAINT IF EXISTS outbound_origin_check;
+-- Same list as 25, not the original ('kairo','phone'): every migration replays
+-- on every deploy, and the narrower check failed the replay the day the agent
+-- first wrote an 'agent' row in production (2026-11-15).
 ALTER TABLE whatsapp.outbound_messages ADD CONSTRAINT outbound_origin_check
-  CHECK (origin IN ('kairo','phone'));
+  CHECK (origin IN ('kairo','phone','agent'));
 
 -- What the agent must ask before booking a given service. Owner-authored.
 -- Not a column on business_app_core.services: that schema belongs to the
