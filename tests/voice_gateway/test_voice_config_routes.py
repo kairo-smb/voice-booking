@@ -34,7 +34,7 @@ async def test_list_tones_returns_presets():
 @pytest.mark.asyncio
 async def test_get_config_returns_existing():
     shop_id = uuid4()
-    with patch("booking_engine.api.routes.voice_config.get_config",
+    with patch("booking_engine.api.routes.voice_config.get_or_create_config",
                new=AsyncMock(return_value={
                    "shop_id": shop_id, "enabled": True,
                    "display_name": "Salone Lucia",
@@ -53,6 +53,25 @@ async def test_get_config_returns_existing():
             r = await c.get(f"/api/v1/voice/config/{shop_id}", headers=AUTH)
             assert r.status_code == 200
             assert r.json()["data"]["display_name"] == "Salone Lucia"
+
+
+@pytest.mark.asyncio
+async def test_get_config_never_answers_null():
+    # A shop with no row used to get {"data": null}; the webapp then hid the
+    # WhatsApp-agent switch and the settings form, so nothing could create it.
+    shop_id = uuid4()
+    defaults = {"shop_id": str(shop_id), "whatsapp_agent_enabled": False}
+    with patch("booking_engine.db.voice_config_queries.execute_void",
+               new=AsyncMock()) as insert, \
+         patch("booking_engine.db.voice_config_queries.execute_one",
+               new=AsyncMock(return_value=defaults)):
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get(f"/api/v1/voice/config/{shop_id}", headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["data"]["whatsapp_agent_enabled"] is False
+    assert "ON CONFLICT (shop_id) DO NOTHING" in insert.await_args.args[0]
 
 
 @pytest.mark.asyncio

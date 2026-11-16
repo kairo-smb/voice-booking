@@ -31,6 +31,13 @@ MAX_ROUTING_TURNS = 2
 # customer writing again after a longer silence has a new request.
 SESSION_GAP = timedelta(hours=24)
 
+# How long a person answering keeps the agent out (owner decision, 2026-11-15).
+# A session a human replied in closes once no human has written in it for this
+# long, and the customer's next message opens a fresh one the agent answers.
+# Measured from the LAST human reply, not the session start: from the start, an
+# owner mid-chat at hour three would have the agent cut in on them.
+HUMAN_HOLD = timedelta(hours=3)
+
 
 class Decision(NamedTuple):
     action: str            # 'route' | 'menu' | 'human'

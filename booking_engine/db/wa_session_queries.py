@@ -38,13 +38,35 @@ from booking_engine.services.messaging import wa_routing
 # the same number is a different conversation, on a channel that closes its
 # rows by hanging up.
 _FIND = """
-SELECT id
-  FROM voice_agent.calls
+SELECT c.id
+  FROM voice_agent.calls c
  WHERE shop_id = $1
    AND channel = 'whatsapp'
    AND caller_number = $2
    AND ended_at IS NULL
    AND started_at > now() - $3::interval
+   -- A session a person answered in is over HUMAN_HOLD after their last reply
+   -- ($4): the next message opens a new one, and the agent is back. Same
+   -- "human" predicate as `human_replied_at` in _SESSION_STATE.
+   -- ponytail: a "Rispondo io" with no reply after it has no timestamp to
+   -- measure from (calls has no escalated_at), so it still holds the whole
+   -- session (up to SESSION_GAP); add the column if that case matters.
+   AND coalesce((
+         SELECT max(coalesce(o.sent_at, o.created_at))
+           FROM whatsapp.outbound_messages o
+          WHERE o.shop_id = c.shop_id
+            AND ltrim(o.to_phone, '+') = ltrim(c.caller_number, '+')
+            AND o.origin IN ('kairo', 'phone')
+            AND o.template_name IS NULL
+            AND o.campaign_key IS NULL
+            AND o.status NOT IN ('suppressed', 'cancelled')
+            AND coalesce(o.sent_at, o.created_at) >= c.started_at
+            AND NOT EXISTS (
+              SELECT 1 FROM whatsapp.outbound_messages mine
+               WHERE mine.origin = 'agent'
+                 AND mine.provider_sid IS NOT NULL
+                 AND mine.provider_sid = o.provider_sid)
+       ), now()) > now() - $4::interval
  ORDER BY started_at DESC
  LIMIT 1
 """
@@ -86,7 +108,9 @@ async def open_session(
     never closed.
     """
     # The agent turn loop that drives this session lives in Task 20's repo.
-    found = await execute_one(_FIND, shop_id, phone, wa_routing.SESSION_GAP)
+    found = await execute_one(
+        _FIND, shop_id, phone, wa_routing.SESSION_GAP, wa_routing.HUMAN_HOLD,
+    )
     if found:
         return found["id"]
     # Legal values are the CHECK in 03_voice_agent_schema.sql:
