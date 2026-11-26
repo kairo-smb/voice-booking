@@ -254,41 +254,40 @@ async def handle(sender: dict, row: dict, *, intent: str | None) -> None:
         await _stand_down(call_id, shop_id, phone, "send_failed", escalate=True)
 
 
-async def hold_for_low_credit(sender: dict, row: dict) -> None:
+async def hold_for_low_credit(sender: dict, row: dict) -> bool:
     """Stamp this conversation manual if it is happening during a credit pause.
 
-    Called by `wa_inbound` on **every** inbound message, before routing.
-    `handle` only runs on a whitelisted intent, so without this a message the
-    classifier was unsure of (menu sent, intent NULL) would open a conversation
-    the pause never touched — and once the owner topped up, the customer's tap
-    on "Prenotare" in that same session would be answered by the agent. The
-    rule is "a conversation that began during the pause stays the owner's",
-    and a conversation begins with its first message, routed or not.
+    Called by `wa_inbound` on **every** inbound message (for an opted-in shop),
+    before routing. Returns `True` when the shop is paused for low credit so
+    the inbound worker stops immediately — no classifier call, no 3-button
+    menu offering "Prenotare" to a customer nobody will answer.
 
     Only for an opted-in shop: a shop without the agent has nothing to pause,
     and must cost nothing to not-answer. Same no-overwrite rule as `handle`
     (and read off the same `session_state`): a session already escalated — the
     owner's takeover, a turn limit — or one a human has replied on keeps its
-    own reason. Everything else in the normal flow continues unchanged.
+    own reason, while still returning `True` so the menu never fires during a
+    pause.
     """
     shop_id = sender.get("shop_id")
     phone = str(row.get("from_phone") or "")
     if not shop_id or not phone:
-        return
+        return False
     config = await config_q.get_config(shop_id)
     if not (config and config.get("whatsapp_agent_enabled")):
-        return
+        return False
     credit = await credit_state.credit_state(shop_id)
     if not credit["low"]:
-        return
+        return False
     call_id = await wsq.open_session(
         shop_id=shop_id, phone=phone, customer_id=row.get("customer_id"),
         started_at=row.get("received_at"),
     )
     state = await wsq.session_state(call_id=call_id, phone=phone)
     if state.get("escalated") or state.get("human_replied_at") is not None:
-        return
+        return True
     await _stand_down(call_id, shop_id, phone, LOW_CREDIT_REASON, escalate=True)
+    return True
 
 
 # Refusals that mean "a person is needed on this thread", as opposed to "this
