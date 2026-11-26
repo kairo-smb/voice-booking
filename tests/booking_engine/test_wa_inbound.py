@@ -91,6 +91,7 @@ def _drain_tasks():
 def wired(monkeypatch):
     """Every collaborator replaced. Any real network or DB call is a bug."""
     fakes = SimpleNamespace(
+        config=Spy({"whatsapp_agent_enabled": True}),
         history=Spy([]),
         set_transcript=Spy(None),
         set_verdict=Spy(None),
@@ -103,8 +104,9 @@ def wired(monkeypatch):
         # may then speak have their own file (test_wa_agent.py). Letting the
         # real one run would also drag a database into every test below.
         agent=Spy(None),
-        hold=Spy(None),
+        hold=Spy(False),
     )
+    monkeypatch.setattr(wa_inbound.config_q, "get_config", fakes.config)
     monkeypatch.setattr(wa_inbound.wa_agent, "handle", fakes.agent)
     monkeypatch.setattr(wa_inbound.wa_agent, "hold_for_low_credit", fakes.hold)
     monkeypatch.setattr(wa_inbound.tq, "inbound_history", fakes.history)
@@ -307,6 +309,49 @@ async def test_every_message_passes_the_credit_hold_before_routing(wired):
 
     assert wired.hold.count == 1
     assert wired.send_interactive.count == 1
+
+
+async def test_agent_disabled_stops_classifier_menu_and_agent(wired):
+    """When the owner switches off the WhatsApp assistant, voice notes are
+    still transcribed for Inbox readability, but no classifier, no 3-button
+    menu and no agent turn ever fire."""
+    wired.config.result = {"whatsapp_agent_enabled": False}
+    wired.classify.result = {"intent": "booking", "confidence": 0.3}
+
+    await wa_inbound.process(SENDER, audio_row())
+
+    assert wired.set_transcript.count == 1
+    assert wired.hold.count == 0
+    assert wired.classify.count == 0
+    assert wired.set_verdict.count == 0
+    assert wired.send_interactive.count == 0
+    assert wired.agent.count == 0
+
+
+async def test_missing_config_row_treats_agent_as_disabled(wired):
+    wired.config.result = None
+    wired.classify.result = {"intent": "booking", "confidence": 0.3}
+
+    await wa_inbound.process(SENDER, text_row(body="ciao"))
+
+    assert wired.classify.count == 0
+    assert wired.send_interactive.count == 0
+    assert wired.agent.count == 0
+
+
+async def test_credit_pause_stops_classifier_and_menu(wired):
+    """During a credit pause, hold_for_low_credit returns True and the worker
+    exits before classifying or sending the 3-button menu."""
+    wired.hold.result = True
+    wired.classify.result = {"intent": "booking", "confidence": 0.3}
+
+    await wa_inbound.process(SENDER, text_row(body="boh"))
+
+    assert wired.hold.count == 1
+    assert wired.classify.count == 0
+    assert wired.set_verdict.count == 0
+    assert wired.send_interactive.count == 0
+    assert wired.agent.count == 0
 
 
 async def test_a_failing_credit_hold_does_not_stop_the_flow(wired):

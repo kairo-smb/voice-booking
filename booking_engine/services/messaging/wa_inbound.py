@@ -26,6 +26,7 @@ import logging
 from booking_engine.clients import marketing_triage as triage
 from booking_engine.clients import meta_whatsapp as meta
 from booking_engine.config import get_settings
+from booking_engine.db import voice_config_queries as config_q
 from booking_engine.db import whatsapp_thread_queries as tq
 from booking_engine.services.messaging import wa_agent, wa_routing, wa_transcribe
 
@@ -91,16 +92,33 @@ async def _process(sender: dict, row: dict) -> None:
 
     text = (transcript or str(row.get("body") or "")).strip()
 
-    history = await tq.inbound_history(shop_id, phone)
+    # 1a. A shop with the WhatsApp assistant switched off gets zero automated
+    #     classification, zero routing menus, and zero agent replies. Voice
+    #     notes were still transcribed above so the owner can read them in the
+    #     Inbox.
+    config = await config_q.get_config(shop_id) if shop_id else None
+    if not (config and config.get("whatsapp_agent_enabled")):
+        logger.info("whatsapp.inbound_agent_disabled shop=%s phone=%s",
+                    shop_id, phone)
+        return
 
     # 1b. A conversation that begins during a credit pause stays the owner's,
-    #     routed or not — see `wa_agent.hold_for_low_credit`. Individually
-    #     tolerant: a failed credit read must not cost the customer the menu.
+    #     routed or not — see `wa_agent.hold_for_low_credit`. When paused, stop
+    #     before classifying or sending the 3-button menu: offering "Prenotare"
+    #     when no agent will answer leaves the customer hanging. Individually
+    #     tolerant: a failed credit read must not crash the worker.
+    paused = False
     try:
-        await wa_agent.hold_for_low_credit(sender, row)
+        paused = bool(await wa_agent.hold_for_low_credit(sender, row))
     except Exception:  # noqa: BLE001
         logger.exception("whatsapp.credit_hold_failed shop=%s phone=%s",
                          shop_id, phone)
+    if paused:
+        logger.info("whatsapp.inbound_credit_paused shop=%s phone=%s",
+                    shop_id, phone)
+        return
+
+    history = await tq.inbound_history(shop_id, phone)
 
     # 2. Naming a request is a phase of the conversation, not a property of
     #    each message. Once this session has a verdict the handler owns it and

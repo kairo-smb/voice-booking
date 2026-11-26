@@ -506,25 +506,25 @@ catches `MetaError` around `_say` and stamps `outcome = 'escalated'`,
 worker's catch-all, the session stayed open with no outcome, and the thread
 read as the agent still handling it while nobody answered.
 
-**The credit pause (owner decision, 2026-09-29).** One threshold per shop, read
-by every surface. Below it the responder stands down but nothing else changes:
-the WABA stays connected, the classifier keeps naming requests while the
-balance is above zero, the routing menu still goes out, and a tap still labels
-the conversation — no agent answers it. `whatsapp_agent_enabled` is not
-touched, so the owner's preference survives the pause. The 20h nudge skips
-low shops too (`wa_nudge.should_nudge` reads `credit_low`). The empty basket
-keeps its own later path: marketing-engine's 402 → `no_credit`.
+**The credit pause (owner decision, 2026-09-29; updated 2026-11-26).** One threshold per shop, read
+by every surface. Below it the responder stands down and the inbound worker
+stops before classifying or sending the 3-button routing menu (offering
+"Prenotare" to a customer nobody will answer left them hanging). The WABA stays
+connected and `whatsapp_agent_enabled` is not touched, so the owner's
+preference survives the pause. Likewise, when `whatsapp_agent_enabled` is false
+the inbound worker stops right after audio transcription (so voice notes stay
+readable in the Inbox) and runs neither the classifier nor the routing menu.
+The 20h nudge skips low shops too (`wa_nudge.should_nudge` reads `credit_low`).
+The empty basket keeps its own later path: marketing-engine's 402 → `no_credit`.
 
 **A conversation that begins during the pause stays manual, routed or not.**
 `handle` only runs on a whitelisted intent, so the inbound worker also calls
-`wa_agent.hold_for_low_credit` on **every** message, before routing: for an
-opted-in shop that is low it opens the session and stamps
+`wa_agent.hold_for_low_credit` on **every** message for an opted-in shop, before
+routing: when the shop is low it opens the session, stamps
 `outcome_reason = 'low_credit'` (never over an existing escalation or a human
-reply), then the normal flow continues — the classifier still runs, the menu
-still goes out. Without it an unconfident first message (menu, intent NULL)
-would leave an unstamped session, and after a top-up the customer's tap on
-"Prenotare" in that same session would be answered. A failure in the hold is
-logged (`whatsapp.credit_hold_failed`) and never costs the customer the menu.
+reply), and returns `True` so `_process` exits immediately without classifying
+or sending the menu. A failure in the hold is logged
+(`whatsapp.credit_hold_failed`) and never crashes the worker.
 
 **The debounce is a sleep plus a re-read, not a per-thread timer.**
 `DEBOUNCE_SECONDS = 2.0`: people send "ciao" / "volevo prenotare" / "per

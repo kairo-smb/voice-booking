@@ -666,8 +666,8 @@ def stateful(wired, monkeypatch):
 async def test_an_unrouted_message_while_low_stamps_the_session(stateful,
                                                                monkeypatch):
     stateful.credit.result = {"balance": 9_000, "threshold": 10_000, "low": True}
-    monkeypatch.setattr(wa_inbound.triage, "classify",
-                        Spy({"intent": "booking", "confidence": 0.3}))
+    classify = Spy({"intent": "booking", "confidence": 0.3})
+    monkeypatch.setattr(wa_inbound.triage, "classify", classify)
     r = row(body="boh")
     stateful.history.result = [hist(r["id"])]
 
@@ -675,8 +675,9 @@ async def test_an_unrouted_message_while_low_stamps_the_session(stateful,
 
     assert stateful.mark_escalated.calls == [{"call_id": CALL,
                                               "reason": "low_credit"}]
-    # The normal flow still runs: the menu goes out, the classifier ran.
-    assert stateful.menu.count == 1
+    # During a credit pause, neither the classifier nor the 3-button menu fires.
+    assert classify.count == 0
+    assert stateful.menu.count == 0
 
 
 async def test_an_unconfident_session_opened_while_low_stays_manual_after_top_up(
@@ -855,6 +856,9 @@ async def test_a_routed_follow_up_message_still_reaches_the_agent(monkeypatch):
     handled: list = []
     r = row(body="sabato alle 10")
 
+    monkeypatch.setattr(wa_inbound.config_q, "get_config",
+                        Spy({"whatsapp_agent_enabled": True}))
+    monkeypatch.setattr(wa_inbound.wa_agent, "hold_for_low_credit", Spy(False))
     monkeypatch.setattr(wa_inbound.tq, "inbound_history",
                         Spy([hist(uuid4(), 5, intent="booking"), hist(r["id"])]))
     monkeypatch.setattr(wa_inbound.triage, "classify", Spy(None))
@@ -873,6 +877,9 @@ async def test_a_fresh_routed_message_reaches_the_agent(monkeypatch):
     handled: list = []
     r = row()
 
+    monkeypatch.setattr(wa_inbound.config_q, "get_config",
+                        Spy({"whatsapp_agent_enabled": True}))
+    monkeypatch.setattr(wa_inbound.wa_agent, "hold_for_low_credit", Spy(False))
     monkeypatch.setattr(wa_inbound.tq, "inbound_history", Spy([hist(r["id"])]))
     monkeypatch.setattr(wa_inbound.tq, "set_verdict", Spy(None))
     monkeypatch.setattr(wa_inbound.triage, "classify",
